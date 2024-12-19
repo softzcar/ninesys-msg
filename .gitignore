@@ -1,0 +1,45 @@
+# Node modules
+node_modules/
+npm-debug.log
+.yarn/
+.yarn-integrity
+pnpm-lock.yaml
+yarn.lock
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Next.js built files (if you are using Next.js in the future)
+.next/
+out/
+.next-cache/
+**/.next/
+
+# Gatsby built files (if you are using Gatsby in the future)
+.cache/
+public/
+
+# Docker
+.Dockerfile
+docker-compose.*
+docker.sock
+Docker/
+.dockerignore
+
+# VSCode
+.vscode/
+
+# htaccess
+.htaccess
