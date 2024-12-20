@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="es">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>MSG ninesys</title>
+        <style>
+            /* Estilos básicos para centrar el formulario */
+            body,
+            html {
+                height: 100%;
+                margin: 0;
+                font-family: Arial, sans-serif;
+            }
+
+            .container {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100%;
+            }
+
+            .login-form {
+                border: 1px solid #ccc;
+                padding: 20px;
+                border-radius: 10px;
+                width: 300px;
+            }
+
+            .login-form h2 {
+                text-align: center;
+            }
+
+            .login-form input {
+                width: 90%;
+                padding: 10px;
+                margin-bottom: 10px;
+            }
+
+            .login-form button {
+                width: 100%;
+                padding: 10px;
+                background-color: #4caf50;
+                color: white;
+                border: none;
+                cursor: pointer;
+            }
+
+            .login-form button:disabled {
+                background-color: #cccccc;
+            }
+            .custom-iframe {
+                border: none; /* Eliminar los bordes */
+                width: 300px; /* Ancho del iframe */
+                height: 300px; /* Alto del iframe */
+                overflow: hidden; /* Ocultar barras de desplazamiento */
+            }
+
+        </style>
+    </head>
+
+    <body>
+        <div class="container">
+            <form class="login-form" id="loginForm">
+                <h2>MSG ninesys v2</h2>
+                <input
+                    type="text"
+                    id="username"
+                    placeholder="Usuario"
+                    required
+                />
+                <input
+                    type="password"
+                    id="password"
+                    placeholder="Contraseña"
+                    required
+                />
+                <button type="submit" id="loginButton">Enviar</button>
+            </form>
+        </h2> 
+        <div>
+            <p id="msg"></p>
+            <iframe id="img-qr" class="custom-iframe" src="/noqr" width="278" height="278" title="qr"></iframe>
+        </div>
+        </div>
+
+        <script src="/js/login.js"></script>
+    </body>
+</html>
