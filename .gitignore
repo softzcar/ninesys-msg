@@ -32,7 +32,6 @@ out/
 public/
 
 # Docker
-.Dockerfile
 docker-compose.*
 docker.sock
 Docker/
