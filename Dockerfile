@@ -1,10 +1,7 @@
-# Instala las dependencias del sistema necesarias para Puppeteer
-RUN apt-get update && apt-get install -y \
-[root@ninesys public_html]# cat Dockerfile 
 # Usa una imagen base oficial de Node.js
 FROM node:18
 
-# Instala las dependencias del sistema necesarias para Puppeteer
+# Instala las dependencias del sistema necesarias para Puppeteer y Chromium
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     fonts-noto-color-emoji \
@@ -34,6 +31,9 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Instala Chromium para Puppeteer
+RUN apt-get update && apt-get install -y chromium && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Configura el directorio de trabajo
 WORKDIR /app
 
@@ -47,13 +47,11 @@ RUN npm install
 COPY . .
 
 # Establece la variable de entorno para deshabilitar la descarga de Chromium en Puppeteer
-ENV PUPPETEER_SKIP_DOWNLOAD=true
-
-# Instala manualmente Chromium (opcional si Puppeteer no lo incluye)
-RUN npm install puppeteer
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Expone el puerto de la aplicación
 EXPOSE 3200
 
 # Comando para iniciar la aplicación
-CMD ["node", "--no-sandbox", "app.js"]
+CMD ["node", "app.js"]
