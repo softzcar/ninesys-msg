@@ -30,7 +30,7 @@ router.post("/send-message", whatsappController.sendMessage)
  * - name
  * - message
  */
-app.post("/send-message-external", async (req, res) => {
+router.post("/send-message-external", async (req, res) => {
     const { phone, name, message } = req.body
     // Aquí va el código para enviar el mensaje utilizando la API
     try {
