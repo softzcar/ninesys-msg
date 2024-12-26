@@ -1,9 +1,17 @@
 const { Client, LocalAuth } = require("whatsapp-web.js")
 const qrcode = require("qrcode")
+const fs = require("fs")
+const path = require("path")
+
+// Verificamos que la carpeta de sesión existe o la creamos
+const sessionDir = path.join(__dirname, "session")
+if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir)
+}
 
 // Inicializamos el cliente de WhatsApp con persistencia de sesión
 const client = new Client({
-    authStrategy: new LocalAuth(), // Esto asegura que la sesión se persista
+    authStrategy: new LocalAuth({ dataPath: "session" }), // Esto asegura que la sesión se persista
 })
 
 global.whatsappReady = false // Inicialmente no está listo
@@ -40,6 +48,23 @@ client.on("auth_failure", (msg) => {
 client.on("disconnected", (reason) => {
     console.log("Cliente de WhatsApp desconectado:", reason)
     global.whatsappReady = false // Indicamos que el cliente no está listo
+})
+
+client.on("loading_screen", (percent, message) => {
+    console.log(`Cargando: ${percent}% - ${message}`)
+})
+
+client.on("change_state", (state) => {
+    console.log(`Estado del cliente cambiado a: ${state}`)
+})
+
+client.on("auth_failure", (msg) => {
+    console.error("Autenticación fallida", msg)
+})
+
+client.on("disconnected", (reason) => {
+    console.log("Cliente desconectado", reason)
+    client.initialize() // Intentamos volver a inicializar el cliente
 })
 
 // Iniciamos el cliente de WhatsApp
