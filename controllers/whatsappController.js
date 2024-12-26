@@ -1,8 +1,10 @@
-const { Client } = require("whatsapp-web.js")
+const { Client, LocalAuth } = require("whatsapp-web.js")
 const qrcode = require("qrcode")
 
-// Inicializamos el cliente de WhatsApp
-const client = new Client()
+// Inicializamos el cliente de WhatsApp con persistencia de sesión
+const client = new Client({
+    authStrategy: new LocalAuth(), // Esto asegura que la sesión se persista
+})
 
 global.whatsappReady = false // Inicialmente no está listo
 
@@ -23,6 +25,7 @@ client.on("qr", (qr) => {
 client.on("ready", () => {
     console.log("Cliente de WhatsApp listo. Ya puedes enviar mensajes.")
     global.whatsappReady = true // Indicamos que el cliente está listo
+    global.qrCodeImage = null // Eliminamos el QR ya que el cliente está listo
 })
 
 client.on("authenticated", () => {
@@ -31,11 +34,12 @@ client.on("authenticated", () => {
 
 client.on("auth_failure", (msg) => {
     console.error("Fallo en la autenticación:", msg)
+    global.whatsappReady = false // Indicamos que el cliente no está listo
 })
 
 client.on("disconnected", (reason) => {
     console.log("Cliente de WhatsApp desconectado:", reason)
-    global.whatsappReady = false // Resetear el estado si se desconecta
+    global.whatsappReady = false // Indicamos que el cliente no está listo
 })
 
 // Iniciamos el cliente de WhatsApp
@@ -60,9 +64,14 @@ exports.sendMessage = async (req, res) => {
 
     // Verificamos si el cliente de WhatsApp está listo
     if (!global.whatsappReady) {
+        console.error("Cliente de WhatsApp no está listo.")
         return res.status(500).json({
             message:
                 "El cliente de WhatsApp aún no está listo para enviar mensajes.",
+            debug: {
+                whatsappReady: global.whatsappReady,
+                qrCodeImage: global.qrCodeImage ? true : false, // Para saber si se generó el QR
+            },
         })
     }
 

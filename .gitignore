@@ -29,6 +29,8 @@ out/
 
 # Gatsby built files (if you are using Gatsby in the future)
 .cache/
+.wwebjs_cache/
+.wwebjs_auth/
 
 
 # Docker
