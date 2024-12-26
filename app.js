@@ -16,6 +16,7 @@ app.use(bodyParser.json())
 app.use("/", routes)
 
 const PORT = process.env.PORT || 3000
+const URL = process.env.APP_URL || "http://localhost:"
 app.listen(PORT, () => {
     console.log(`Servidor corriendo en el puerto ${PORT}`)
 })
