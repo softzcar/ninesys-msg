@@ -1,17 +1,22 @@
-const { Client, LocalAuth } = require("whatsapp-web.js")
+const { Client } = require("whatsapp-web.js")
 const qrcode = require("qrcode")
-const fs = require("fs")
-const path = require("path")
 
-// Verificamos que la carpeta de sesión existe o la creamos
-const sessionDir = path.join(__dirname, "session")
-if (!fs.existsSync(sessionDir)) {
-    fs.mkdirSync(sessionDir)
-}
-
-// Inicializamos el cliente de WhatsApp con persistencia de sesión
+// Inicializamos el cliente de WhatsApp con las opciones de Puppeteer
 const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: "session" }), // Esto asegura que la sesión se persista
+    puppeteer: {
+        headless: true, // Ejecutar en modo headless (sin interfaz gráfica)
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage", // CRUCIAL para VPS
+            "--disable-accelerated-2d-canvas",
+            "--no-first-run",
+            "--no-zygote",
+            "--single-process", // Prueba con y sin esta línea
+            //            '--disable-gpu',    // Prueba con y sin esta línea
+            "--window-size=1920,1080", // Establece el tamaño de la ventana
+        ],
+    },
 })
 
 global.whatsappReady = false // Inicialmente no está listo
@@ -33,11 +38,11 @@ client.on("qr", (qr) => {
 client.on("ready", () => {
     console.log("Cliente de WhatsApp listo. Ya puedes enviar mensajes.")
     global.whatsappReady = true // Indicamos que el cliente está listo
-    global.qrCodeImage = null // Eliminamos el QR ya que el cliente está listo
 })
 
 client.on("authenticated", () => {
     console.log("Cliente de WhatsApp autenticado correctamente.")
+    global.whatsappReady = true // Aseguramos que el cliente esté listo tras la autenticación
 })
 
 client.on("auth_failure", (msg) => {
@@ -48,23 +53,32 @@ client.on("auth_failure", (msg) => {
 client.on("disconnected", (reason) => {
     console.log("Cliente de WhatsApp desconectado:", reason)
     global.whatsappReady = false // Indicamos que el cliente no está listo
-})
-
-client.on("loading_screen", (percent, message) => {
-    console.log(`Cargando: ${percent}% - ${message}`)
+    client.initialize() // Intentamos volver a inicializar el cliente
 })
 
 client.on("change_state", (state) => {
     console.log(`Estado del cliente cambiado a: ${state}`)
+    if (state === "CONNECTED") {
+        global.whatsappReady = true
+    } else {
+        global.whatsappReady = false
+    }
 })
 
-client.on("auth_failure", (msg) => {
-    console.error("Autenticación fallida", msg)
+client.on("message", async (msg) => {
+    // console.log(`Mensaje recibido: ${msg.body}`);
+    try {
+        await client.sendMessage(msg.from, "Hola!")
+    } catch (error) {
+        console.error("Error al enviar el mensaje:", error) // Imprime el error
+        console.error("Stack trace:", error.stack) // Imprime la traza de la pila
+    }
 })
 
-client.on("disconnected", (reason) => {
-    console.log("Cliente desconectado", reason)
-    client.initialize() // Intentamos volver a inicializar el cliente
+client.on("message_ack", (msg, ack) => {
+    if (ack === 3) {
+        console.log(`Mensaje entregado: ${msg.body}`)
+    }
 })
 
 // Iniciamos el cliente de WhatsApp
@@ -108,6 +122,9 @@ exports.sendMessage = async (req, res) => {
     }
 
     try {
+        // Añadir un pequeño retraso antes de enviar el mensaje
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+
         const formattedPhone = `${phone}@c.us` // Formateamos el número de teléfono
         const fullMessage = `Hola ${name}, ${message}` // Componemos el mensaje con el nombre
 

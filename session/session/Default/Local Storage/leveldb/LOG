@@ -1,0 +1,6 @@
+2024/12/26-17:00:02.422 7707 Reusing MANIFEST /home/developer/Escritorio/niesys/msg_vps/session/session/Default/Local Storage/leveldb/MANIFEST-000001
+2024/12/26-17:00:02.424 7707 Recovering log #3
+2024/12/26-17:00:02.425 7707 Reusing old log /home/developer/Escritorio/niesys/msg_vps/session/session/Default/Local Storage/leveldb/000003.log 
+2024/12/27-04:00:48.101 f514 Level-0 table #5: started
+2024/12/27-04:00:48.105 f514 Level-0 table #5: 18549 bytes OK
+2024/12/27-04:00:48.109 f514 Delete type=0 #3

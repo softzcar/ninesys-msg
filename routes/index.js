@@ -57,6 +57,48 @@ router.post("/send-message-external", async (req, res) => {
         res.status(500).json({ error: "Error interno del servidor" })
     }
 })
+
+// Nuevo endpoint para recibir el JSON y generar el reporte en markdown
+router.post("/test-recibir", (req, res) => {
+    const { customer, orden, diseno, productos } = req.body
+    const reporte = ` Orden de Compra - Cliente: ${
+        customer.nombre
+    } ========================================== Información del Cliente ----------------------- - **Nombre Completo:** ${
+        customer.nombre
+    } - **Cédula:** ${customer.cedula} - **Teléfono:** ${
+        customer.telefono
+    } - **Email:** ${customer.email} - **Dirección:** ${
+        customer.direccion
+    } Detalles de la Orden -------------------- - **Estado de la Orden:** ${
+        orden[0].status
+    } - **Nombre del Cliente:** ${orden[0].cliente_nombre} - **Vendedor:** ${
+        orden[0].vendedor
+    } - **Fecha de Inicio:** ${orden[0].fecha_inicio} - **Fecha de Entrega:** ${
+        orden[0].fecha_entrega
+    } - **Observaciones:** ${
+        orden[0].observaciones
+    } Pagos ----- - **Pago Total:** $${
+        orden[0].pago_total
+    } - **Pago Abono:** $${orden[0].pago_abono} - **Pago Descuento:** $${
+        orden[0].pago_descuento
+    } Diseño ------ ${diseno
+        .map((d, index) => `${index + 1}. Tipo: ${d.tipo}`)
+        .join("\n")} Productos (Total: ${
+        productos.length
+    }) -------------------- ${productos
+        .map(
+            (producto, index) =>
+                ` ${index + 1}. **Nombre:** ${producto.name} - **Código:** ${
+                    producto.cod || "N/A"
+                } - **Cantidad:** ${producto.cantidad} - **Talla:** ${
+                    producto.talla || "N/A"
+                } - **Tela:** ${producto.tela || "N/A"} - **Corte:** ${
+                    producto.corte
+                } - **Precio:** $${producto.precio} `
+        )
+        .join("\n")} `
+    res.send(reporte)
+})
 // Ruta para enviar un mensaje recibiendo datos desde una llaada externa:
 
 // router.post("/login", authenticateToken)

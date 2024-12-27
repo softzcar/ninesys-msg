@@ -1,0 +1,12 @@
+version: '3'
+services:
+  app:
+    image: msg-ninesys
+    build:
+      context: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./wwebjs_auth:/app/.wwebjs_auth
+      - ./wwebjs_cache:/app/.wwebjs_cache
+    command: npm start
