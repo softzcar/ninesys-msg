@@ -1,110 +1,175 @@
-const express = require("express")
-const router = express.Router()
-// const authController = require("../controllers/authController")
-const whatsappController = require("../controllers/whatsappController")
-const authenticateToken = require("../middleware/authenticateToken")
+const express = require("express");
+const cors = require('cors');
+const pm2 = require('pm2'); // Mantenemos pm2 si la ruta de reinicio del servidor es necesaria
 
+const router = express.Router();
+
+// Configuración más segura para permitir solo peticiones desde tu frontend (ajusta 'origin' según tu necesidad)
+const corsOptions = {
+    origin: '*', //< --Comodín para permitir cualquier origen
+};
+/* const corsOptions = {
+    origin: 'http://localhost:3005', // Reemplaza con el origen de tu frontend en producción
+}; */
+router.use(cors(corsOptions));
+
+// Importamos solo las funciones necesarias del controlador
+const {
+    getSessionInfo,
+    showQRCode, // Para la ruta que muestra la imagen HTML
+    showQRCodeBasic, // Para la ruta que devuelve el base64 JSON
+    sendMessage,
+    sendMessageCustom,
+    sendTemplateMessage,
+    sendDirectMessage,
+    getConnectedClients,
+    getChatsByCompanyId,
+    restartClientByCompanyId,
+    disconnectClientByCompanyId,
+    // initializeClient ya no se importa aquí porque se usa internamente en el controlador
+} = require("../controllers/whatsappController");
+
+// Ruta principal
 router.get("/", (req, res) => {
-    // res.json({ name: 'NTMSG API', version: '1.0.0', login: loginUrl });
-    res.sendFile("login.html", { root: "./public" })
-})
-
-router.get("/send", (req, res) => {
-    res.sendFile("send.html", { root: "./public" })
-})
-
-// Se muestra en luagr del codigo cuando aún no se han proporcionado credebciales válidas.
-router.get("/noqr", (req, res) => {
-    res.sendFile("nocode.html", { root: "./public" })
-})
-
-router.get("/qr", whatsappController.showQRCode)
-
-// Ruta para enviar un mensaje desde un formulario local
-router.post("/send-message", whatsappController.sendMessage)
+    res.sendFile("login.html", { root: "./public" });
+});
 
 /**
- * Ruta para enviar mensajes desde la api externa
- * los datos necesarios par el evío de el mensaje son los mismos que los de el formualrio local
- * - phone
- * - name
- * - message
+ * Obtener la lista de todos los clientes y su estatus de conectado
  */
-router.post("/send-message-external", async (req, res) => {
-    const { phone, name, message } = req.body
-    // Aquí va el código para enviar el mensaje utilizando la API
-    try {
-        const response = await fetch(
-            `${process.env.APP_URL}${process.env.PORT}`,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${process.env.JWT_SECRET}`,
-                },
-                body: JSON.stringify({ phone, name, message }),
-            }
-        )
-        const data = await response.json()
-        if (response.ok) {
-            res.json({ message: data.message || "Mensaje enviado con éxito" })
-        } else {
-            res.status(response.status).json({
-                error: data.error || "Error al enviar el mensaje",
-            })
+router.get("/connected-clients", getConnectedClients);
+
+/**
+ * Obtenr los chats con el último mensase para un cliente
+ */
+router.get("/chats/:companyId", getChatsByCompanyId);
+
+/**
+ * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)
+ */
+router.post("/restart/:companyId", restartClientByCompanyId);
+
+/**
+ * Desconectar servicio para un cliente especifico (DELETE para acciones de eliminación/desconexión)
+ */
+router.delete("/disconnect/:companyId", disconnectClientByCompanyId);
+
+/**
+ * Restart Server usando PM2 (POST para acciones que cambian estado del servidor)
+ */
+router.post('/restart-server', (req, res) => {
+    console.log('Recibida petición para reiniciar el servidor usando PM2.');
+
+    pm2.connect(err => {
+        if (err) {
+            console.error('Error al conectar con PM2:', err);
+            return res.status(500).json({ error: 'Error al conectar con el administrador de procesos.' });
         }
+
+        // 'ntmsg-app' es el nombre con el que registraste tu aplicación en PM2
+        pm2.restart('ntmsg-app', (err, proc) => {
+            pm2.disconnect(); // Desconectar de PM2 después de la operación
+            if (err) {
+                console.error('Error al reiniciar la aplicación con PM2:', err);
+                return res.status(500).json({ error: 'Error al reiniciar la aplicación con PM2.' });
+            }
+            // La respuesta se envía inmediatamente después de solicitar el reinicio a PM2
+            res.status(200).json({ message: 'Se ha solicitado el reinicio de la aplicación a través de PM2.' });
+        });
+    });
+});
+
+/**
+ * Obtener informacion de cliente por ID (estado, QR si aplica, etc.)
+ */
+router.get("/session-info/:companyId", async (req, res) => {
+    const { companyId } = req.params;
+    try {
+        // getSessionInfo ya maneja la inicialización si el cliente no existe y la espera
+        const sessionInfo = await getSessionInfo(companyId);
+        if (sessionInfo.error) {
+            // Si getSessionInfo devuelve un error explícito, lo reportamos con un código 500
+            return res.status(500).json(sessionInfo);
+        }
+        res.status(200).json(sessionInfo); // Enviar siempre JSON con el estado
     } catch (error) {
-        res.status(500).json({ error: "Error interno del servidor" })
+        console.error(`Error en ruta /session-info/${companyId}:`, error);
+        res.status(500).json({
+            message: "Error al obtener información de la sesión",
+            error: error.message
+        });
     }
-})
+});
 
-// Nuevo endpoint para recibir el JSON y generar el reporte en markdown
+/**
+ * Formulario para el envío de mensajes (ejemplo básico si tienes send.html)
+ */
+router.get("/send", (req, res) => {
+    res.sendFile("send.html", { root: "./public" });
+});
+
+/**
+ * Página para indicar que no hay QR (ejemplo básico si tienes nocode.html)
+ */
+router.get("/noqr", (req, res) => {
+    res.sendFile("nocode.html", { root: "./public" });
+});
+
+/**
+ * Obtener base64 del codigo QR por ID de Cliente en formato JSON
+ */
+router.get("/qr/64/:companyId", (req, res) => {
+    const { companyId } = req.params;
+    const qrCodeBase64 = showQRCodeBasic(companyId); // Usamos la función utility que retorna solo el base64
+
+    if (qrCodeBase64 && qrCodeBase64.startsWith('data:image/png;base64,')) {
+        res.status(200).json({ qr: qrCodeBase64 }); // Enviar el base64 en un objeto JSON
+    } else {
+        // Si no hay QR disponible (cliente listo, error, o no inicializado/esperando)
+        res.status(404).json({ message: qrCodeBase64 }); // Enviar el mensaje de estado en JSON
+    }
+});
+
+/**
+ * Obtener la imágen del codigo QR por ID de Cliente (en formato HTML para mostrar en navegador)
+ */
+router.get("/qr/:companyId", showQRCode); // showQRCode ya maneja req, res
+
+/**
+ * Enviar mensaje básico (POST)
+ */
+router.post("/send-message-basic/:companyId", sendMessage); // sendMessage ya maneja req, res
+
+/**
+ * Enviar mensaje personalizado, sin usar templates
+ */
+router.post("/send-message-custom/:companyId", sendMessageCustom); // sendMessage ya maneja req, res
+
+/**
+ * Enviar mensaje usando plantilla (POST)
+ */
+router.post("/send-message/:companyId", sendTemplateMessage); // sendTemplateMessage ya maneja req, res
+
+// --- NUEVA RUTA PARA ENVIAR MENSAJE DIRECTO ---
+/**
+ * @route POST /send-direct-message/:companyId
+ * @description Envía un mensaje directo a un número de teléfono específico.
+ * @access public (o protegido, según tu configuración de autenticación/autorización)
+ * @param {string} companyId - El ID de la compañía (instancia de WhatsApp).
+ * @body {string} phone - El número de teléfono del destinatario (sin @c.us).
+ * @body {string} message - El contenido del mensaje a enviar.
+ * @returns {object} 200 - Mensaje enviado exitosamente.
+ * @returns {object} 400 - Faltan parámetros o son inválidos.
+ * @returns {object} 503 - Cliente de WhatsApp no listo.
+ * @returns {object} 500 - Error interno del servidor.
+ */
+router.post("/send-direct-message/:companyId", sendDirectMessage);
+
+
+// Ruta de prueba simple
 router.post("/test-recibir", (req, res) => {
-    const { customer, orden, diseno, productos } = req.body
-    const reporte = ` Orden de Compra - Cliente: ${
-        customer.nombre
-    } ========================================== Información del Cliente ----------------------- - **Nombre Completo:** ${
-        customer.nombre
-    } - **Cédula:** ${customer.cedula} - **Teléfono:** ${
-        customer.telefono
-    } - **Email:** ${customer.email} - **Dirección:** ${
-        customer.direccion
-    } Detalles de la Orden -------------------- - **Estado de la Orden:** ${
-        orden[0].status
-    } - **Nombre del Cliente:** ${orden[0].cliente_nombre} - **Vendedor:** ${
-        orden[0].vendedor
-    } - **Fecha de Inicio:** ${orden[0].fecha_inicio} - **Fecha de Entrega:** ${
-        orden[0].fecha_entrega
-    } - **Observaciones:** ${
-        orden[0].observaciones
-    } Pagos ----- - **Pago Total:** $${
-        orden[0].pago_total
-    } - **Pago Abono:** $${orden[0].pago_abono} - **Pago Descuento:** $${
-        orden[0].pago_descuento
-    } Diseño ------ ${diseno
-        .map((d, index) => `${index + 1}. Tipo: ${d.tipo}`)
-        .join("\n")} Productos (Total: ${
-        productos.length
-    }) -------------------- ${productos
-        .map(
-            (producto, index) =>
-                ` ${index + 1}. **Nombre:** ${producto.name} - **Código:** ${
-                    producto.cod || "N/A"
-                } - **Cantidad:** ${producto.cantidad} - **Talla:** ${
-                    producto.talla || "N/A"
-                } - **Tela:** ${producto.tela || "N/A"} - **Corte:** ${
-                    producto.corte
-                } - **Precio:** $${producto.precio} `
-        )
-        .join("\n")} `
-    res.send(reporte)
-})
-// Ruta para enviar un mensaje recibiendo datos desde una llaada externa:
+    console.log("Received test data:", req.body);
+    res.status(200).json({ received: req.body, status: "ok" });
+});
 
-// router.post("/login", authenticateToken)
-// router.post("/login", authenticateToken)
-
-// router.get("/qr", authenticateToken, whatsappController.showQRCode)
-// router.get('/qr', authenticateToken, authenticateToken);
-
-module.exports = router
+module.exports = router;

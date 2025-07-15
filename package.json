@@ -7,22 +7,27 @@
         "test": "echo \"Error: no test specified\" && exit 1",
         "start": "node app.js",
         "dev": "nodemon app.js",
-        "stop": "pkill -f 'node app.js'"
+        "stop": "pm2 stop ntmsg-app",
+        "pm2": "pm2 start app.js --name \"ntmsg-app\"",
+        "pm2-logs": "pm2 logs ntmsg-app",
+        "pm2-monit": "pm2 monit"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "axios": "^1.7.7",
+        "axios": "^1.9.0",
         "body-parser": "^1.20.3",
+        "cors": "^2.8.5",
         "dotenv": "^16.4.5",
         "express": "^4.21.0",
         "jsonwebtoken": "^9.0.2",
         "mysql2": "^3.11.2",
         "nodemailer": "^6.9.15",
+        "pm2": "^6.0.5",
         "puppeteer": "^23.3.0",
         "qrcode": "^1.5.4",
-        "whatsapp-web.js": "^1.25.0"
+        "whatsapp-web.js": "^1.31.1-alpha.0"
     },
     "devDependencies": {
         "nodemon": "^3.1.4"
