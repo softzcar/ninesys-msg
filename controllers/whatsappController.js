@@ -719,12 +719,7 @@ const sendDirectMessage = async (req, res) => {
     const { companyId } = req.params; // ID_EMPRESA viene de la URL
     const { phone, message } = req.body; // Teléfono y mensaje vienen del cuerpo de la petición
 
-    console.log(`Recibida petición para enviar mensaje directo para companyId: ${companyId}`);
-    console.log(`Datos recibidos: phone='${phone}', message='${message}'`);
-
-
     if (!clients[companyId] || !clients[companyId].whatsappReady) {
-        console.error(`Cliente de WhatsApp no está listo para ${companyId} al intentar enviar mensaje directo.`);
         return res.status(503).json({ // 503 Service Unavailable
             success: false,
             message: `El cliente de WhatsApp para la compañía ${companyId} no está listo o no está conectado.`,
@@ -732,52 +727,34 @@ const sendDirectMessage = async (req, res) => {
     }
 
     if (!phone || !message) {
-        console.error("Faltan parámetros para sendDirectMessage: 'phone' y/o 'message'.");
         return res.status(400).json({
             success: false,
-            message: "Faltan parámetros obligatorios: 'phone' (número de teléfono) y 'message' (contenido del mensaje).",
-            received_phone: phone,
-            received_message: message,
+            message: "Faltan parámetros obligatorios: 'phone' y 'message'.",
         });
     }
 
-    // Validar que el teléfono sea solo números y tenga una longitud razonable (opcional pero recomendado)
-    if (!/^\d+$/.test(phone) || phone.length < 7 || phone.length > 15) {
-        console.error(`Número de teléfono inválido: ${phone}`);
-        return res.status(400).json({
-            success: false,
-            message: "El formato del número de teléfono es inválido. Debe contener solo números y tener una longitud adecuada.",
-            phone: phone,
-        });
-    }
-
-    const formattedPhone = `${phone}@c.us`; // Formato necesario para whatsapp-web.js
-    const fullMessage = message; // El mensaje se envía tal cual se recibe
+    const formattedPhone = `${phone}@c.us`;
 
     try {
-        console.log(`Intentando enviar mensaje directo a ${formattedPhone} para ${companyId}: "${fullMessage}"`);
+        console.log(`Intentando enviar mensaje a ${formattedPhone} para ${companyId} (Fire and Forget).`);
 
-        // Opcional: Verificar si el chat existe (puede ser útil para logs, pero sendMessage funciona igual)
-        const chat = await clients[companyId].client.getChatById(formattedPhone);
-        if (!chat) {
-            console.warn(`El chat con ${formattedPhone} no existe para ${companyId}. Se intentará enviar de todos modos (WhatsApp Web JS usualmente crea el chat).`);
-        } else {
-            console.log(`Chat con ${formattedPhone} encontrado para ${companyId}.`);
-        }
+        // NO USAMOS AWAIT para evitar el bug de la librería que ocurre después de enviar.
+        clients[companyId].client.sendMessage(formattedPhone, message);
 
-        await clients[companyId].client.sendMessage(formattedPhone, fullMessage);
-        console.log(`Mensaje directo enviado exitosamente a ${formattedPhone} para ${companyId}.`);
-
+        // Asumimos éxito y respondemos inmediatamente.
+        console.log(`Mensaje para ${formattedPhone} despachado. Respondiendo con éxito.`);
         res.status(200).json({
             success: true,
-            message: `Mensaje enviado exitosamente al número ${phone} para la compañía ${companyId}.`,
+            message: `Mensaje para el número ${phone} ha sido despachado exitosamente.`,
         });
+
     } catch (error) {
-        console.error(`Error al enviar el mensaje directo para ${companyId} a ${formattedPhone}:`, error);
+        // Este bloque ahora solo capturará errores síncronos inmediatos, no el fallo de la promesa.
+        console.error(`Error síncrono al intentar despachar el mensaje para ${companyId} a ${formattedPhone}:`, error);
         res.status(500).json({
             success: false,
-            message: "Error interno al intentar enviar el mensaje.",
-            error: error.message, // Es buena práctica no exponer detalles internos del error en producción
+            message: "Error interno al intentar despachar el mensaje.",
+            error: error.message,
         });
     }
 };
