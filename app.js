@@ -1,5 +1,9 @@
 require("dotenv").config(); // Cargar variables de entorno al principio
 
+// Aumentar el límite de listeners para evitar la advertencia de memoria
+// Esto es útil cuando se inicializan múltiples clientes que registran eventos en el proceso principal
+process.setMaxListeners(0);
+
 const express = require("express");
 const path = require("path");
 // require("dotenv").config(); // Esta importación está duplicada, la eliminamos

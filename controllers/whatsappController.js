@@ -401,7 +401,7 @@ const sendMessageCustom = async (req, res) => {
 // Envía un mensaje usando plantillas predefinidas
 const sendTemplateMessage = async (req, res) => {
     const { companyId } = req.params;
-    const { data } = req.body; // data debe contener phone_client, template y otros campos para la plantilla
+    const data = req.body; // El cuerpo completo de la solicitud es el objeto de datos
 
     // Nota: Aquí se mantenía la inicialización si el cliente no existía.
     // Si quieres que la inicialización sea un paso separado (ej: ruta POST /initialize/:companyId),
@@ -424,13 +424,13 @@ const sendTemplateMessage = async (req, res) => {
     }
 
 
-    if (!data || !data.phone_client || !data.template) {
+    if (!data.phone_client || !data.template) {
         return res.status(400).json({
-            message: "Faltan parámetros: 'data' en el cuerpo, 'phone_client' y 'template' dentro de 'data'.",
+            message: "Faltan parámetros en el cuerpo de la solicitud: se requieren 'phone_client' y 'template'.",
         });
     }
 
-    const formattedPhone = `${data.phone_client} @c.us`;
+    const formattedPhone = `${data.phone_client}@c.us`;
     const templateName = data.template;
 
     let fullMessage;
