@@ -250,7 +250,7 @@ const disconnectClientByCompanyId = async (req, res) => {
         }
 
         res.status(200).json({
-            message: `Servicio de WhatsApp desconectado y autenticación local eliminada para la compañía ${companyId}.`,
+            message: `Servicio de WhatsApp desconectado y autenticación local eliminada para la compañía ${companyId}.`
         });
     } catch (error) {
         console.error(
@@ -261,6 +261,51 @@ const disconnectClientByCompanyId = async (req, res) => {
         // Reportamos el error original del logout.
         res.status(500).json({
             message: `Error al desconectar el servicio de WhatsApp para la compañía ${companyId}. Es posible que deba limpiar manualmente.`,
+            error: error.toString(),
+        });
+    }
+};
+
+// --- NUEVA FUNCIÓN PARA ELIMINAR COMPLETAMENTE UN CLIENTE ---
+const deleteClientByCompanyId = async (req, res) => {
+    const { companyId } = req.params;
+
+    if (!clients[companyId]) {
+        return res.status(404).json({
+            message: `No se encontró registro de un cliente para la compañía ${companyId}.`,
+        });
+    }
+
+    try {
+        console.log(`Intentando eliminar por completo el cliente y la sesión para ${companyId}.`);
+
+        // 1. Desconectar y destruir la instancia del cliente si existe
+        if (clients[companyId].client) {
+            await clients[companyId].client.destroy(); // Usar destroy para una limpieza más profunda
+            console.log(`Instancia del cliente destruida para ${companyId}.`);
+        }
+
+        // 2. Eliminar la carpeta de sesión
+        const sessionFolderPath = path.join(__dirname, '..', '.wwebjs_auth', `session-${companyId}`);
+        try {
+            await fs.rm(sessionFolderPath, { recursive: true, force: true });
+            console.log(`Archivos de sesión eliminados para ${companyId} en: ${sessionFolderPath}`);
+        } catch (err) {
+            console.warn(`Advertencia: Error al intentar eliminar la carpeta de sesión para ${companyId}:`, err);
+        }
+
+        // 3. Eliminar la entrada completa del objeto de clientes en memoria
+        delete clients[companyId];
+        console.log(`Entrada en memoria para ${companyId} eliminada.`);
+
+        res.status(200).json({
+            message: `Cliente para la compañía ${companyId} eliminado por completo (sesión y datos en memoria).`,
+        });
+
+    } catch (error) {
+        console.error(`Error al eliminar completamente el cliente para ${companyId}:`, error);
+        res.status(500).json({
+            message: `Error al eliminar el cliente para la compañía ${companyId}.`,
             error: error.toString(),
         });
     }
@@ -574,27 +619,41 @@ const getSessionInfo = async (companyId) => {
 // Obtiene una lista del estado de todos los clientes registrados
 const getConnectedClients = async (req, res) => {
     try {
-        const allClientsInfo = Object.keys(clients).map(companyId => {
+        const clientPromises = Object.keys(clients).map(async (companyId) => {
             const clientData = clients[companyId];
-            // Intenta obtener el estado actual del cliente si la instancia existe
             const clientState = clientData && clientData.client ? clientData.client.state : 'UNINITIALIZED';
             const errorMessage = clientData && clientData.error ? clientData.error.message : null;
+
+            let phoneNumber = null;
+            let pushname = null;
+
+            if (clientData && clientData.whatsappReady && clientData.client) {
+                try {
+                    const info = await clientData.client.info;
+                    phoneNumber = info.wid.user;
+                    pushname = info.pushname;
+                } catch (infoError) {
+                    console.error(`Could not get client info for ${companyId}:`, infoError);
+                }
+            }
 
             return {
                 company_id: companyId,
                 whatsapp_ready: clientData ? clientData.whatsappReady : false,
                 status_detail: clientData ? (clientData.whatsappReady ? 'READY' : (clientData.qrCodeImage ? 'REQUIRES_QR' : (errorMessage ? 'ERROR' : (clientState === 'UNINITIALIZED' ? 'STARTING' : clientState)))) : 'NOT_REGISTERED',
                 error_message: errorMessage,
-                actions: companyId, // Placeholder for actions in frontend
-                // Puedes agregar más información relevante si lo deseas
+                phoneNumber: phoneNumber,
+                pushname: pushname,
             };
         });
 
+        const allClientsInfo = await Promise.all(clientPromises);
+
         res.status(200).json(allClientsInfo);
     } catch (error) {
-        console.error("Error al obtener la lista de clientes (conectados y desconectados):", error);
+        console.error("Error al obtener la lista de clientes:", error);
         res.status(500).json({
-            message: "Error al obtener la lista de clientes (conectados y desconectados)",
+            message: "Error al obtener la lista de clientes",
             error: error.message,
         });
     }
@@ -773,4 +832,5 @@ module.exports = {
     getChatsByCompanyId,
     restartClientByCompanyId,
     disconnectClientByCompanyId,
+    deleteClientByCompanyId, // Exportar la nueva función
 };

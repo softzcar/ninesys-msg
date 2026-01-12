@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestor de Conexiones WhatsApp</title>
+    <style>
+    body { font-family: sans-serif; margin: 2em; background-color: #333; color: #f1f1f1; }
+    h1, h2 { color: #f1f1f1; border-bottom: 1px solid #555; padding-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1em; }
+    th, td { border: 1px solid #555; padding: 12px; text-align: left; }
+    th { background-color: #444; color: white; }
+    tr:nth-child(even) { background-color: #3c3c3c; }
+    .status-ready { color: #4CAF50; font-weight: bold; }
+    .status-requires_qr { color: #ff9800; font-weight: bold; }
+    .status-error { color: #f44336; font-weight: bold; }
+    .status-starting { color: #2196F3; font-weight: bold; }
+    button { 
+        padding: 8px 12px; 
+        cursor: pointer; 
+        border: none; 
+        border-radius: 4px; 
+        background-color: #4CAF50; 
+        color: white;
+        margin-right: 5px;
+    }
+    button:hover { opacity: 0.9; }
+    input[type="text"] {
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #666;
+        background-color: #555;
+        color: #f1f1f1;
+    }
+    #add-client { margin-top: 2em; }
+    #qr-modal {
+        display: none; position: fixed; z-index: 1; left: 0; top: 0;
+        width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.7);
+        padding-top: 60px;
+    }
+    #qr-modal-content {
+        background-color: #444; margin: 5% auto; padding: 20px;
+        border: 1px solid #888; width: 80%; max-width: 400px; text-align: center;
+        border-radius: 8px;
+    }
+    .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+    .close:hover, .close:focus { color: white; text-decoration: none; }
+    #status-legend,
+    #add-client-docs {
+        border: 1px solid #555;
+        padding: 15px;
+        border-radius: 8px;
+        background-color: #3c3c3c;
+        margin-top: 2em;
+    }
+    #add-client-docs p { margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h1>Gestor de Conexiones WhatsApp</h1>
+        <button id="logout-button" style="background-color: #f44336;">Salir</button>
+    </div>
+
+    <div id="server-status-container" style="display: flex; justify-content: space-around; background-color: #3c3c3c; padding: 15px; border-radius: 8px; margin-top: 1em;">
+        <div><strong>Estado del Servidor:</strong> <span id="server-status">Cargando...</span></div>
+        <div><strong>Uso de CPU:</strong> <span id="server-cpu">Cargando...</span> %</div>
+        <div><strong>Uso de Memoria:</strong> <span id="server-memory">Cargando...</span> MB</div>
+    </div>
+
+    <div id="general-actions" style="margin-top: 2em;">
+        <h2>Acciones Generales</h2>
+        <button id="restart-server-button" style="background-color: #ff9800;">Reiniciar Servidor PM2</button>
+    </div>
+
+    <div id="send-message-section" style="margin-top: 2em;">
+        <h2>Enviar Mensaje de Prueba</h2>
+        <form id="send-message-form">
+            <div style="display: flex; gap: 15px; align-items: flex-end;">
+                <div style="flex-grow: 1;">
+                    <label for="client-select">Desde Cliente (Company ID):</label>
+                    <select id="client-select" name="client-select" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #666; background-color: #555; color: #f1f1f1;">
+                        <!-- Opciones de cliente se llenarán dinámicamente -->
+                    </select>
+                </div>
+                <div style="flex-grow: 2;">
+                    <label for="phone-input">Número de Teléfono (con código de país):</label>
+                    <input type="text" id="phone-input" placeholder="Ej: 5211234567890" style="width: 100%;">
+                </div>
+            </div>
+            <div style="margin-top: 15px;">
+                <label for="message-input">Mensaje:</label>
+                <textarea id="message-input" rows="3" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #666; background-color: #555; color: #f1f1f1; box-sizing: border-box;"></textarea>
+            </div>
+            <button type="submit" style="margin-top: 15px;">Enviar Mensaje</button>
+        </form>
+    </div>
+
+    <div id="status-legend" style="margin-top: 2em;">
+        <h2>Leyenda de Estados</h2>
+        <ul style="list-style-type: none; padding: 0;">
+            <li><strong class="status-ready">READY:</strong> El cliente está conectado y listo para enviar mensajes.</li>
+            <li><strong class="status-requires_qr">REQUIRES_QR:</strong> El cliente necesita que escanees el código QR para autenticarse. Haz clic en "Ver / QR".</li>
+            <li><strong class="status-error">ERROR:</strong> Hubo un error con el cliente. Revisa los logs e intenta reiniciarlo.</li>
+            <li><strong class="status-starting">STARTING:</strong> El cliente se está inicializando.</li>
+            <li><strong>Otros:</strong> Estados intermedios como OPENING, PAIRING, etc., que ocurren durante el proceso de conexión.</li>
+        </ul>
+    </div>
+
+    <div id="add-client-docs" style="margin-top: 2em;">
+        <p>Usa la siguiente sección para inicializar una nueva conexión o para consultar el estado de una existente. Si el <strong>Company ID</strong> no existe, el sistema intentará crear una nueva sesión y te mostrará un código QR. Si ya existe, simplemente te mostrará su estado actual.</p>
+    </div>
+
+    <div id="add-client">
+        <h2>Añadir o Consultar Cliente</h2>
+        <input type="text" id="new-client-id" placeholder="Introduce el Company ID">
+        <button id="add-client-button">Añadir / Consultar</button>
+    </div>
+
+    <h2>Clientes Activos</h2>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <p><small>Última actualización: <span id="last-updated">Nunca</span></small></p>
+            <button id="toggle-refresh">Pausar</button>
+        </div>
+        <input type="text" id="search-input" placeholder="Buscar por Company ID...">
+    </div>
+    <table id="clients-table">
+        <thead>
+            <tr>
+                <th>Company ID</th>
+                <th>Número</th>
+                <th>Nombre</th>
+                <th>Estado</th>
+                <th>Mensaje de Error</th>
+                <th>Acciones</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Las filas de clientes se insertarán aquí dinámicamente -->
+        </tbody>
+    </table>
+
+    <!-- Modal para mostrar el código QR -->
+    <div id="qr-modal">
+        <div id="qr-modal-content">
+            <span id="close-modal-button" class="close">&times;</span>
+            <h2 id="qr-client-id"></h2>
+            <div id="qr-code-container"></div>
+            <p>Escanea este código con tu WhatsApp.</p>
+        </div>
+    </div>
+
+    <!-- Modal para mostrar los chats recientes -->
+    <div id="chats-modal" style="display: none; position: fixed; z-index: 2; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.7);">
+        <div id="chats-modal-content" style="background-color: #444; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 80%; max-width: 600px; border-radius: 8px;">
+            <span id="close-chats-modal-button" class="close">&times;</span>
+            <h2 id="chats-client-id"></h2>
+            <div id="chats-list-container" style="max-height: 60vh; overflow-y: auto; text-align: left;">
+                <!-- La lista de chats se insertará aquí -->
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

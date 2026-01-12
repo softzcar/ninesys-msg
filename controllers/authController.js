@@ -43,3 +43,22 @@ exports.verifyCredentials = async (req, res) => {
         res.status(500).json({ message: 'Error en la verificación de credenciales', error: error });
     }
 };
+
+exports.loginManager = (req, res) => {
+    const { username, password } = req.body;
+
+    if (username === 'admin' && password === 'Ninesys@2024') {
+        try {
+            if (!process.env.JWT_SECRET) {
+                throw new Error('JWT_SECRET no está definido en las variables de entorno');
+            }
+            const token = jwt.sign({ user: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
+            res.status(200).json({ token });
+        } catch (error) {
+            console.error('Error al generar el token para el gestor:', error);
+            res.status(500).json({ message: 'Error interno al generar el token.' });
+        }
+    } else {
+        res.status(401).json({ message: 'Credenciales incorrectas.' });
+    }
+};
