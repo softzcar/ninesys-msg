@@ -10,10 +10,6 @@ const path = require('path');
 // La estructura será clients = { 'companyId1': { client: ClientInstance, whatsappReady: boolean, qrCodeImage: string | null, error?: Error }, ... }
 const clients = {};
 
-// --- CONFIGURACIÓN DE LÍMITE DE QR ---
-const QR_ATTEMPT_LIMIT = 5;      // Máximo QRs antes de pausar sesión
-const QR_COOLDOWN_MS = 300000;   // 5 minutos de cooldown
-
 // --- Función para inicializar un cliente (ya existente, ligeramente mejorada) ---
 const initializeClient = (companyId) => {
     console.log(`Intentando inicializar/registrar cliente para companyId: ${companyId}`);
@@ -28,7 +24,7 @@ const initializeClient = (companyId) => {
 
     // Si no existe la entrada o no tiene instancia activa, preparamos o limpiamos la entrada
     if (!clients[companyId]) {
-        clients[companyId] = { whatsappReady: false, qrCodeImage: null, client: null, qrAttempts: 0, pausedUntil: null };
+        clients[companyId] = { whatsappReady: false, qrCodeImage: null, client: null };
         console.log(`Creando entrada inicial en memoria para companyId: ${companyId}.`);
     } else {
         // Limpiar estado anterior si existía la entrada pero no la instancia activa (ej: después de un disconnect o error)
@@ -60,43 +56,22 @@ const initializeClient = (companyId) => {
 
     clients[companyId].client = client; // Guardar la instancia del nuevo cliente
 
-    // --- Listener QR con límite de intentos ---
+    // --- Configuración de Listeners (igual que antes) ---
     client.on("qr", (qr) => {
-        // Verificar si sesión está pausada
-        if (clients[companyId] && clients[companyId].pausedUntil && Date.now() < clients[companyId].pausedUntil) {
-            console.log(`[PAUSED] Sesión ${companyId} pausada. Ignorando QR hasta ${new Date(clients[companyId].pausedUntil).toISOString()}`);
-            return;
-        }
-
-        // Incrementar contador de intentos
-        if (clients[companyId]) {
-            clients[companyId].qrAttempts = (clients[companyId].qrAttempts || 0) + 1;
-
-            // Verificar si se alcanzó el límite
-            if (clients[companyId].qrAttempts > QR_ATTEMPT_LIMIT) {
-                console.warn(`[LIMIT] Sesión ${companyId} alcanzó límite de ${QR_ATTEMPT_LIMIT} QRs. Pausando por ${QR_COOLDOWN_MS / 60000} minutos.`);
-                clients[companyId].pausedUntil = Date.now() + QR_COOLDOWN_MS;
-                clients[companyId].qrCodeImage = null;
-                clients[companyId].qrAttempts = 0; // Reset para próximo ciclo
-
-                // Destruir cliente para liberar recursos
-                if (clients[companyId].client) {
-                    clients[companyId].client.destroy().catch(e => console.error(`Error destroying client ${companyId}:`, e));
-                    delete clients[companyId].client;
-                }
-                return;
-            }
-        }
-
-        // Generar QR normalmente
-        console.log(`[QR ${clients[companyId] ? clients[companyId].qrAttempts : 1}/${QR_ATTEMPT_LIMIT}] Generando QR para ${companyId}`);
-
+        console.log(`Evento QR recibido para ${companyId}.`);
         qrcode.toDataURL(qr, (err, qrCodeImage) => {
             if (err) {
-                console.error(`Error al generar el código QR para ${companyId}:`, err);
+                console.error(
+                    `Error al generar el código QR para ${companyId}:`,
+                    err
+                );
                 if (clients[companyId]) clients[companyId].error = err;
             } else {
                 if (clients[companyId]) clients[companyId].qrCodeImage = qrCodeImage;
+                console.log(
+                    `QR generado y almacenado para ${companyId}. Escanéalo para vincular el dispositivo.`
+                );
+                // Emitir evento WebSocket aquí si lo usas
             }
         });
     });
@@ -108,8 +83,6 @@ const initializeClient = (companyId) => {
         if (clients[companyId]) {
             clients[companyId].whatsappReady = true;
             clients[companyId].qrCodeImage = null; // QR no necesario cuando está listo
-            clients[companyId].qrAttempts = 0;     // Reset contador de QR
-            clients[companyId].pausedUntil = null; // Reset pausa
             delete clients[companyId].error; // Limpiar errores
         }
         // Emitir evento WebSocket aquí si lo usas
@@ -185,15 +158,20 @@ const initializeClient = (companyId) => {
 }
 
 
-// --- FUNCIÓN OPTIMIZADA: Registrar sesiones existentes (sin inicializar navegadores) ---
-// Las sesiones se inicializan bajo demanda cuando se llama a /session-info/:companyId
+// --- NUEVA FUNCIÓN: Inicializar todos los clientes con sesiones guardadas ---
 const initializeAllClientsFromSessions = async () => {
-    console.log("--- Registrando sesiones existentes (inicialización diferida) ---");
+    console.log("--- Iniciando carga de sesiones existentes al inicio de la aplicación ---");
+    // Asegúrate de que esta ruta es correcta relativa a la raíz de tu proyecto Docker
+    // __dirname es el directorio actual (donde está whatsappController.js),
+    // '..' sube un nivel (al directorio 'controllers' si está en src/controllers),
+    // '..' sube otro nivel (a la raíz del proyecto si 'controllers' está directo en src)
     const sessionsDir = path.join(__dirname, '..', '.wwebjs_auth');
 
     try {
+        // Leer el contenido del directorio .wwebjs_auth
         const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
 
+        // Filtrar para encontrar solo directorios que empiezan con 'session-'
         const sessionFolders = entries
             .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('session-'))
             .map(dirent => dirent.name);
@@ -203,29 +181,24 @@ const initializeAllClientsFromSessions = async () => {
             return;
         }
 
-        console.log(`Se encontraron ${sessionFolders.length} sesión(es) guardada(s): ${sessionFolders.join(', ')}`);
+        console.log(`Se encontraron ${sessionFolders.length} sesión(es) existente(s): ${sessionFolders.join(', ')}`);
 
-        // CAMBIO: Solo registrar en memoria, NO inicializar navegadores
+        // Inicializar cada cliente encontrado. Lo hacemos secuencialmente con un pequeño delay
+        // para evitar saturar recursos al inicio, aunque podría hacerse en paralelo si es necesario.
         for (const folderName of sessionFolders) {
-            const companyId = folderName.replace('session-', '');
-
-            // Registrar la sesión en memoria sin inicializar el cliente
-            clients[companyId] = {
-                whatsappReady: false,
-                qrCodeImage: null,
-                client: null,
-                qrAttempts: 0,
-                pausedUntil: null,
-                sessionExists: true  // Indicador de que hay sesión guardada
-            };
-            console.log(`[LAZY] Sesión ${companyId} registrada. Se inicializará cuando se solicite.`);
+            const companyId = folderName.replace('session-', ''); // Extraer el companyId del nombre de la carpeta
+            console.log(`-> Iniciando proceso de inicialización para companyId: ${companyId} desde sesión guardada.`);
+            // Llama a la función initializeClient existente para cada ID encontrado
+            initializeClient(companyId);
+            // Opcional: pequeño retraso entre inicializaciones
+            await new Promise(resolve => setTimeout(resolve, 500)); // Espera 500ms
         }
 
-        console.log("--- Sesiones registradas. Esperando solicitudes para inicializar. ---");
+        console.log("--- Finalizado el proceso de inicialización de sesiones existentes ---");
 
     } catch (error) {
         if (error.code === 'ENOENT') {
-            console.log(`El directorio de sesiones no existe en ${sessionsDir}. No hay sesiones que registrar.`);
+            console.log(`El directorio de sesiones no existe en ${sessionsDir}. No hay sesiones que cargar.`);
         } else {
             console.error(`Error al leer el directorio de sesiones ${sessionsDir}:`, error);
         }
@@ -429,23 +402,32 @@ const sendMessageCustom = async (req, res) => {
     if (!phone || !message) {
         return res.status(400).json({
             message: "Faltan parámetros: número de teléfono y/o mensaje.",
-            phone: phone,
-            message: message,
+	    phone: phone,
+	    message: message,
         });
     } else {
-        console.log('los datos están completos')
+	console.log('los datos están completos')
     }
 
     const formattedPhone = `${phone}@c.us`; // Formato necesario para whatsapp-web.js
     const fullMessage = message; // Preparar mensaje
 
     try {
-        // OPTIMIZADO: Usar sendMessage directamente con sendSeen:false
-        // El error 'markedUnread' ocurre cuando sendMessage intenta llamar sendSeen internamente
-        // Deshabilitando sendSeen evitamos este bug conocido de whatsapp-web.js
-        await clients[companyId].client.sendMessage(formattedPhone, fullMessage, { sendSeen: false });
+        // Pequeño delay opcional para evitar saturar (ajustar si es necesario)
+        // await new Promise(resolve => setTimeout(resolve, 500));
+
+        const chat = await clients[companyId].client.getChatById(formattedPhone);
+        // Check if the chat exists before sending
+        if (!chat) {
+            console.warn(`El chat con ${formattedPhone} no existe para ${companyId}.Intentando enviar de todos modos.`);
+            // whatsapp-web.js usually creates the chat on the first message, but good to know
+        } else {
+	   console.log('El chat ha sido encontrado')
+	}
+
+        await clients[companyId].client.sendMessage(formattedPhone, fullMessage);
         console.log(
-            `Mensaje enviado a ${formattedPhone} para ${companyId}: "${fullMessage.substring(0, 50)}..."`
+            `Mensaje enviado a ${formattedPhone} para ${companyId}: "${fullMessage}"`
         );
 
         res.status(200).json({
@@ -455,7 +437,8 @@ const sendMessageCustom = async (req, res) => {
         console.error(`Error al enviar el mensaje para ${companyId} a ${formattedPhone}: `, error);
         res.status(500).json({
             message: "Error al enviar el mensaje",
-            error: error.message,
+            error: error.message, // Envía solo el mensaje del error  	    
+
         });
     }
 }
