@@ -1,4 +1,5 @@
 const { Client, LocalAuth } = require("whatsapp-web.js");
+const { emitToCompany } = require("../websocket");
 const qrcode = require("qrcode");
 const loadTemplates = require("../templates/templates-loader");
 const templates = loadTemplates();
@@ -96,7 +97,13 @@ const initializeClient = (companyId) => {
                 console.error(`Error al generar el código QR para ${companyId}:`, err);
                 if (clients[companyId]) clients[companyId].error = err;
             } else {
-                if (clients[companyId]) clients[companyId].qrCodeImage = qrCodeImage;
+                if (clients[companyId]) {
+                    clients[companyId].qrCodeImage = qrCodeImage;
+                    // Emit WebSocket event
+                    try {
+                        emitToCompany(companyId, 'qr', { qr: qrCodeImage });
+                    } catch (e) { console.warn('[WS] Error emitting qr:', e.message); }
+                }
             }
         });
     });
@@ -107,7 +114,11 @@ const initializeClient = (companyId) => {
         );
         if (clients[companyId]) {
             clients[companyId].whatsappReady = true;
-            clients[companyId].qrCodeImage = null; // QR no necesario cuando está listo
+            clients[companyId].qrCodeImage = null;
+            // Emit WebSocket event
+            try {
+                emitToCompany(companyId, 'ready', { ws_ready: true });
+            } catch (e) { console.warn('[WS] Error emitting ready:', e.message); } // QR no necesario cuando está listo
             clients[companyId].qrAttempts = 0;     // Reset contador de QR
             clients[companyId].pausedUntil = null; // Reset pausa
             delete clients[companyId].error; // Limpiar errores
@@ -143,6 +154,10 @@ const initializeClient = (companyId) => {
             clients[companyId].qrCodeImage = null;
             // delete clients[companyId].client; // Puedes decidir si eliminas la instancia o la mantienes para un posible reintento automático por parte de wwebjs
             clients[companyId].error = new Error(`Disconnected: ${reason}`);
+            // Emit WebSocket event
+            try {
+                emitToCompany(companyId, 'disconnected', { reason });
+            } catch (e) { console.warn('[WS] Error emitting disconnected:', e.message); }
         }
         // Emitir evento WebSocket aquí si lo usas
         // Considerar lógica de reintento automático aquí o en un supervisor
@@ -835,7 +850,68 @@ const sendDirectMessage = async (req, res) => {
     }
 };
 
+
+// --- Función para obtener estado del cliente (para WebSocket) ---
+const getClientStatus = (companyId) => {
+    const clientData = clients[companyId];
+    
+    if (!clientData) {
+        return {
+            status: 'NOT_REGISTERED',
+            ws_ready: false,
+            qr: null,
+            message: 'Empresa no registrada en el servicio de WhatsApp'
+        };
+    }
+    
+    if (clientData.whatsappReady) {
+        return {
+            status: 'READY',
+            ws_ready: true,
+            qr: null,
+            message: 'Cliente de WhatsApp conectado'
+        };
+    }
+    
+    if (clientData.qrCodeImage) {
+        return {
+            status: 'REQUIRES_QR',
+            ws_ready: false,
+            qr: clientData.qrCodeImage,
+            message: 'Escanee el código QR para conectar'
+        };
+    }
+    
+    if (clientData.pausedUntil && Date.now() < clientData.pausedUntil) {
+        return {
+            status: 'PAUSED',
+            ws_ready: false,
+            qr: null,
+            pausedUntil: clientData.pausedUntil,
+            message: 'Sesión pausada temporalmente'
+        };
+    }
+    
+    if (clientData.error) {
+        return {
+            status: 'ERROR',
+            ws_ready: false,
+            qr: null,
+            error: clientData.error.message,
+            message: 'Error en el cliente'
+        };
+    }
+    
+    return {
+        status: 'INITIALIZING',
+        ws_ready: false,
+        qr: null,
+        message: 'Cliente inicializándose...'
+    };
+};
+
 module.exports = {
+    getClientStatus,
     getSessionInfo,
     initializeClient, // Mantenemos exportada por si acaso, aunque initializeAllClientsFromSessions la usa internamente
     initializeAllClientsFromSessions, // Exportar la nueva función

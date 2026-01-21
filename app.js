@@ -1,17 +1,19 @@
-require("dotenv").config(); // Cargar variables de entorno al principio
+require("dotenv").config();
 
-// Aumentar el límite de listeners para evitar la advertencia de memoria
-// Esto es útil cuando se inicializan múltiples clientes que registran eventos en el proceso principal
+// Aumentar el límite de listeners
 process.setMaxListeners(0);
 
 const express = require("express");
+const http = require("http");
 const path = require("path");
-// require("dotenv").config(); // Esta importación está duplicada, la eliminamos
 const bodyParser = require("body-parser");
 const app = express();
 const routes = require("./routes/index");
 
-// *** Importar la nueva función de inicialización ***
+// *** WebSocket initialization ***
+const { initWebSocket } = require("./websocket");
+
+// *** Importar la función de inicialización de sesiones ***
 const { initializeAllClientsFromSessions } = require("./controllers/whatsappController");
 
 // Servir archivos estáticos desde la carpeta "public"
@@ -25,26 +27,25 @@ app.use(bodyParser.json());
 app.use("/", routes);
 
 const PORT = process.env.PORT || 3001;
-// const URL = process.env.APP_URL || "http://localhost:"; // Esta variable se define pero no se usa, puedes mantenerla o eliminarla si no la necesitas en otro lado.
 
-// Función asíncrona para iniciar la aplicación, incluyendo la inicialización de clientes
+// Crear servidor HTTP
+const server = http.createServer(app);
+
+// Inicializar WebSocket
+const io = initWebSocket(server);
+
+// Función asíncrona para iniciar la aplicación
 const startApplication = async () => {
-    // *** Llamar a la función para inicializar clientes desde sesiones guardadas ***
-    // Esto disparará el proceso de carga en segundo plano.
-    // NO usamos 'await' aquí para que el servidor HTTP empiece a escuchar inmediatamente
-    // mientras la inicialización de WhatsApp ocurre de forma asíncrona.
     console.log("Iniciando proceso de carga de sesiones de WhatsApp guardadas...");
     initializeAllClientsFromSessions()
-        .then(() => console.log("Proceso de inicialización de sesiones completado (se dispararon las inicializaciones encontradas)."))
+        .then(() => console.log("Proceso de inicialización de sesiones completado."))
         .catch(error => console.error("Error durante la carga de sesiones al inicio:", error));
 
-    // Iniciar el servidor HTTP
-    app.listen(PORT, () => {
-        console.log(`Servidor corriendo en el puerto ${PORT}`);
-        // Puedes añadir la URL aquí si la variable URL se usa:
-        // console.log(`Application URL: ${URL}${PORT}`);
+    // Iniciar el servidor HTTP (ahora con WebSocket)
+    server.listen(PORT, () => {
+        console.log(`Servidor corriendo en el puerto ${PORT} (HTTP + WebSocket)`);
     });
 };
 
-// *** Llamar a la función principal de inicio de la aplicación ***
+// Llamar a la función principal de inicio
 startApplication();
