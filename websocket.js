@@ -3,18 +3,36 @@ const { Server } = require('socket.io');
 let io;
 
 const initWebSocket = (httpServer) => {
+    // Lista de dominios permitidos para conectar
+    const allowedOrigins = [
+        "https://app.nineteencustom.com",
+        "http://app.nineteencustom.com", // <--- Agregamos la versión sin S
+        "https://app.nineteengreen.com",
+        "http://app.nineteengreen.com",  // <--- Agregamos la versión sin S
+        "http://localhost:3000",
+        "http://localhost:3001"
+    ];
+
     io = new Server(httpServer, {
         cors: {
-            origin: [
-                "https://app.nineteencustom.com",
-                "https://app.nineteengreen.com",
-                "http://localhost:3000",
-                "http://localhost:3001"
-            ],
+            origin: (origin, callback) => {
+                // Permitir si no hay origen (p.ej. servidores o herramientas de terminal)
+                if (!origin) return callback(null, true);
+                
+                if (allowedOrigins.indexOf(origin) !== -1) {
+                    // Si el origen está en la lista, lo aceptamos
+                    callback(null, true);
+                } else {
+                    // Registro en consola para saber qué dominio falló
+                    console.error(`[WS-CORS] Bloqueado por seguridad: ${origin}`);
+                    callback(new Error("No permitido por CORS"));
+                }
+            },
             methods: ["GET", "POST"],
             credentials: true
         },
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
+        allowEIO3: true // Compatibilidad mejorada
     });
 
     io.on('connection', (socket) => {
@@ -49,9 +67,8 @@ const initWebSocket = (httpServer) => {
         socket.on('activate', async (companyId) => {
             console.log(`[WS] Comando 'activate' recibido para ${companyId}`);
             try {
-                const { initializeClient, getClientStatus } = require('./controllers/whatsappController');
-                await initializeClient(companyId);
-                // El cliente emitirá eventos 'qr' o 'ready' automáticamente
+                const { initializeClient } = require('./controllers/whatsappController');
+                await initializeClient(companyId, true);
             } catch (error) {
                 console.error(`[WS] Error activando cliente ${companyId}:`, error);
                 socket.emit('error', { message: error.message || 'Error al activar cliente' });
@@ -64,7 +81,6 @@ const initWebSocket = (httpServer) => {
             try {
                 const { restartClient } = require('./controllers/whatsappController');
                 await restartClient(companyId);
-                // El cliente emitirá eventos 'qr' o 'ready' automáticamente
             } catch (error) {
                 console.error(`[WS] Error reiniciando cliente ${companyId}:`, error);
                 socket.emit('error', { message: error.message || 'Error al reiniciar cliente' });
@@ -75,9 +91,10 @@ const initWebSocket = (httpServer) => {
         socket.on('disconnect-client', async (companyId) => {
             console.log(`[WS] Comando 'disconnect-client' recibido para ${companyId}`);
             try {
-                const { disconnectClient } = require('./controllers/whatsappController');
+                const { disconnectClient, initializeClient } = require('./controllers/whatsappController');
                 await disconnectClient(companyId);
-                socket.emit('status', { status: 'DISCONNECTED', ws_ready: false, qr: null });
+                console.log(`[WS] Reinicializando cliente tras desconexión para generar nuevo QR para ${companyId}`);
+                initializeClient(companyId);
             } catch (error) {
                 console.error(`[WS] Error desconectando cliente ${companyId}:`, error);
                 socket.emit('error', { message: error.message || 'Error al desconectar cliente' });
@@ -93,7 +110,7 @@ const initWebSocket = (httpServer) => {
         });
     });
 
-    console.log('[WS] Servidor WebSocket inicializado');
+    console.log('[WS] Servidor WebSocket inicializado con validación de CORS');
     return io;
 };
 
@@ -108,7 +125,6 @@ const emitToCompany = (companyId, event, data) => {
     }
 };
 
-// Obtener instancia de io (para uso externo si es necesario)
 const getIO = () => io;
 
 module.exports = { initWebSocket, emitToCompany, getIO };

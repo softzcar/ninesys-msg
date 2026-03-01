@@ -213,3 +213,22 @@ router.post("/test-recibir", (req, res) => {
 });
 
 module.exports = router;
+
+/**
+ * Endpoint simple para verificar estado sin autenticación (solo para icono del frontend)
+ */
+router.get("/ws-info/:companyId", async (req, res) => {
+    const { companyId } = req.params;
+    try {
+        const { getClientStatus } = require("../controllers/whatsappController");
+        const status = getClientStatus(companyId);
+        res.status(200).json(status);
+    } catch (error) {
+        console.error(`Error en /ws-info/${companyId}:`, error);
+        res.status(500).json({
+            status: 'ERROR',
+            ws_ready: false,
+            message: 'Error al obtener estado'
+        });
+    }
+});
