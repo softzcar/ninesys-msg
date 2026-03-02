@@ -17,16 +17,14 @@ const initWebSocket = (httpServer) => {
         cors: {
             origin: (origin, callback) => {
                 // Permitir si no hay origen (p.ej. servidores o herramientas de terminal)
-                
+
                 // Manejar múltiples orígenes (separados por coma) si el proxy los duplica
                 const origins = origin.split(',').map(o => o.trim());
                 const matchingOrigin = origins.find(o => allowedOrigins.includes(o));
 
                 if (matchingOrigin) {
-                    // Devolvemos el origen exacto que coincidió para evitar problemas con cabeceras duplicadas
                     callback(null, matchingOrigin);
                 } else {
-                    // Registro en consola para saber qué dominio falló
                     console.error(`[WS-CORS] Bloqueado por seguridad: ${origin}`);
                     callback(new Error("No permitido por CORS"));
                 }
@@ -47,13 +45,19 @@ const initWebSocket = (httpServer) => {
             console.log(`[WS] ${socket.id} suscrito a ${room}`);
 
             try {
-                const { getClientStatus } = require('./controllers/whatsappController');
+                const { getClientStatus, initializeClient } = require('./controllers/whatsappController');
                 const status = getClientStatus(companyId);
-                if (status) {
+
+                if (status && status.status === 'NOT_REGISTERED') {
+                    // La empresa no tiene cliente en memoria: inicializar para generar QR
+                    console.log(`[WS] Empresa ${companyId} sin cliente activo. Iniciando inicialización...`);
+                    initializeClient(companyId);
+                } else if (status) {
+                    // Ya hay un cliente activo o con sesión, devolver su estado actual
                     socket.emit('status-update', { companyId, ...status });
                 }
             } catch (error) {
-                console.error(`[WS] Error obteniendo estado inicial para ${companyId}:`, error);
+                console.error(`[WS] Error en subscribe para ${companyId}:`, error);
             }
         });
 
@@ -90,7 +94,7 @@ const initWebSocket = (httpServer) => {
         });
     });
 
-    console.log('[WS] Servidor WebSocket inicializado con validación de CORS flexible y robusta');
+    console.log('[WS] Servidor WebSocket inicializado con CORS robusto y auto-inicialización de clientes');
     return io;
 };
 
