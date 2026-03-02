@@ -25,7 +25,7 @@ const initWebSocket = (httpServer) => {
                 if (matchingOrigin) {
                     callback(null, matchingOrigin);
                 } else {
-                    console.error(`[WS-CORS] Bloqueado por seguridad: ${origin}`);
+                    console.error(`[WS-CORS] DEBUG-CORS-BLOCKER-V2: ${origin}`);
                     callback(new Error("No permitido por CORS"));
                 }
             },
@@ -48,7 +48,7 @@ const initWebSocket = (httpServer) => {
                 const { getClientStatus, initializeClient } = require('./controllers/whatsappController');
                 const status = getClientStatus(companyId);
 
-                if (status && status.status === 'NOT_REGISTERED') {
+                if (status && (status.status === 'NOT_REGISTERED' || status.status === 'INITIALIZING')) {
                     // La empresa no tiene cliente en memoria: inicializar para generar QR
                     console.log(`[WS] Empresa ${companyId} sin cliente activo. Iniciando inicialización...`);
                     initializeClient(companyId);

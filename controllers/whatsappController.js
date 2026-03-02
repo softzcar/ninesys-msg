@@ -12,7 +12,7 @@ const path = require('path');
 const clients = {};
 
 // --- CONFIGURACIÓN DE LÍMITE DE QR ---
-const QR_ATTEMPT_LIMIT = 5;      // Máximo QRs antes de pausar sesión
+const QR_ATTEMPT_LIMIT = 15;      // Máximo QRs antes de pausar sesión
 const QR_COOLDOWN_MS = 300000;   // 5 minutos de cooldown
 
 // --- Función para inicializar un cliente (ya existente, ligeramente mejorada) ---
@@ -84,7 +84,7 @@ const initializeClient = (companyId, force = false) => {
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
                 "--window-size=800,600", // Reducir tamaño de ventana virtual ahorra RAM
-                "--js-flags='--max-old-space-size=256'" // <--- ESTO LIMITA LA RAM DE JS A 256MB
+                "--js-flags='--max-old-space-size=512'" // <--- ESTO LIMITA LA RAM DE JS A 256MB
             ],
         },
     });    
