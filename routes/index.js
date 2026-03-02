@@ -212,7 +212,6 @@ router.post("/test-recibir", (req, res) => {
     res.status(200).json({ received: req.body, status: "ok" });
 });
 
-module.exports = router;
 
 /**
  * Endpoint simple para verificar estado sin autenticación (solo para icono del frontend)
@@ -232,3 +231,4 @@ router.get("/ws-info/:companyId", async (req, res) => {
         });
     }
 });
+module.exports = router;
