@@ -54,7 +54,7 @@ const initWebSocket = (httpServer) => {
                     initializeClient(companyId);
                 } else if (status) {
                     // Ya hay un cliente activo o con sesión, devolver su estado actual
-                    socket.emit('status-update', { companyId, ...status });
+                    socket.emit('status', { companyId, ...status });
                 }
             } catch (error) {
                 console.error(`[WS] Error en subscribe para ${companyId}:`, error);
