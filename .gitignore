@@ -7,7 +7,7 @@ pnpm-lock.yaml
 yarn.lock
 
 # Environment variables
-# .env
+.env
 .env.local
 .env.development
 .env.production
@@ -15,6 +15,8 @@ yarn.lock
 # Logs
 logs/
 *.log
+# pero rastreamos los logs de tareas (formato GEMINI.md)
+!logs_gemini/*.log
 
 # Temporary files
 *.tmp

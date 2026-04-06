@@ -1,0 +1,34 @@
+- **Solicitud del Usuario:** Cleanup de .env tracking, .gitignore para logs_gemini, script de despliegue de msg_ninesys, y aplicar Fase 3 (schema wa_*) en api_emp_163 + plantilla.
+- **Fecha y Hora:** 2026-04-06 15:34:48
+- **Proyecto(s):** Backend (msg_ninesys + ninesys-api)
+- **Archivos Involucrados:**
+    - msg_ninesys/.gitignore (modificado: ignora .env, exime logs_gemini/*.log)
+    - msg_ninesys/.env (untracked vía git rm --cached)
+    - msg_ninesys/scripts/deploy_msg_ninesys.sh (nuevo, ejecutable)
+    - msg_ninesys/db/migrations/001_wa_tables.sql (nuevo)
+    - ninesys-api/public/model/create_new_company_api_emp_N.sql (modificado: bloque wa_* añadido antes de SET FOREIGN_KEY_CHECKS=1)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente en feat/baileys-migration
+    - ninesys-api: pendiente en refactor/modular-routes
+- **Acción Realizada:**
+    1. `git rm --cached .env` para sacar el archivo de secretos del control de versiones.
+    2. .gitignore: descomentado `.env`, añadido `!logs_gemini/*.log` para que los logs del formato GEMINI.md se rastreen sin --force.
+    3. Creado scripts/deploy_msg_ninesys.sh: rsync + npm install condicional + pm2 restart, con confirmación interactiva, opción 1 (Contabo) bloqueada, opción 2 (Hostinger) habilitada. Excluye node_modules, .git, .env, .wwebjs_*, session/, tmp/, *.log.
+    4. Creado db/migrations/001_wa_tables.sql con las 7 tablas idempotentes: wa_session_auth, wa_session_state, wa_conversations, wa_messages, wa_templates, wa_ai_settings, wa_send_log + seed de los dos singletons.
+    5. Replicado el bloque idéntico en ninesys-api/public/model/create_new_company_api_emp_N.sql, insertado antes de `SET FOREIGN_KEY_CHECKS = 1` (regla obligatoria GEMINI.md: schema sincronizado con plantilla de empresa nueva).
+    6. Aplicada la migración en api_emp_163 del VPS dev: `cat db/migrations/001_wa_tables.sql | ssh vps-ninesys "mysql api_emp_163"`. Sin errores.
+    7. Verificado en el VPS: las 7 tablas existen, wa_session_state.status='NOT_REGISTERED', wa_ai_settings.model='claude-sonnet-4-6'.
+- **Inconvenientes y Desafíos:**
+    - Ninguno. La migración corrió limpia y los singletons quedaron sembrados con INSERT IGNORE.
+- **Decisión Final y Justificación:**
+    - Migración idempotente con CREATE TABLE IF NOT EXISTS y INSERT IGNORE: re-aplicarla es seguro.
+    - Singletons (wa_session_state, wa_ai_settings) con CHECK (id=1) en lugar de un mecanismo más complejo: simple y suficiente. MariaDB 10.2+ y MySQL 8+ respetan el CHECK.
+    - Script de despliegue con rsync en vez de git: el VPS dev ya tiene msg_ninesys como directorio plano (no repo), y mantenerlo así evita conflictos con commits locales del usuario en el VPS.
+    - .env queda untracked pero NO se borra del disco local (git rm --cached preserva el archivo).
+- **Herramienta(s) Utilizada(s):** Edit, Write, Bash (git rm, ssh, mysql).
+- **Resultado:** Éxito.
+- **Verificación:** SHOW TABLES LIKE 'wa\\_%' devuelve las 7 tablas. Singletons leen valores por defecto correctos.
+- **Logro Conseguido:** Fase 3 cerrada en api_emp_163. El servicio msg_ninesys ya tiene dónde persistir credenciales Baileys, conversaciones, mensajes, plantillas, config IA y logs de envío. La plantilla de creación de empresas nuevas también incluye el bloque, garantizando que cualquier empresa creada de aquí en adelante traiga el schema.
+- **Referencias de Sesión (Contexto):** N/A
+- **Observaciones de Gemini:** Las empresas existentes distintas a 163 no tienen estas tablas. Cuando se quiera habilitar msg_ninesys para otra empresa, hay que aplicarle la migración 001_wa_tables.sql a su `api_emp_{id}` correspondiente. Eventualmente podríamos hacer un script que aplique todas las migraciones pendientes a todas las empresas activas.
+- **Respuesta de Gemini:** Cleanup, deploy script, migración aplicada en api_emp_163 y plantilla actualizada. Listo para Fase 4 (PoC Baileys).
