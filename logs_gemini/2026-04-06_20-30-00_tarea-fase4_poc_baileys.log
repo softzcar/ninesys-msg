@@ -1,0 +1,38 @@
+- **Solicitud del Usuario:** Fase 4 — PoC Baileys multi-tenant detrás del contrato existente, con persistencia de credenciales en MySQL.
+- **Fecha y Hora:** 2026-04-06 20:30:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/services/baileysAuthState.js (nuevo) — adapter useAuthState ↔ wa_session_auth
+    - msg_ninesys/src/services/waManager.js (nuevo) — gestor multi-tenant Baileys
+    - msg_ninesys/scripts/test-baileys-poc.js (nuevo) — smoke test
+    - msg_ninesys/package.json (modificado) — añadidas deps `baileys ^6.8.0`, `qrcode-terminal ^0.12.0`
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente en feat/baileys-migration
+- **Acción Realizada:**
+    1. Adapter MySQL para Baileys: read/write/remove sobre `wa_session_auth` con `BufferJSON` (replacer/reviver) y soporte para `app-state-sync-key` (proto.Message.AppStateSyncKeyData).
+    2. waManager con API estable mapeada al contrato congelado: init/getSessionInfo/getStatus/restart/disconnect/destroy/sendText/listSessions, eventos `qr/ready/status/disconnected/error` en sala `company-<id>`, persiste estado en `wa_session_state`.
+    3. Reconexión automática salvo logout explícito (DisconnectReason.loggedOut → clear creds).
+    4. Smoke test con fakeIo + impresión de QR ASCII en terminal.
+    5. Aplicado en VPS dev (vps-ninesys, /home/ozcar/msg-ninesys), sesión de empresa 163 escaneada con WhatsApp del usuario (584268730136). Aparece como "Google Chrome (msg_ninesys)" en el dispositivo.
+    6. Verificado segundo run sin QR: logging in directo, 30 pre-keys, status READY en <1s.
+- **Inconvenientes y Desafíos:**
+    1. **Import roto en Baileys 6.7.9 vía CJS interop**: `require('@whiskeysockets/baileys/lib/Utils/auth-utils')` devolvía `BufferJSON=undefined`. Solución: importar todo desde el root (`require('baileys')`).
+    2. **Connection Failure tras hello en @whiskeysockets/baileys 6.7.9**: paquete obsoleto, WhatsApp Web ya rompió ese protocolo. Solución: migrar al fork mantenido `baileys` (sin scope) ^6.8.0.
+    3. **Bug de idempotencia en init()**: la guardia `status !== 'ERROR'` devolvía sesiones DISCONNECTED, impidiendo la reconexión post-pairing (515). Fix: lista blanca REUSABLE = ['INITIALIZING','REQUIRES_QR','AUTHENTICATED','READY'].
+    4. **Stream error 515 tras pairing**: comportamiento esperado de Baileys. El handler de connection.update ya estaba programando reconexión vía setTimeout(init,1500) — solo había que dejar que init() volviera a crear el sock con las creds nuevas.
+- **Decisión Final y Justificación:**
+    - **Paquete `baileys` (sin scope)** en lugar de `@whiskeysockets/baileys`: el primero está activamente mantenido y siguió las actualizaciones del protocolo; el segundo quedó congelado y rompe en el handshake.
+    - **Adapter MySQL en lugar de useMultiFileAuthState**: requisito del proyecto (multi-tenant, sin filesystem compartido, recuperable desde cualquier instancia/PM2 restart).
+    - **PoC fuera del controlador existente** (`whatsappController.js` intacto): permite validar Baileys sin riesgo para el contrato que consume `app_multi`. La integración real va en Fase 5 detrás de feature flag `USE_BAILEYS=1`.
+    - **Reconexión por defecto excepto logout**: imprescindible porque el flujo de pairing genera siempre un 515.
+- **Herramienta(s) Utilizada(s):** Write, Edit, Bash (deploy script + ssh + mysql).
+- **Resultado:** Éxito.
+- **Verificación:**
+    - Primer run (sin creds): QR base64 emitido (longitud 6378), pairing OK, reconexión automática, READY.
+    - wa_session_state: status=READY, phone_number=584268730136.
+    - Segundo run (con creds): logging in directo, 30 pre-keys, READY en <1s sin QR.
+    - Dispositivo del usuario muestra "Google Chrome (msg_ninesys)" en la lista de WhatsApp Web.
+- **Logro Conseguido:** PoC Baileys multi-tenant funcional con persistencia MySQL. Demostrada la reconexión sin QR desde DB, lo que valida el reemplazo de Puppeteer/.wwebjs_auth para 100+ sesiones concurrentes sin filesystem compartido. Listos para integrar Baileys detrás de feature flag en el controlador real.
+- **Referencias de Sesión (Contexto):** Fase 3 cerrada en log 2026-04-06_15-34-48_tarea-fase3_schema_wa_tables.log
+- **Observaciones de Gemini:** Para Fase 5 hay que: (1) inyectar `waManager.setIo(io)` en websocket.js, (2) en whatsappController.js elegir entre el viejo whatsapp-web.js y waManager según `process.env.USE_BAILEYS`, (3) traducir `phone+'@s.whatsapp.net'` para sendText en send-message-*. El bloque `getChats` devolverá vacío hasta Fase 6 (persistencia de conversaciones).
+- **Respuesta de Gemini:** Fase 4 cerrada. PoC Baileys validado en VPS dev con empresa 163. Listos para Fase 5 (cableado real con feature flag).
