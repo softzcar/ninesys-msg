@@ -20,7 +20,13 @@
  *   - '<type>-<id>'               → keys (pre-key, session, sender-key, ...)
  */
 
-const { proto, initAuthCreds, BufferJSON } = require('baileys');
+// Carga diferida: baileys es ESM y solo debe importarse cuando el flag
+// USE_BAILEYS=1 está activo, para no romper el modo legacy (sin la dep).
+let _baileys;
+function lib() {
+    if (!_baileys) _baileys = require('baileys');
+    return _baileys;
+}
 
 async function readKey(pool, key) {
     const [rows] = await pool.query(
@@ -29,7 +35,7 @@ async function readKey(pool, key) {
     );
     if (!rows.length) return null;
     try {
-        return JSON.parse(rows[0].key_value.toString('utf8'), BufferJSON.reviver);
+        return JSON.parse(rows[0].key_value.toString('utf8'), lib().BufferJSON.reviver);
     } catch (e) {
         console.warn(`[baileysAuthState] No pude parsear ${key}:`, e.message);
         return null;
@@ -37,7 +43,7 @@ async function readKey(pool, key) {
 }
 
 async function writeKey(pool, key, value) {
-    const data = JSON.stringify(value, BufferJSON.replacer);
+    const data = JSON.stringify(value, lib().BufferJSON.replacer);
     await pool.query(
         `INSERT INTO wa_session_auth (key_name, key_value)
          VALUES (?, ?)
@@ -55,6 +61,7 @@ async function removeKey(pool, key) {
  * @param {import('mysql2/promise').Pool} pool - pool del tenant
  */
 async function useMySQLAuthState(pool) {
+    const { initAuthCreds, proto } = lib();
     let creds = await readKey(pool, 'creds');
     if (!creds) {
         creds = initAuthCreds();

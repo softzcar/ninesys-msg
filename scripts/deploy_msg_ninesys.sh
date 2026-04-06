@@ -17,7 +17,7 @@
 set -e
 
 DEV_ALIAS="vps-ninesys"
-DEV_PATH="/home/ozcar/msg-ninesys"
+DEV_PATH="/home/ws.nineteengreen.com/public_html"
 PM2_NAME="ntmsg-app"
 
 # Resolver directorio del proyecto desde la ubicación de este script

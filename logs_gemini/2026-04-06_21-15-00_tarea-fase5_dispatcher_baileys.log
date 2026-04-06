@@ -1,0 +1,49 @@
+- **Solicitud del Usuario:** Fase 5 — cablear waManager (Baileys) detrás del contrato existente, con feature flag USE_BAILEYS, sin tocar app_multi.
+- **Fecha y Hora:** 2026-04-06 21:15:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/controllers/whatsappDispatcher.js (nuevo) — capa fina con switch USE_BAILEYS (legacy passthrough vs Baileys con waManager + templates-loader)
+    - msg_ninesys/routes/index.js (modificado) — importa de whatsappDispatcher
+    - msg_ninesys/websocket.js (modificado) — idem + waManager.setIo(io) cuando flag activo
+    - msg_ninesys/app.js (modificado) — initializeAllClientsFromSessions desde dispatcher
+    - msg_ninesys/src/services/baileysAuthState.js (modificado) — require('baileys') lazy para no romper modo legacy
+    - msg_ninesys/scripts/deploy_msg_ninesys.sh (modificado) — DEV_PATH=/home/ws.nineteengreen.com/public_html (era /home/ozcar/msg-ninesys, sandbox PoC)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente en feat/baileys-migration
+- **Acción Realizada:**
+    1. Dispatcher con `if (!USE_BAILEYS) module.exports = require('./whatsappController')` para passthrough total al legacy.
+    2. En modo Baileys: reimplementé los 12 handlers HTTP y 4 fns de bajo nivel (getClientStatus, initializeClient, restartClient, disconnectClient, initializeAllClientsFromSessions) usando waManager.
+    3. toJid(phone) helper: '584268...' → '584268...@s.whatsapp.net'.
+    4. sendTemplateMessage reusa templates-loader (general/orden-detalles/paso-produccion/welcome) y delega el envío a waManager.sendText.
+    5. getChatsByCompanyId devuelve [] como placeholder (TODO Fase 6: leer wa_conversations).
+    6. getClientStatus dispara init() lazy en background si la sesión no está en el Map en memoria — necesario tras restart de PM2 (Map vacío, creds en BD).
+    7. initializeAllClientsFromSessions en modo Baileys es no-op (sesiones lazy, no se precarga).
+    8. baileysAuthState: `require('baileys')` movido a función `lib()` lazy para que el modo legacy no necesite la dep instalada.
+    9. websocket.js: `if (USE_BAILEYS) waManager.setIo(io)` tras crear el server Socket.IO.
+- **Inconvenientes y Desafíos:**
+    1. **Doble instancia PM2 fantasma**: existían dos `ntmsg-app` (una vieja del sandbox /home/ozcar/msg-ninesys y otra del path real), peleándose por el puerto 3000. Mata + recrea con `pm2 delete && pm2 start`.
+    2. **PM2 no recargaba .env con --update-env**: necesario `pm2 delete && pm2 start app.js` para que recogiera USE_BAILEYS=1.
+    3. **DEV_PATH incorrecto en deploy_msg_ninesys.sh**: estaba apuntando a /home/ozcar/msg-ninesys (sandbox PoC) en vez de /home/ws.nineteengreen.com/public_html (path real del subdominio). Corregido.
+    4. **MSG_SERVICE_INTERNAL_TOKEN faltante en el .env del path nuevo**: el token quedó sólo en el .env del sandbox. Añadido manualmente.
+    5. **getStatus síncrono no auto-iniciaba**: el frontend recibía 'NOT_REGISTERED' tras restart de PM2 porque el Map estaba vacío. Solucionado disparando init() en background y devolviendo 'INITIALIZING' en la primera llamada.
+- **Decisión Final y Justificación:**
+    - **Dispatcher fino vs editar whatsappController.js (1081 líneas)**: minimiza blast radius. El controlador legacy queda intacto; solo cambia el import de routes/websocket/app.
+    - **`module.exports = require('./whatsappController'); return;` early en CJS**: válido en CommonJS porque el módulo se envuelve en función. Evita arrastrar Baileys en modo legacy.
+    - **Lazy require de `baileys` en baileysAuthState**: permite que el modo legacy corra sin la dep instalada (útil para rollback rápido).
+    - **getChats devuelve [] en vez de error**: Baileys no expone `getChats()`. Devolver array vacío mantiene el shape esperado por el frontend hasta que Fase 6 persista wa_conversations.
+    - **Lazy init en getStatus**: alternativa a "preload de todas las sesiones al boot" — evita arrancar 100 sockets si solo se usan 5, y sigue siendo recuperable tras restart.
+- **Herramienta(s) Utilizada(s):** Write, Edit, Bash (deploy script + ssh + pm2 + curl).
+- **Resultado:** Éxito.
+- **Verificación:**
+    - Logs PM2: `[whatsappDispatcher] Backend activo: BAILEYS (multi-tenant)` + `[WS] waManager (Baileys) enlazado al servidor Socket.IO`.
+    - `curl https://ws.nineteengreen.com/ws-info/163` → `{"status":"READY","ws_ready":true,"qr":null,"message":"Estado: READY"}`.
+    - app_multi: icono de WhatsApp en verde, sin cambios de código en frontend.
+    - Sesión 163 reanudada desde wa_session_auth sin pedir QR (mismo pairing del PoC Fase 4).
+- **Logro Conseguido:** Baileys corriendo como backend de msg_ninesys en VPS dev, transparente para app_multi. Whatsapp-web.js+Puppeteer sigue presente como fallback (USE_BAILEYS=0). Listos para retirar Puppeteer en Fase 9 una vez Fase 6/7/8 estén estables.
+- **Referencias de Sesión (Contexto):** Fases 3 y 4 cerradas en logs 2026-04-06_15-34-48 y 2026-04-06_20-30-00.
+- **Observaciones de Gemini:**
+    1. El sandbox /home/ozcar/msg-ninesys quedó huérfano. Eliminar o documentar como entorno PoC histórico.
+    2. El .env del path real no contenía las vars de Fase 1 (API_URL ya estaba; faltaba MSG_SERVICE_INTERNAL_TOKEN). Conviene crear un .env.example en la rama y un check de boot que aborte si falta cuando USE_BAILEYS=1.
+    3. getChats vacío puede romper alguna vista de "lista de chats" en app_multi si la consume activamente. Verificar antes de Fase 6.
+    4. Fase 6 debe enganchar `messages.upsert` de Baileys → wa_conversations + wa_messages + emit('message:new') a sala company-<id>.
+- **Respuesta de Gemini:** Fase 5 cerrada. Baileys activo en producción dev detrás del contrato congelado. app_multi sin cambios. Listos para Fase 6 (persistencia de conversaciones).

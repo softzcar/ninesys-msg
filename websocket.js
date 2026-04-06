@@ -45,7 +45,7 @@ const initWebSocket = (httpServer) => {
             console.log(`[WS] ${socket.id} suscrito a ${room}`);
 
             try {
-                const { getClientStatus, initializeClient } = require('./controllers/whatsappController');
+                const { getClientStatus, initializeClient } = require('./controllers/whatsappDispatcher');
                 const status = getClientStatus(companyId);
 
                 if (status && (status.status === 'NOT_REGISTERED' || status.status === 'INITIALIZING')) {
@@ -64,7 +64,7 @@ const initWebSocket = (httpServer) => {
         socket.on('restart-client', async (companyId) => {
             console.log(`[WS] Comando 'restart-client' recibido para ${companyId}`);
             try {
-                const { restartClient } = require('./controllers/whatsappController');
+                const { restartClient } = require('./controllers/whatsappDispatcher');
                 await restartClient(companyId);
             } catch (error) {
                 console.error(`[WS] Error reiniciando cliente ${companyId}:`, error);
@@ -75,7 +75,7 @@ const initWebSocket = (httpServer) => {
         socket.on('disconnect-client', async (companyId) => {
             console.log(`[WS] Comando 'disconnect-client' recibido para ${companyId}`);
             try {
-                const { disconnectClient, initializeClient } = require('./controllers/whatsappController');
+                const { disconnectClient, initializeClient } = require('./controllers/whatsappDispatcher');
                 await disconnectClient(companyId);
                 console.log(`[WS] Reinicializando cliente tras desconexión para generar nuevo QR para ${companyId}`);
                 initializeClient(companyId);
@@ -93,6 +93,19 @@ const initWebSocket = (httpServer) => {
             console.error(`[WS] Error en socket ${socket.id}:`, error);
         });
     });
+
+    // Si el backend activo es Baileys, inyectar la instancia de io en waManager
+    // para que pueda emitir qr/ready/status/disconnected/error a las salas
+    // company-<id> sin tener que pasar por el dispatcher.
+    if (process.env.USE_BAILEYS === '1') {
+        try {
+            const waManager = require('./src/services/waManager');
+            waManager.setIo(io);
+            console.log('[WS] waManager (Baileys) enlazado al servidor Socket.IO');
+        } catch (e) {
+            console.error('[WS] No pude enlazar waManager:', e.message);
+        }
+    }
 
     console.log('[WS] Servidor WebSocket inicializado con CORS robusto y auto-inicialización de clientes');
     return io;
