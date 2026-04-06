@@ -1,0 +1,31 @@
+- **Solicitud del Usuario:** Iniciar Fases 0 y 1 del plan de migración a Baileys. Crear rama, logs, doc de contrato y endpoint interno en un archivo nuevo (no auth.php).
+- **Fecha y Hora:** 2026-04-06 11:41:24
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - /home/developer/Escritorio/niesys/msg_ninesys/docs/API_CONTRACT.md (nuevo)
+    - /home/developer/Escritorio/niesys/msg_ninesys/logs_gemini/ (directorio nuevo)
+- **Commits Relacionados:**
+    - Frontend: N/A
+    - Backend: pendiente de commit (rama feat/baileys-migration)
+- **Acción Realizada:**
+    1. Creada la rama `feat/baileys-migration` en msg_ninesys a partir de `main`.
+    2. Creado el directorio `logs_gemini/` para registrar tareas según GEMINI.md.
+    3. Creado el directorio `docs/` con el archivo `API_CONTRACT.md` que congela la superficie HTTP + WebSocket consumida por app_multi (Nuxt). Este documento sirve como prueba de regresión para la migración a Baileys: enumera todos los endpoints (/login, /refresh, /session-info, /qr/64, /qr, /ws-info, /connected-clients, /chats, /restart, /disconnect, /client, /send-message-*, /server-status, /restart-server), los payloads exactos, la autenticación JWT y los eventos WebSocket (subscribe, restart-client, disconnect-client, qr, ready, status, disconnected, error) incluyendo la CORS allowlist.
+    4. Documentado también el nuevo endpoint interno `GET /internal/db-credentials/{id_empresa}` que vive en ninesys-api (servidor ↔ servidor, nunca expuesto al frontend).
+- **Inconvenientes y Desafíos:**
+    - El controlador actual `whatsappController.js` tiene 1081 líneas con lógica de Puppeteer mezclada con manejo de estado. Fue necesario leerlo completo para extraer el contrato exacto sin ambigüedades.
+    - `/send-message-produccion` referenciado en `app_multi/mixins.js` no existe en msg_ninesys; se confirmó con el usuario que vive en ninesys-api (PHP). Documentado para no intentar implementarlo aquí.
+- **Decisión Final y Justificación:**
+    - Rama dedicada `feat/baileys-migration` para aislar el trabajo de migración sin afectar `main`.
+    - API_CONTRACT.md como documento de prueba de regresión: la migración debe preservar 100% de la superficie actual. Cualquier funcionalidad nueva (conversaciones persistidas, IA) se añade como rutas/eventos adicionales.
+    - Logs en `logs_gemini/` siguiendo exactamente la nomenclatura y estructura de GEMINI.md.
+- **Herramienta(s) Utilizada(s):** `Bash` (git checkout, mkdir, ls), `Read`, `Grep`, `Write`, `Edit`.
+- **Resultado:** Éxito
+- **Verificación:**
+    - `git status` confirma rama `feat/baileys-migration` creada.
+    - `docs/API_CONTRACT.md` creado con todos los endpoints documentados.
+    - `logs_gemini/` creado.
+- **Logro Conseguido:** Base documental y de control de versiones lista para iniciar la migración a Baileys sin riesgo de romper el contrato actual con app_multi.
+- **Referencias de Sesión (Contexto):** N/A (sesión Claude Code)
+- **Observaciones de Gemini:** Antes del primer despliegue se necesita definir el valor de `MSG_SERVICE_INTERNAL_TOKEN` y agregarlo al `.env` de ninesys-api en el VPS dev. Sugerir generar con `openssl rand -hex 32`.
+- **Respuesta de Gemini:** Fases 0 y 1 iniciadas. Rama, doc de contrato y endpoint PHP nuevo creados. Pendiente autorización para desplegar a VPS dev.
