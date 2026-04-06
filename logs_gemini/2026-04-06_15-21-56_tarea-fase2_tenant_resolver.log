@@ -1,0 +1,45 @@
+- **Solicitud del Usuario:** Continuar con la Fase 2 del plan: implementar resolución multi-tenant en msg_ninesys.
+- **Fecha y Hora:** 2026-04-06 15:21:56
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - src/db/credentialsClient.js (nuevo)
+    - src/db/tenantResolver.js (nuevo)
+    - scripts/test-tenant-resolver.js (nuevo)
+    - .env (modificado: añadido MSG_SERVICE_INTERNAL_TOKEN, ANTHROPIC_API_KEY, AI_DEFAULT_*)
+    - .env.example (nuevo)
+- **Commits Relacionados:**
+    - Frontend: N/A
+    - Backend (msg_ninesys): pendiente de commit en feat/baileys-migration
+- **Acción Realizada:**
+    1. Creado `src/db/credentialsClient.js`: cliente axios con baseURL=API_URL y header X-Internal-Token. Expone `ping()` y `fetchCredentials(idEmpresa)`. No cachea (responsabilidad del resolver).
+    2. Creado `src/db/tenantResolver.js`: mantiene un Map de tenants con `{credentials, fetchedAt, pool}`. TTL de credenciales 10 min. Pools mysql2 lazy con connectionLimit=5, keepAlive habilitado. Funciones: `getCredentials`, `getPool`, `refresh` (cierra pool + invalida cache, soporta refresh global), `testConnection`.
+    3. Creado `scripts/test-tenant-resolver.js`: smoke test de 6 pasos (ping, fetch, pool, query a 4 tablas de negocio, cache hit, refresh).
+    4. Actualizado `.env` con `MSG_SERVICE_INTERNAL_TOKEN`, placeholders para Anthropic.
+    5. Creado `.env.example` con la plantilla limpia.
+    6. Verificación local: `node -e "require('./src/db/credentialsClient'); require('./src/db/tenantResolver')"` → módulos cargan sin error.
+    7. Test local del script falló en paso 3 como se esperaba (db_host=localhost de la empresa 163 apunta al MySQL del VPS, no al local de mi máquina; mi MySQL local no tiene el usuario `api_user_163`).
+    8. Detectado puerto 3306 ocupado por MySQL local, así que el túnel SSH no era práctico.
+    9. Verificado que ya existe `/home/ozcar/msg-ninesys` en el VPS dev con node v23.3.0 y deps mysql2/axios/dotenv instaladas.
+    10. SCP de los 3 archivos al VPS (creando los directorios src/db y scripts si no existían) y append de MSG_SERVICE_INTERNAL_TOKEN al .env del VPS.
+    11. Ejecución del script en el VPS: 6/6 pasos OK. Confirmado:
+        - ping ✅
+        - credenciales recibidas para empresa 163 (Nineteen Custom)
+        - SELECT 1 ✅
+        - customers: 1806 filas, ordenes: 4543, products: 146, ordenes_productos: 9717
+        - cache hit en 0ms
+        - refresh cierra pool e invalida cache
+- **Inconvenientes y Desafíos:**
+    - No pude probar end-to-end desde local porque las empresas tienen `db_host=localhost` (BD vive en el mismo VPS). Solución: ejecutar el script directamente en el VPS dev. Esto confirma además que el flujo de despliegue final será desplegar msg_ninesys en /home/ozcar/msg-ninesys.
+    - SCP arrojó warnings de "post-quantum key exchange" (no críticos, solo advertencia de OpenSSH).
+- **Decisión Final y Justificación:**
+    - tenantResolver y credentialsClient como módulos separados: el cliente es stateless y reusable, el resolver maneja estado (cache + pools).
+    - TTL de 10 min para credenciales: balance entre minimizar llamadas a la API y propagar cambios razonablemente rápido (en la práctica las credenciales casi nunca cambian).
+    - connectionLimit=5 por tenant: con 100 empresas potenciales serían 500 conexiones máx, dentro del rango razonable de MySQL. Se puede ajustar.
+    - Test ejecutado en el VPS: garantiza que el código probado es exactamente el que correrá en producción dev, sin diferencias de entorno.
+- **Herramienta(s) Utilizada(s):** Write, Edit, Bash (node, ssh, scp).
+- **Resultado:** Éxito.
+- **Verificación:** 6/6 pasos del smoke test aprobados en VPS dev. Las 4 tablas de negocio (customers, ordenes, products, ordenes_productos) son accesibles con los conteos reales registrados.
+- **Logro Conseguido:** msg_ninesys ahora puede resolver credenciales de cualquier empresa en runtime y abrir conexiones a su base `api_emp_{id}` sin tocar configuración local. Base lista para Fase 3 (esquema SQL wa_*) y Fase 4 (PoC Baileys).
+- **Referencias de Sesión (Contexto):** N/A
+- **Observaciones de Gemini:** Para correr msg_ninesys en local con conexión real a tenants se requerirá un usuario MySQL con bind a IP externa, o seguir trabajando vía SCP+ejecución en VPS. El flujo SCP es suficiente mientras estemos en fase de PoC.
+- **Respuesta de Gemini:** Fase 2 cerrada. tenantResolver funcional contra empresa 163 con datos reales. Listo para Fase 3 (migración SQL).
