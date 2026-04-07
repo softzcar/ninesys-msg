@@ -27,6 +27,8 @@ const {
     restartClientByCompanyId,
     disconnectClientByCompanyId,
     deleteClientByCompanyId, // Importar la nueva función
+    getConversationMessages,
+    markConversationRead,
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
@@ -85,6 +87,12 @@ router.get("/connected-clients", authenticateToken, getConnectedClients);
  * Obtenr los chats con el último mensase para un cliente
  */
 router.get("/chats/:companyId", authenticateToken, getChatsByCompanyId);
+
+/**
+ * Fase 6 — Endpoints aditivos para conversaciones
+ */
+router.get("/conversations/:companyId/:jid/messages", authenticateToken, getConversationMessages);
+router.post("/conversations/:companyId/:jid/read", authenticateToken, markConversationRead);
 
 /**
  * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)

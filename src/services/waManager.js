@@ -32,6 +32,7 @@
 const QRCode = require('qrcode');
 const tenantResolver = require('../db/tenantResolver');
 const { useMySQLAuthState } = require('./baileysAuthState');
+const conversationStore = require('./conversationStore');
 
 let baileys;
 function loadBaileys() {
@@ -122,6 +123,49 @@ async function init(idEmpresa) {
     emit(id, 'status', { status: 'INITIALIZING', message: 'Inicializando cliente...' });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // ---------- Persistencia de conversaciones / mensajes (Fase 6) ----------
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        // type: 'notify' (mensaje nuevo entrante) | 'append' (sync histórico)
+        for (const m of messages || []) {
+            try {
+                const result = await conversationStore.ingestMessage(pool, m);
+                if (!result) continue;
+                if (type === 'notify') {
+                    emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
+                    emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
+                }
+            } catch (e) {
+                console.error(`[waManager:${id}] ingestMessage falló:`, e.message);
+            }
+        }
+    });
+
+    sock.ev.on('messages.update', async (updates) => {
+        for (const u of updates || []) {
+            const wa_message_id = u.key?.id;
+            const status = u.update?.status;
+            // Baileys status: 0 ERROR, 1 PENDING, 2 SERVER_ACK, 3 DELIVERY_ACK, 4 READ, 5 PLAYED
+            const statusMap = { 0: 'failed', 1: 'pending', 2: 'sent', 3: 'delivered', 4: 'read', 5: 'read' };
+            const mapped = statusMap[status];
+            if (wa_message_id && mapped) {
+                try {
+                    await conversationStore.updateMessageStatus(pool, wa_message_id, mapped);
+                    emit(id, 'message:status', { companyId: id, wa_message_id, status: mapped });
+                } catch (e) {
+                    console.error(`[waManager:${id}] updateMessageStatus falló:`, e.message);
+                }
+            }
+        }
+    });
+
+    sock.ev.on('chats.upsert', async (chats) => {
+        try {
+            await conversationStore.upsertChatNames(pool, chats);
+        } catch (e) {
+            console.error(`[waManager:${id}] upsertChatNames falló:`, e.message);
+        }
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;

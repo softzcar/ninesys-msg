@@ -55,6 +55,11 @@ const initWebSocket = (httpServer) => {
                 } else if (status) {
                     // Ya hay un cliente activo o con sesión, devolver su estado actual
                     socket.emit('status', { companyId, ...status });
+                    // Si además ya hay un QR cacheado (REQUIRES_QR), re-emitirlo
+                    // como evento 'qr' para los suscriptores que llegan tarde.
+                    if (status.qr) {
+                        socket.emit('qr', { companyId, qr: status.qr });
+                    }
                 }
             } catch (error) {
                 console.error(`[WS] Error en subscribe para ${companyId}:`, error);

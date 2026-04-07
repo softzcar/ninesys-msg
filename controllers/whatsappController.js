@@ -12,6 +12,8 @@
 
 const loadTemplates = require('../templates/templates-loader');
 const waManager = require('../src/services/waManager');
+const tenantResolver = require('../src/db/tenantResolver');
+const conversationStore = require('../src/services/conversationStore');
 
 let templates = {};
 try {
@@ -111,9 +113,44 @@ async function getConnectedClients(req, res) {
 }
 
 async function getChatsByCompanyId(req, res) {
-    // TODO Fase 6: leer wa_conversations + wa_messages del tenant.
-    // Hasta entonces devolvemos array vacío para no romper el frontend.
-    res.status(200).json([]);
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+        const chats = await conversationStore.listConversations(pool, { limit });
+        res.status(200).json(chats);
+    } catch (e) {
+        console.error(`[whatsappController] getChats(${companyId}) falló:`, e.message);
+        res.status(500).json({ message: 'Error obteniendo conversaciones', error: e.message });
+    }
+}
+
+// ----- Endpoints aditivos Fase 6 (no rompen el contrato congelado) -----
+
+async function getConversationMessages(req, res) {
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const before = req.query.before ? Number(req.query.before) : null;
+        const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+        const messages = await conversationStore.listMessages(pool, jid, { before, limit });
+        res.status(200).json({ jid, messages });
+    } catch (e) {
+        console.error(`[whatsappController] getMessages(${companyId},${jid}) falló:`, e.message);
+        res.status(500).json({ message: 'Error obteniendo mensajes', error: e.message });
+    }
+}
+
+async function markConversationRead(req, res) {
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        await conversationStore.markRead(pool, jid);
+        res.status(200).json({ jid, unread_count: 0 });
+    } catch (e) {
+        console.error(`[whatsappController] markRead(${companyId},${jid}) falló:`, e.message);
+        res.status(500).json({ message: 'Error marcando como leído', error: e.message });
+    }
 }
 
 async function restartClientByCompanyId(req, res) {
@@ -230,4 +267,7 @@ module.exports = {
     sendMessageCustom,
     sendTemplateMessage,
     sendDirectMessage,
+    // Fase 6
+    getConversationMessages,
+    markConversationRead,
 };
