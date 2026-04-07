@@ -1,1081 +1,233 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const { emitToCompany } = require("../websocket");
-const qrcode = require("qrcode");
-const loadTemplates = require("../templates/templates-loader");
-const templates = loadTemplates();
+/**
+ * whatsappController.js
+ *
+ * Controlador único de WhatsApp para msg_ninesys, respaldado por Baileys
+ * multi-tenant (src/services/waManager.js) con persistencia MySQL en cada
+ * api_emp_{id_empresa}.
+ *
+ * Mantiene la misma firma que el controlador legacy (whatsapp-web.js +
+ * Puppeteer) que existía antes de Fase 5, para no romper el contrato HTTP/WS
+ * congelado en docs/API_CONTRACT.md y consumido por app_multi.
+ */
 
-const fs = require('fs').promises;
-const path = require('path');
+const loadTemplates = require('../templates/templates-loader');
+const waManager = require('../src/services/waManager');
 
-// Objeto para almacenar instancias de clientes de WhatsApp por companyId
-// La estructura será clients = { 'companyId1': { client: ClientInstance, whatsappReady: boolean, qrCodeImage: string | null, error?: Error }, ... }
-const clients = {};
-
-// --- CONFIGURACIÓN DE LÍMITE DE QR ---
-const QR_ATTEMPT_LIMIT = 15;      // Máximo QRs antes de pausar sesión
-const QR_COOLDOWN_MS = 300000;   // 5 minutos de cooldown
-
-// --- Función para inicializar un cliente (ya existente, ligeramente mejorada) ---
-const initializeClient = (companyId, force = false) => {
-    console.log(`Intentando inicializar/registrar cliente para companyId: ${companyId}`);
-
-    // NUEVO: Verificar si la sesión está pausada
-    if (!force && clients[companyId] && clients[companyId].pausedUntil) {
-        if (Date.now() < clients[companyId].pausedUntil) {
-            const remainingMs = clients[companyId].pausedUntil - Date.now();
-            const remainingMin = Math.ceil(remainingMs / 60000);
-            console.log(`[PAUSED] No se puede inicializar ${companyId}. Sesión pausada por ${remainingMin} minutos más.`);
-            return;
-        } else {
-            // La pausa expiró, limpiar el estado
-            console.log(`[PAUSED] Pausa expirada para ${companyId}. Limpiando estado.`);
-            clients[companyId].pausedUntil = null;
-            clients[companyId].qrAttempts = 0;
-        }
-    }
-
-    if (force && clients[companyId]) {
-        console.log(`[FORCE] Reiniciando contadores y pausa para ${companyId}`);
-        clients[companyId].pausedUntil = null;
-        clients[companyId].qrAttempts = 0;
-    }
-
-    // Si ya existe una instancia de cliente para este ID, no hacemos nada (a menos que sea por un reinicio explícito)
-    // Esta función está diseñada para asegurar *un* proceso de inicialización por ID.
-    if (clients[companyId] && clients[companyId].client) {
-        console.log(`Cliente con instancia activa ya registrado para ${companyId}.`);
-        // Podrías añadir aquí lógica para verificar el estado si quisieras ser más proactivo
-        return;
-    }
-
-    // Si no existe la entrada o no tiene instancia activa, preparamos o limpiamos la entrada
-    if (!clients[companyId]) {
-        clients[companyId] = { whatsappReady: false, qrCodeImage: null, client: null, qrAttempts: 0, pausedUntil: null };
-        console.log(`Creando entrada inicial en memoria para companyId: ${companyId}.`);
-    } else {
-        // Limpiar estado anterior si existía la entrada pero no la instancia activa (ej: después de un disconnect o error)
-        clients[companyId].whatsappReady = false;
-        clients[companyId].qrCodeImage = null;
-        delete clients[companyId].client; // Asegurarse de no tener una referencia antigua
-        delete clients[companyId].error; // Limpiar cualquier error previo
-        console.log(`Limpiando estado previo en memoria para companyId: ${companyId} antes de inicializar.`);
-    }
-
-
-    const client = new Client({
-        authStrategy: new LocalAuth({ clientId: companyId }),
-        puppeteer: {
-            headless: true,
-            args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", // Obliga a usar /tmp en lugar de memoria compartida
-                "--disable-accelerated-2d-canvas",
-                "--no-first-run",
-                "--no-zygote",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-default-apps",
-                "--mute-audio",
-                "--disable-setuid-sandbox",
-                "--disable-notifications",
-                "--disable-background-networking",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                "--window-size=800,600", // Reducir tamaño de ventana virtual ahorra RAM
-                "--js-flags='--max-old-space-size=512'" // <--- ESTO LIMITA LA RAM DE JS A 256MB
-            ],
-        },
-    });    
-
-    clients[companyId].client = client; // Guardar la instancia del nuevo cliente
-
-    // --- Listener QR con límite de intentos ---
-    client.on("qr", (qr) => {
-        // Verificar si sesión está pausada
-        if (clients[companyId] && clients[companyId].pausedUntil && Date.now() < clients[companyId].pausedUntil) {
-            console.log(`[PAUSED] Sesión ${companyId} pausada. Ignorando QR hasta ${new Date(clients[companyId].pausedUntil).toISOString()}`);
-            return;
-        }
-
-        // Incrementar contador de intentos
-        if (clients[companyId]) {
-            clients[companyId].qrAttempts = (clients[companyId].qrAttempts || 0) + 1;
-
-            // Verificar si se alcanzó el límite
-            if (clients[companyId].qrAttempts > QR_ATTEMPT_LIMIT) {
-                console.warn(`[LIMIT] Sesión ${companyId} alcanzó límite de ${QR_ATTEMPT_LIMIT} QRs. Pausando por ${QR_COOLDOWN_MS / 60000} minutos.`);
-                clients[companyId].pausedUntil = Date.now() + QR_COOLDOWN_MS;
-                clients[companyId].qrCodeImage = null;
-                clients[companyId].qrAttempts = 0; // Reset para próximo ciclo
-                try {
-                    emitToCompany(companyId, 'status', {
-                        status: 'PAUSED',
-                        message: `Demasiados intentos. Espera unos minutos.`,
-                        pausedUntil: clients[companyId].pausedUntil
-                    });
-                } catch (e) { }
-
-                // Destruir cliente para liberar recursos
-                if (clients[companyId].client) {
-                    clients[companyId].client.destroy().catch(e => console.error(`Error destroying client ${companyId}:`, e));
-                    delete clients[companyId].client;
-                }
-                return;
-            }
-        }
-
-        // Generar QR normalmente
-        console.log(`[QR ${clients[companyId] ? clients[companyId].qrAttempts : 1}/${QR_ATTEMPT_LIMIT}] Generando QR para ${companyId}`);
-
-        qrcode.toDataURL(qr, (err, qrCodeImage) => {
-            if (err) {
-                console.error(`Error al generar el código QR para ${companyId}:`, err);
-                if (clients[companyId]) clients[companyId].error = err;
-            } else {
-                if (clients[companyId]) {
-                    clients[companyId].qrCodeImage = qrCodeImage;
-                    // Emit WebSocket event
-                    try {
-                        emitToCompany(companyId, 'qr', { qr: qrCodeImage });
-                    } catch (e) { console.warn('[WS] Error emitting qr:', e.message); }
-                }
-            }
-        });
-    });
-
-    client.on("ready", () => {
-        console.log(
-            `Cliente de WhatsApp listo para ${companyId}. Ya puedes enviar mensajes.`
-        );
-        if (clients[companyId]) {
-            clients[companyId].whatsappReady = true;
-            clients[companyId].qrCodeImage = null;
-            // Emit WebSocket event
-            try {
-                emitToCompany(companyId, 'ready', { ws_ready: true });
-            } catch (e) { console.warn('[WS] Error emitting ready:', e.message); } // QR no necesario cuando está listo
-            clients[companyId].qrAttempts = 0;     // Reset contador de QR
-            clients[companyId].pausedUntil = null; // Reset pausa
-            delete clients[companyId].error; // Limpiar errores
-        }
-        // Emitir evento WebSocket aquí si lo usas
-    });
-
-    client.on("authenticated", () => {
-        console.log(
-            `Cliente de WhatsApp autenticado correctamente para ${companyId}.`
-        );
-        try { emitToCompany(companyId, 'status', { status: 'AUTHENTICATED', message: 'Dispositivo vinculado. Conectando...' }); } catch (e) { }
-        // El evento 'ready' es el que confirma que está listo para mensajes
-    });
-
-    client.on("auth_failure", (msg) => {
-        console.error(`Fallo en la autenticación para ${companyId}:`, msg);
-        if (clients[companyId]) {
-            clients[companyId].whatsappReady = false;
-            clients[companyId].qrCodeImage = null;
-            clients[companyId].error = new Error(`Auth failure: ${msg}`);
-            // No elimines la instancia aquí si quieres permitir un nuevo intento de inicialización/QR
-        }
-        // Emitir evento WebSocket aquí si lo usas
-    });
-
-    client.on("disconnected", async (reason) => {
-        console.log(`Cliente de WhatsApp desconectado para ${companyId}: ${reason}`);
-        if (clients[companyId]) {
-            clients[companyId].whatsappReady = false;
-            clients[companyId].qrCodeImage = null;
-            clients[companyId].error = new Error(`Disconnected: ${reason}`);
-
-            try {
-                emitToCompany(companyId, 'disconnected', { reason });
-            } catch (e) { console.warn('[WS] Error emitting disconnected:', e.message); }
-
-            // SI es logout, destruir cliente para evitar reconexión automática y bucle de QR
-            if (reason === 'LOGOUT' || reason === 'NAVIGATION') {
-                console.log(`Detectado LOGOUT/NAVIGATION para ${companyId}, destruyendo cliente...`);
-                if (clients[companyId].client) {
-                    try {
-                        await clients[companyId].client.destroy();
-                    } catch (e) { console.error('Error destroying client:', e); }
-                    delete clients[companyId].client;
-
-                    try {
-                        const sessionPath = path.join(__dirname, '..', '.wwebjs_auth', `session-${companyId}`);
-                        await fs.rm(sessionPath, { recursive: true, force: true });
-                        console.log(`Sesión borrada tras logout para ${companyId}`);
-                    } catch (err) { console.error('Error deleting session files:', err); }
-                }
-                delete clients[companyId];
-            }
-        }
-    });
-
-
-    client.on("change_state", (state) => {
-        console.log(
-            `Estado del cliente para ${companyId} cambiado a: ${state}`
-        );
-        // clients[companyId].whatsappReady = state === "CONNECTED"; // 'ready' es más fiable
-        if (clients[companyId]) clients[companyId].status = state; // Guardar estado detallado si quieres
-    });
-
-    client.on("message", async (msg) => {
-        // ... (lógica de manejo de mensajes igual que antes)
-        try {
-            if (!msg.isStatus) { // Ignorar historias de estado
-                console.log(
-                    `Mensaje recibido para ${companyId} de ${msg._data.notifyName}: ${msg.body}`
-                );
-                // Tu lógica para procesar mensajes entrantes aquí
-            }
-        } catch (error) {
-            console.error(`Error al procesar mensaje entrante para ${companyId}:`, error);
-        }
-    });
-
-    // Iniciar el cliente
-    client.initialize().catch(err => {
-        console.error(`Error durante client.initialize() para ${companyId}:`, err);
-        if (clients[companyId]) {
-            clients[companyId].whatsappReady = false;
-            clients[companyId].qrCodeImage = null;
-            clients[companyId].error = err;
-            delete clients[companyId].client; // Eliminar instancia si initialize falla fatalmente
-        }
-    });
-
-    console.log(`Proceso de inicialización (client.initialize()) invocado para ${companyId}.`);
+let templates = {};
+try {
+    templates = loadTemplates();
+    console.log(`[whatsappController] Templates cargados: ${Object.keys(templates).join(', ')}`);
+} catch (e) {
+    console.warn('[whatsappController] No se pudieron cargar templates:', e.message);
 }
-
-
-// --- FUNCIÓN OPTIMIZADA: Registrar sesiones existentes (sin inicializar navegadores) ---
-// Las sesiones se inicializan bajo demanda cuando se llama a /session-info/:companyId
-const initializeAllClientsFromSessions = async () => {
-    console.log("--- Registrando sesiones existentes (inicialización diferida) ---");
-    const sessionsDir = path.join(__dirname, '..', '.wwebjs_auth');
-
-    try {
-        const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
-
-        const sessionFolders = entries
-            .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('session-'))
-            .map(dirent => dirent.name);
-
-        if (sessionFolders.length === 0) {
-            console.log("No se encontraron carpetas de sesión existentes en:", sessionsDir);
-            return;
-        }
-
-        console.log(`Se encontraron ${sessionFolders.length} sesión(es) guardada(s): ${sessionFolders.join(', ')}`);
-
-        // CAMBIO: Solo registrar en memoria, NO inicializar navegadores
-        for (const folderName of sessionFolders) {
-            const companyId = folderName.replace('session-', '');
-
-            // Registrar la sesión en memoria sin inicializar el cliente
-            clients[companyId] = {
-                whatsappReady: false,
-                qrCodeImage: null,
-                client: null,
-                qrAttempts: 0,
-                pausedUntil: null,
-                sessionExists: true  // Indicador de que hay sesión guardada
-            };
-            console.log(`[LAZY] Sesión ${companyId} registrada. Se inicializará cuando se solicite.`);
-        }
-
-        console.log("--- Sesiones registradas. Esperando solicitudes para inicializar. ---");
-
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            console.log(`El directorio de sesiones no existe en ${sessionsDir}. No hay sesiones que registrar.`);
-        } else {
-            console.error(`Error al leer el directorio de sesiones ${sessionsDir}:`, error);
-        }
-    }
-};
-
-
-// Desconecta y elimina la autenticación local de un cliente
-const disconnectClientByCompanyId = async (req, res) => {
-    const { companyId } = req.params;
-
-    if (!clients[companyId]) {
-        // Si no existe la entrada, ya está "desconectado" y sin archivos de sesión manejados por esta lógica
-        return res.status(404).json({
-            message: `No se encontró registro de un cliente de WhatsApp para la compañía ${companyId}.`,
-        });
-    }
-
-    try {
-        console.log(`Intentando desconectar y eliminar la autenticación para ${companyId}.`);
-
-        // Si existe una instancia del cliente, desloguearla
-        if (clients[companyId].client) {
-            await clients[companyId].client.logout();
-            console.log(`Cliente desconectado via logout para ${companyId}.`);
-            delete clients[companyId].client; // Eliminar la referencia
-        }
-
-        // Limpiar la información del cliente en memoria
-        clients[companyId].whatsappReady = false;
-        clients[companyId].qrCodeImage = null;
-        delete clients[companyId].error; // Limpiar errores
-        // Opcional: podrías eliminar la entrada completa si no quieres rastrear clientes desconectados
-        // delete clients[companyId];
-
-
-        // Eliminar los archivos de sesión locales
-        // Asegúrate de que esta ruta sea correcta relativa a donde se ejecutan los archivos.
-        // .wwebjs_auth se crea en el directorio de trabajo, no en el de los controladores.
-        const sessionFolderPath = path.join(__dirname, '..', '.wwebjs_auth', `session-${companyId}`);
-
-        try {
-            // recursive: true para borrar directorios y force: true para ignorar si no existe
-            await fs.rm(sessionFolderPath, { recursive: true, force: true });
-            console.log(`Archivos de sesión eliminados para ${companyId} en: ${sessionFolderPath}`);
-        } catch (err) {
-            // No es un error crítico si los archivos ya no estaban, solo lo registramos
-            console.warn(`Advertencia: Error al intentar eliminar archivos de sesión para ${companyId}:`, err);
-        }
-
-        res.status(200).json({
-            message: `Servicio de WhatsApp desconectado y autenticación local eliminada para la compañía ${companyId}.`
-        });
-    } catch (error) {
-        console.error(
-            `Error al desconectar el cliente de WhatsApp para ${companyId}:`,
-            error
-        );
-        // Aunque hubo un error en logout, intentamos limpiar el estado en memoria y los archivos.
-        // Reportamos el error original del logout.
-        res.status(500).json({
-            message: `Error al desconectar el servicio de WhatsApp para la compañía ${companyId}. Es posible que deba limpiar manualmente.`,
-            error: error.toString(),
-        });
-    }
-};
-
-// --- NUEVA FUNCIÓN PARA ELIMINAR COMPLETAMENTE UN CLIENTE ---
-const deleteClientByCompanyId = async (req, res) => {
-    const { companyId } = req.params;
-
-    if (!clients[companyId]) {
-        return res.status(404).json({
-            message: `No se encontró registro de un cliente para la compañía ${companyId}.`,
-        });
-    }
-
-    try {
-        console.log(`Intentando eliminar por completo el cliente y la sesión para ${companyId}.`);
-
-        // 1. Desconectar y destruir la instancia del cliente si existe
-        if (clients[companyId].client) {
-            await clients[companyId].client.destroy(); // Usar destroy para una limpieza más profunda
-            console.log(`Instancia del cliente destruida para ${companyId}.`);
-        }
-
-        // 2. Eliminar la carpeta de sesión
-        const sessionFolderPath = path.join(__dirname, '..', '.wwebjs_auth', `session-${companyId}`);
-        try {
-            await fs.rm(sessionFolderPath, { recursive: true, force: true });
-            console.log(`Archivos de sesión eliminados para ${companyId} en: ${sessionFolderPath}`);
-        } catch (err) {
-            console.warn(`Advertencia: Error al intentar eliminar la carpeta de sesión para ${companyId}:`, err);
-        }
-
-        // 3. Eliminar la entrada completa del objeto de clientes en memoria
-        delete clients[companyId];
-        console.log(`Entrada en memoria para ${companyId} eliminada.`);
-
-        res.status(200).json({
-            message: `Cliente para la compañía ${companyId} eliminado por completo (sesión y datos en memoria).`,
-        });
-
-    } catch (error) {
-        console.error(`Error al eliminar completamente el cliente para ${companyId}:`, error);
-        res.status(500).json({
-            message: `Error al eliminar el cliente para la compañía ${companyId}.`,
-            error: error.toString(),
-        });
-    }
-};
-
-
-// Retorna la cadena base64 del código QR (si está disponible)
-const showQRCodeBasic = (companyId) => {
-    if (clients[companyId] && clients[companyId].qrCodeImage) {
-        return clients[companyId].qrCodeImage;
-    } else if (clients[companyId] && clients[companyId].whatsappReady) {
-        return "Cliente conectado. QR no disponible.";
-    } else if (clients[companyId] && clients[companyId].error) {
-        return `Error: ${clients[companyId].error.message}`;
-    }
-    else {
-        return "Cliente no inicializado o Código QR no disponible";
-    }
-}
-
-// Muestra la imagen del código QR en una página HTML simple
-const showQRCode = (req, res) => {
-    const { companyId } = req.params;
-    const qrCode = showQRCodeBasic(companyId); // Obtiene la cadena base64 o el mensaje
-
-    if (qrCode && qrCode.startsWith('data:image/png;base64,')) {
-        res.send(`<img src="${qrCode}" alt="Código QR para WhatsApp" style="max-width: 300px;">`);
-    } else {
-        res.status(404).send(`<h3>${qrCode} para ${companyId}.</h3>`);
-    }
-}
-
-// Envía un mensaje de texto básico
-const sendMessage = async (req, res) => {
-    const { companyId } = req.params;
-    const { phone, name, message } = req.body; // Asumimos que `phone` llega sin formato @c.us
-
-    if (!clients[companyId] || !clients[companyId].whatsappReady) {
-        console.error(`Cliente de WhatsApp no está listo para ${companyId}.`);
-        return res.status(500).json({
-            message: `El cliente de WhatsApp para ${companyId} aún no está listo o no está conectado.`,
-        });
-    }
-
-    if (!phone || !message) {
-        return res.status(400).json({
-            message: "Faltan parámetros: número de teléfono y/o mensaje.",
-        });
-    }
-
-    const formattedPhone = `${phone}@c.us`; // Formato necesario para whatsapp-web.js
-    const fullMessage = `Hola ${name || 'cliente'}, ${message}`; // Usar "cliente" si no hay nombre
-
-    try {
-        // Pequeño delay opcional para evitar saturar (ajustar si es necesario)
-        // await new Promise(resolve => setTimeout(resolve, 500));
-
-        const chat = await clients[companyId].client.getChatById(formattedPhone);
-        // Check if the chat exists before sending
-        if (!chat) {
-            console.warn(`El chat con ${formattedPhone} no existe para ${companyId}. Intentando enviar de todos modos.`);
-            // whatsapp-web.js usually creates the chat on the first message, but good to know
-        }
-
-        await clients[companyId].client.sendMessage(formattedPhone, fullMessage);
-        console.log(
-            `Mensaje enviado a ${formattedPhone} para ${companyId}: "${fullMessage}"`
-        );
-
-        res.status(200).json({
-            message: `Mensaje enviado exitosamente a ${name || phone} para ${companyId}.`,
-        });
-    } catch (error) {
-        console.error(`Error al enviar el mensaje para ${companyId} a ${formattedPhone}:`, error);
-        res.status(500).json({
-            message: "Error al enviar el mensaje",
-            error: error.message, // Envía solo el mensaje del error
-        });
-    }
-}
-
-// Envía un mensaje de texto básico
-const sendMessageCustom = async (req, res) => {
-    const { companyId } = req.params;
-    const { phone, name, message } = req.body; // Asumimos que `phone` llega sin formato @c.us
-
-    if (!clients[companyId] || !clients[companyId].whatsappReady) {
-        console.error(`Cliente de WhatsApp no está listo para ${companyId}.`);
-        return res.status(500).json({
-            message: `El cliente de WhatsApp para ${companyId} aún no está listo o no está conectado.`,
-        });
-    }
-
-    if (!phone || !message) {
-        return res.status(400).json({
-            message: "Faltan parámetros: número de teléfono y/o mensaje.",
-            phone: phone,
-            message: message,
-        });
-    } else {
-        console.log('los datos están completos')
-    }
-
-    const formattedPhone = `${phone}@c.us`; // Formato necesario para whatsapp-web.js
-    const fullMessage = message; // Preparar mensaje
-
-    try {
-        // OPTIMIZADO: Usar sendMessage directamente con sendSeen:false
-        // El error 'markedUnread' ocurre cuando sendMessage intenta llamar sendSeen internamente
-        // Deshabilitando sendSeen evitamos este bug conocido de whatsapp-web.js
-        await clients[companyId].client.sendMessage(formattedPhone, fullMessage, { sendSeen: false });
-        console.log(
-            `Mensaje enviado a ${formattedPhone} para ${companyId}: "${fullMessage.substring(0, 50)}..."`
-        );
-
-        res.status(200).json({
-            message: `Mensaje enviado exitosamente a ${name || phone} para ${companyId}.`,
-        });
-    } catch (error) {
-        console.error(`Error al enviar el mensaje para ${companyId} a ${formattedPhone}: `, error);
-        res.status(500).json({
-            message: "Error al enviar el mensaje",
-            error: error.message,
-        });
-    }
-}
-
-// Envía un mensaje usando plantillas predefinidas
-const sendTemplateMessage = async (req, res) => {
-    const { companyId } = req.params;
-    const data = req.body; // El cuerpo completo de la solicitud es el objeto de datos
-
-    // Nota: Aquí se mantenía la inicialización si el cliente no existía.
-    // Si quieres que la inicialización sea un paso separado (ej: ruta POST /initialize/:companyId),
-    // remueve el siguiente bloque if y el endpoint /session-info también debería inicializar.
-    if (!clients[companyId] || !clients[companyId].client) {
-        // NUEVO: Verificar si está pausado antes de inicializar
-        if (clients[companyId] && clients[companyId].pausedUntil && Date.now() < clients[companyId].pausedUntil) {
-            const remainingMs = clients[companyId].pausedUntil - Date.now();
-            const remainingMin = Math.ceil(remainingMs / 60000);
-            return res.status(503).json({
-                message: `La sesión de WhatsApp está temporalmente pausada. Intente nuevamente en ${remainingMin} minuto(s).`,
-                pausedUntil: clients[companyId].pausedUntil
-            });
-        }
-
-        console.warn(`Cliente para ${companyId} no inicializado al intentar enviar plantilla.Inicializando ahora.`);
-        initializeClient(companyId);
-        // Como la inicialización es async, no podemos garantizar que esté listo inmediatamente.
-        // Devolvemos un estado indicando que la inicialización ha comenzado.
-        // El frontend o un proceso de fondo debería verificar el estado después.
-        return res.status(409).json({ // 409 Conflict o 202 Accepted podrían ser alternativas
-            message: `El cliente de WhatsApp para ${companyId} no estaba listo.Se ha iniciado el proceso de inicialización.Intente enviar el mensaje nuevamente en unos instantes.`,
-        });
-    }
-
-    if (!clients[companyId].whatsappReady) {
-        return res.status(503).json({ // 503 Service Unavailable
-            message: `El cliente de WhatsApp para ${companyId} no está conectado(estado: ${clients[companyId].client.state || 'desconocido'}).`,
-        });
-    }
-
-
-    if (!data.phone_client || !data.template) {
-        return res.status(400).json({
-            message: "Faltan parámetros en el cuerpo de la solicitud: se requieren 'phone_client' y 'template'.",
-        });
-    }
-
-    const formattedPhone = `${data.phone_client}@c.us`;
-    const templateName = data.template;
-
-    let fullMessage;
-
-    if (templates[templateName]) {
-        try {
-            // La función de plantilla toma el objeto 'data' completo
-            fullMessage = templates[templateName](data);
-            if (typeof fullMessage !== 'string' || fullMessage.length === 0) {
-                throw new Error(`La plantilla '${templateName}' generó un mensaje inválido.`);
-            }
-        } catch (templateError) {
-            console.error(`Error al procesar la plantilla '${templateName}' para ${companyId}: `, templateError);
-            return res.status(400).json({
-                message: `Error al procesar la plantilla '${templateName}'.`,
-                error: templateError.message,
-            });
-        }
-    } else {
-        return res.status(404).json({
-            message: `Template '${templateName}' no encontrado.`,
-        });
-    }
-
-    try {
-        // Pequeño delay opcional
-        // await new Promise(resolve => setTimeout(resolve, 500));
-
-        const chat = await clients[companyId].client.getChatById(formattedPhone);
-        if (!chat) {
-            console.warn(`El chat con ${formattedPhone} no existe para ${companyId}. Intentando enviar plantilla de todos modos.`);
-        }
-
-        await clients[companyId].client.sendMessage(formattedPhone, fullMessage);
-        console.log(
-            `Mensaje de plantilla('${templateName}') enviado a ${formattedPhone} para ${companyId}: "${fullMessage}"`
-        );
-
-        res.status(200).json({
-            message: `Mensaje de plantilla '${templateName}' enviado exitosamente a ${data.first_name || data.phone_client} para ${companyId}.`,
-        });
-    } catch (error) {
-        console.error(`Error al enviar el mensaje de plantilla para ${companyId} a ${formattedPhone}: `, error);
-        res.status(500).json({
-            message: "Error al enviar el mensaje de plantilla",
-            error: error.message,
-        });
-    }
-}
-
-// Obtiene el estado y el QR (si es necesario) para un cliente
-const getSessionInfo = async (companyId) => {
-    console.log(`Solicitando información de sesión para companyId: ${companyId} `);
-
-    // NUEVO: Verificar primero si está pausado
-    if (clients[companyId] && clients[companyId].pausedUntil && Date.now() < clients[companyId].pausedUntil) {
-        return {
-            status: 'PAUSED',
-            ws_ready: false,
-            qr: null,
-            pausedUntil: clients[companyId].pausedUntil,
-            message: `Sesión pausada temporalmente. Espere ${Math.ceil((clients[companyId].pausedUntil - Date.now()) / 60000)} minuto(s).`
-        };
-    }
-
-    if (!clients[companyId] || !clients[companyId].client) {
-        console.log(`Cliente para ${companyId} no encontrado.Inicializando uno nuevo.`);
-        initializeClient(companyId);
-        // Después de inicializar, esperamos un poco a que se genere el QR o se conecte
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Espera inicial
-    }
-
-    // Esperar a que el cliente esté listo o que haya un QR disponible
-    // Añadimos un límite de tiempo para no esperar indefinidamente
-    const waitTimeout = 30000; // 30 segundos
-    const startTime = Date.now();
-
-    while (true) {
-        const elapsed = Date.now() - startTime;
-        if (elapsed > waitTimeout) {
-            console.error(`getSessionInfo: Timeout esperando por el estado o QR para ${companyId} `);
-            return {
-                qr: null,
-                ws_ready: false,
-                message: `Timeout(${waitTimeout / 1000}s) esperando estado para ${companyId}.Intente reiniciar o verificar logs.`,
-                error: "Timeout"
-            };
-        }
-
-        const clientData = clients[companyId];
-        if (clientData) {
-            if (clientData.whatsappReady) {
-                console.log(`getSessionInfo: Cliente ${companyId} está listo.`);
-                try {
-                    // Opcional: obtener info detallada del cliente si está listo
-                    const info = await clientData.client.info;
-                    return {
-                        qr: null, // Ya no se necesita QR
-                        ws_ready: true,
-                        message: `Cliente de WhatsApp listo para la compañía ID ${companyId}.Número: ${info.wid.user}.`,
-                        info: { // Información útil del cliente conectado
-                            id: info.wid._serialized,
-                            number: info.wid.user,
-                            platform: info.platform,
-                            pushname: info.pushname,
-                        }
-                    };
-                } catch (infoError) {
-                    console.error(`getSessionInfo: Error obteniendo info del cliente ${companyId}: `, infoError);
-                    // Aún si falla obtener info, sabemos que está listo
-                    return {
-                        qr: null,
-                        ws_ready: true,
-                        message: `Cliente de WhatsApp listo para la compañía ID ${companyId}, pero hubo un error al obtener la información detallada.`,
-                        error: infoError.message
-                    };
-                }
-
-            } else if (clientData.qrCodeImage) {
-                console.log(`getSessionInfo: QR disponible para ${companyId}.`);
-                return {
-                    qr: clientData.qrCodeImage,
-                    ws_ready: false,
-                    message: `Escanee el código QR para la compañía ID ${companyId}.`,
-                };
-            } else if (clientData.error) {
-                console.error(`getSessionInfo: Error detectado para ${companyId}.`, clientData.error);
-                return {
-                    qr: null,
-                    ws_ready: false,
-                    message: `Error en el cliente para ${companyId}: ${clientData.error.message} `,
-                    error: clientData.error.message
-                };
-            }
-            // If clientData exists but neither ready nor QR nor error, continue waiting
-        } else {
-            // This case should ideally not happen if initializeClient was called,
-            // but as a safeguard:
-            console.warn(`getSessionInfo: Client object disappeared for ${companyId} while waiting.`);
-            return {
-                qr: null,
-                ws_ready: false,
-                message: `Estado desconocido para la compañía ID ${companyId}. El objeto cliente no fue encontrado.`,
-                error: "Client object missing"
-            };
-        }
-
-        // Wait before checking again
-        await new Promise(resolve => setTimeout(resolve, 500)); // Esperar 500ms
-    }
-};
-
-// Obtiene una lista del estado de todos los clientes registrados
-const getConnectedClients = async (req, res) => {
-    try {
-        const clientPromises = Object.keys(clients).map(async (companyId) => {
-            const clientData = clients[companyId];
-            const clientState = clientData && clientData.client ? clientData.client.state : 'UNINITIALIZED';
-            const errorMessage = clientData && clientData.error ? clientData.error.message : null;
-
-            let phoneNumber = null;
-            let pushname = null;
-
-            if (clientData && clientData.whatsappReady && clientData.client) {
-                try {
-                    const info = await clientData.client.info;
-                    phoneNumber = info.wid.user;
-                    pushname = info.pushname;
-                } catch (infoError) {
-                    console.error(`Could not get client info for ${companyId}:`, infoError);
-                }
-            }
-
-            return {
-                company_id: companyId,
-                whatsapp_ready: clientData ? clientData.whatsappReady : false,
-                status_detail: clientData ? (clientData.whatsappReady ? 'READY' : (clientData.qrCodeImage ? 'REQUIRES_QR' : (errorMessage ? 'ERROR' : (clientState === 'UNINITIALIZED' ? 'STARTING' : clientState)))) : 'NOT_REGISTERED',
-                error_message: errorMessage,
-                phoneNumber: phoneNumber,
-                pushname: pushname,
-            };
-        });
-
-        const allClientsInfo = await Promise.all(clientPromises);
-
-        res.status(200).json(allClientsInfo);
-    } catch (error) {
-        console.error("Error al obtener la lista de clientes:", error);
-        res.status(500).json({
-            message: "Error al obtener la lista de clientes",
-            error: error.message,
-        });
-    }
-};
-
-// Obtiene los chats con el último mensaje para un cliente específico
-const getChatsByCompanyId = async (req, res) => {
-    const { companyId } = req.params;
-    console.log(`Intentando obtener chats para companyId: ${companyId} `);
-
-    if (!clients[companyId] || !clients[companyId].whatsappReady) {
-        console.warn(`Intento de obtener chats para ${companyId}, pero el cliente no está listo.`);
-        return res.status(400).json({
-            message: `El cliente de WhatsApp para la compañía ${companyId} no está listo o no está conectado.`,
-        });
-    }
-
-    try {
-        // Limita el número total de chats para evitar sobrecarga, si es necesario
-        const chats = await clients[companyId].client.getChats();
-
-        // Filtra las historias de estado y, opcionalmente, grupos si solo quieres chats individuales
-        const filteredChats = chats.filter(chat => !chat.isStatus /* && !chat.isGroup */);
-
-        const chatList = await Promise.all(filteredChats.map(async chat => {
-            let lastMessageBody = null;
-            try {
-                // Intenta obtener el último mensaje
-                const messages = await chat.fetchMessages({ limit: 1 });
-                lastMessageBody = messages.length > 0 ? messages[0].body : null;
-            } catch (msgError) {
-                console.warn(`Error fetching last message for chat ${chat.id._serialized} of ${companyId}: `, msgError);
-                lastMessageBody = "Error al cargar mensaje.";
-            }
-
-
-            return {
-                id: chat.id._serialized,
-                name: chat.name,
-                isGroup: chat.isGroup,
-                unreadCount: chat.unreadCount,
-                lastMessage: lastMessageBody,
-                timestamp: chat.lastMessage?._data?.t * 1000 || null, // Timestamp en milisegundos
-                // Puedes incluir más información del chat si es necesario
-                // contact: await chat.getContact() // Costoso si se hace para todos los chats
-            };
-        }));
-
-        // Opcional: Ordenar chats por fecha del último mensaje
-        chatList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-
-        res.status(200).json(chatList);
-    } catch (error) {
-        console.error(`Error al obtener los chats para la compañía ${companyId}: `, error);
-        res.status(500).json({
-            message: `Error al obtener los chats para la compañía ${companyId} `,
-            error: error.message,
-        });
-    }
-};
-
-// Reinicia el cliente de WhatsApp para una compañía específica
-const restartClientByCompanyId = async (req, res) => {
-    const { companyId } = req.params;
-    console.log(`Solicitud de reinicio para companyId: ${companyId} `);
-
-    // Verificamos si existe la entrada para este companyId
-    if (!clients[companyId]) {
-        console.log(`No se encontró entrada de cliente para ${companyId}. Inicializando una nueva.`);
-        initializeClient(companyId);
-        return res.status(200).json({
-            message: `No se encontró registro de un cliente para la compañía ${companyId}, iniciando un nuevo proceso.`,
-        });
-    }
-
-    try {
-        console.log(`Intentando destruir cliente existente para ${companyId}.`);
-
-        // 1. Destruir la instancia actual del cliente si existe
-        if (clients[companyId].client) {
-            // destroy() es asíncrono y limpia recursos de puppeteer
-            await clients[companyId].client.destroy();
-            console.log(`Cliente destruido para ${companyId}.`);
-        } else {
-            console.log(`No había instancia de cliente activa para destruir para ${companyId}.`);
-        }
-
-        // 2. Limpiar el estado en memoria para este companyId
-        clients[companyId].whatsappReady = false;
-        clients[companyId].qrCodeImage = null;
-        delete clients[companyId].client; // Eliminar la referencia al cliente destruido
-        delete clients[companyId].error; // Limpiar cualquier error previo
-
-        // 3. Inicializar una nueva instancia del cliente
-        // La función initializeClient se encargará de crear la nueva instancia,
-        // configurar los listeners y llamar a client.initialize().
-        initializeClient(companyId);
-
-        console.log(`Proceso de reinicio iniciado para ${companyId}.`);
-
-        // Respondemos inmediatamente indicando que el proceso de reinicio ha comenzado.
-        // El estado final (listo o requiriendo QR) se reflejará en getSessionInfo o getConnectedClients.
-        res.status(200).json({
-            message: `Se ha iniciado el proceso de reinicio del servicio de WhatsApp para la compañía ${companyId}. Por favor, espere a que el cliente se conecte o se muestre el nuevo código QR.`,
-        });
-
-    } catch (error) {
-        console.error(
-            `Error general durante el proceso de reinicio para ${companyId}: `,
-            error
-        );
-        res.status(500).json({
-            message: `Error al reiniciar el servicio de WhatsApp para la compañía ${companyId} `,
-            error: error.message,
-        });
-    }
-};
-
-// --- NUEVA FUNCIÓN PARA ENVIAR MENSAJE DIRECTO ---
-const sendDirectMessage = async (req, res) => {
-    const { companyId } = req.params; // ID_EMPRESA viene de la URL
-    const { phone, message } = req.body; // Teléfono y mensaje vienen del cuerpo de la petición
-
-    if (!clients[companyId] || !clients[companyId].whatsappReady) {
-        return res.status(503).json({ // 503 Service Unavailable
-            success: false,
-            message: `El cliente de WhatsApp para la compañía ${companyId} no está listo o no está conectado.`,
-        });
-    }
-
-    if (!phone || !message) {
-        return res.status(400).json({
-            success: false,
-            message: "Faltan parámetros obligatorios: 'phone' y 'message'.",
-        });
-    }
-
-    const formattedPhone = `${phone}@c.us`;
-
-    try {
-        console.log(`Intentando enviar mensaje a ${formattedPhone} para ${companyId} (Fire and Forget).`);
-
-        // NO USAMOS AWAIT para evitar el bug de la librería que ocurre después de enviar.
-        clients[companyId].client.sendMessage(formattedPhone, message);
-
-        // Asumimos éxito y respondemos inmediatamente.
-        console.log(`Mensaje para ${formattedPhone} despachado. Respondiendo con éxito.`);
-        res.status(200).json({
-            success: true,
-            message: `Mensaje para el número ${phone} ha sido despachado exitosamente.`,
-        });
-
-    } catch (error) {
-        // Este bloque ahora solo capturará errores síncronos inmediatos, no el fallo de la promesa.
-        console.error(`Error síncrono al intentar despachar el mensaje para ${companyId} a ${formattedPhone}:`, error);
-        res.status(500).json({
-            success: false,
-            message: "Error interno al intentar despachar el mensaje.",
-            error: error.message,
-        });
-    }
-};
-
-
-// --- Función para obtener estado del cliente (para WebSocket) ---
-const getClientStatus = (companyId) => {
-    const clientData = clients[companyId];
-
-    if (!clientData) {
-        return {
-            status: 'NOT_REGISTERED',
-            ws_ready: false,
-            qr: null,
-            message: 'Empresa no registrada en el servicio de WhatsApp'
-        };
-    }
-
-    if (clientData.whatsappReady) {
-        return {
-            status: 'READY',
-            ws_ready: true,
-            qr: null,
-            message: 'Cliente de WhatsApp conectado'
-        };
-    }
-
-    if (clientData.qrCodeImage) {
-        return {
-            status: 'REQUIRES_QR',
-            ws_ready: false,
-            qr: clientData.qrCodeImage,
-            message: 'Escanee el código QR para conectar'
-        };
-    }
-
-    if (clientData.pausedUntil && Date.now() < clientData.pausedUntil) {
-        return {
-            status: 'PAUSED',
-            ws_ready: false,
-            qr: null,
-            pausedUntil: clientData.pausedUntil,
-            message: 'Sesión pausada temporalmente'
-        };
-    }
-
-    if (clientData.error) {
-        return {
-            status: 'ERROR',
-            ws_ready: false,
-            qr: null,
-            error: clientData.error.message,
-            message: 'Error en el cliente'
-        };
-    }
-
-    return {
-        status: 'INITIALIZING',
-        ws_ready: false,
-        qr: null,
-        message: 'Cliente inicializándose...'
-    };
-};
-
 
 /**
- * Función interna para reiniciar el cliente (usada por API y WebSocket)
+ * Convierte "521xxxxxxxxxx" → "521xxxxxxxxxx@s.whatsapp.net"
+ * Acepta números con +, espacios o guiones.
  */
-const restartClient = async (companyId) => {
-    console.log(`[Internal] Solicitud de reinicio para companyId: ${companyId}`);
+function toJid(phone) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits) throw new Error('Número de teléfono inválido');
+    return `${digits}@s.whatsapp.net`;
+}
 
-    try {
-        // 1. Destruir instancia previa
-        if (clients[companyId] && clients[companyId].client) {
-            console.log(`Destruyendo cliente previo para ${companyId}...`);
-            await clients[companyId].client.destroy();
-        }
+// ---------------------------------------------------------------------------
+// Funciones de bajo nivel (usadas por websocket.js)
+// ---------------------------------------------------------------------------
 
-        // 2. Limpiar memoria
-        if (clients[companyId]) {
-            clients[companyId].whatsappReady = false;
-            clients[companyId].qrCodeImage = null;
-            delete clients[companyId].client;
-            delete clients[companyId].error;
-        }
-
-        // 3. Inicializar nuevo con force=true
-        initializeClient(companyId, true);
-        return true;
-    } catch (error) {
-        console.error(`Error en restartClient para ${companyId}:`, error);
-        throw error;
+function getClientStatus(companyId) {
+    const status = waManager.getStatus(companyId);
+    // Si no hay sesión en memoria, dispararla en background. La próxima
+    // llamada (o el subscribe de Socket.IO) verá el estado actualizado.
+    if (status.status === 'NOT_REGISTERED') {
+        waManager.init(companyId).catch((e) => {
+            console.error(`[whatsappController] init lazy de ${companyId} falló:`, e.message);
+        });
+        return { ...status, status: 'INITIALIZING', message: 'Reanudando sesión...' };
     }
-};
+    return status;
+}
+
+async function initializeClient(companyId) {
+    return waManager.init(companyId);
+}
+
+async function restartClient(companyId) {
+    return waManager.restart(companyId);
+}
+
+async function disconnectClient(companyId) {
+    return waManager.disconnect(companyId);
+}
 
 /**
- * Función interna para desconectar el cliente (usada por API y WebSocket)
+ * En Baileys no precargamos sesiones al boot: cada empresa se inicializa
+ * lazy en el primer subscribe / session-info. Mantener la firma para que
+ * app.js no cambie.
  */
-const disconnectClient = async (companyId) => {
-    console.log(`[Internal] Solicitud de desconexión robusta para companyId: ${companyId}`);
+async function initializeAllClientsFromSessions() {
+    console.log('[whatsappController] Las sesiones se inician lazy bajo demanda.');
+    return;
+}
 
-    // [Fix 1] Actualizar estado en memoria INMEDIATAMENTE
-    if (clients[companyId]) {
-        clients[companyId].whatsappReady = false;
-        clients[companyId].qrCodeImage = null;
-    }
+// ---------------------------------------------------------------------------
+// Handlers HTTP (Express)
+// ---------------------------------------------------------------------------
 
+async function getSessionInfo(companyId) {
+    // Mismo contrato que el legacy: retorna objeto, NO usa res
+    return waManager.getSessionInfo(companyId);
+}
+
+async function showQRCode(req, res) {
+    const { companyId } = req.params;
     try {
-        if (clients[companyId] && clients[companyId].client) {
-            console.log(`Ejecutando logout para ${companyId} con timeout...`);
-
-            // [Fix 2] Timeout para logout (5s)
-            const logoutPromise = clients[companyId].client.logout();
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Logout timed out')), 5000));
-
-            try {
-                await Promise.race([logoutPromise, timeoutPromise]);
-            } catch (e) {
-                console.warn(`Logout fallido o timeout para ${companyId}. Forzando destrucción.`, e);
-                try { await clients[companyId].client.destroy(); } catch (err) { }
-            }
+        const info = await waManager.getSessionInfo(companyId);
+        if (info.qr) {
+            return res.send(
+                `<html><body style="background:#222;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+                    <img src="${info.qr}" style="max-width:90vw;max-height:90vh"/>
+                </body></html>`
+            );
         }
-
-        // [Fix 3] Limpieza forzada de archivos y memoria SIEMPRE
-        console.log(`Limpiando archivos de sesión y memoria para ${companyId}...`);
-        const sessionFolderPath = path.join(__dirname, '..', '.wwebjs_auth', `session-${companyId}`);
-        try {
-            await fs.rm(sessionFolderPath, { recursive: true, force: true });
-        } catch (e) { console.error("Error borrando carpeta:", e); }
-
-        if (clients[companyId]) {
-            delete clients[companyId];
-        }
-
-        return true;
-    } catch (error) {
-        console.error(`Error crítico en disconnectClient para ${companyId}:`, error);
-        return false;
+        res.status(404).send('QR no disponible (cliente conectado o estado inválido)');
+    } catch (e) {
+        res.status(500).send(`Error: ${e.message}`);
     }
-};
+}
+
+function showQRCodeBasic(companyId) {
+    const s = waManager.getSession(companyId);
+    if (s && s.qr) return s.qr;
+    return 'Cliente conectado. QR no disponible.';
+}
+
+async function getConnectedClients(req, res) {
+    try {
+        res.status(200).json(waManager.listSessions());
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+}
+
+async function getChatsByCompanyId(req, res) {
+    // TODO Fase 6: leer wa_conversations + wa_messages del tenant.
+    // Hasta entonces devolvemos array vacío para no romper el frontend.
+    res.status(200).json([]);
+}
+
+async function restartClientByCompanyId(req, res) {
+    const { companyId } = req.params;
+    try {
+        await waManager.restart(companyId);
+        res.status(200).json({ message: `Cliente ${companyId} reiniciado.` });
+    } catch (e) {
+        res.status(500).json({ message: 'Error reiniciando cliente', error: e.message });
+    }
+}
+
+async function disconnectClientByCompanyId(req, res) {
+    const { companyId } = req.params;
+    try {
+        const result = await waManager.disconnect(companyId);
+        res.status(200).json({ message: result.message });
+    } catch (e) {
+        res.status(500).json({ message: 'Error desconectando cliente', error: e.message });
+    }
+}
+
+async function deleteClientByCompanyId(req, res) {
+    const { companyId } = req.params;
+    try {
+        await waManager.destroy(companyId);
+        res.status(200).json({ message: `Cliente ${companyId} eliminado.` });
+    } catch (e) {
+        res.status(500).json({ message: 'Error eliminando cliente', error: e.message });
+    }
+}
+
+// ----- Envío de mensajes -----
+
+async function sendMessage(req, res) {
+    // /send-message-basic/:companyId  → antepone "Hola <name>, "
+    const { companyId } = req.params;
+    const { phone, name, message } = req.body || {};
+    if (!phone || !message) {
+        return res.status(400).json({ message: 'phone y message son requeridos' });
+    }
+    try {
+        const body = `Hola ${name || ''}, ${message}`.trim();
+        await waManager.sendText(companyId, toJid(phone), body);
+        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+}
+
+async function sendMessageCustom(req, res) {
+    const { companyId } = req.params;
+    const { phone, message } = req.body || {};
+    if (!phone || !message) {
+        return res.status(400).json({ message: 'phone y message son requeridos' });
+    }
+    try {
+        await waManager.sendText(companyId, toJid(phone), message);
+        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+}
+
+async function sendTemplateMessage(req, res) {
+    const { companyId } = req.params;
+    const { phone_client, template, ...vars } = req.body || {};
+    if (!phone_client || !template) {
+        return res.status(400).json({ message: 'phone_client y template son requeridos' });
+    }
+    const tpl = templates[template];
+    if (typeof tpl !== 'function') {
+        return res.status(404).json({ message: `Template '${template}' no encontrado` });
+    }
+    try {
+        const body = tpl({ ...vars, phone: phone_client });
+        await waManager.sendText(companyId, toJid(phone_client), body);
+        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+}
+
+async function sendDirectMessage(req, res) {
+    const { companyId } = req.params;
+    const { phone, message } = req.body || {};
+    if (!phone || !message) {
+        return res.status(400).json({ success: false, message: 'phone y message son requeridos' });
+    }
+    // fire-and-forget como el legacy
+    waManager.sendText(companyId, toJid(phone), message).catch((e) => {
+        console.error(`[whatsappController] sendDirectMessage falló para ${companyId}:`, e.message);
+    });
+    res.status(200).json({ success: true, message: 'Solicitud aceptada' });
+}
 
 module.exports = {
+    // Bajo nivel
     getClientStatus,
-    getSessionInfo,
     initializeClient,
+    restartClient,
+    disconnectClient,
     initializeAllClientsFromSessions,
+    // HTTP
+    getSessionInfo,
     showQRCode,
     showQRCodeBasic,
-    sendMessage,
-    sendMessageCustom,
-    sendTemplateMessage,
-    sendDirectMessage,
     getConnectedClients,
     getChatsByCompanyId,
     restartClientByCompanyId,
     disconnectClientByCompanyId,
     deleteClientByCompanyId,
-    restartClient,      // Exportada para WebSocket
-    disconnectClient    // Exportada para WebSocket
+    sendMessage,
+    sendMessageCustom,
+    sendTemplateMessage,
+    sendDirectMessage,
 };

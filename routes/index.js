@@ -28,7 +28,7 @@ const {
     disconnectClientByCompanyId,
     deleteClientByCompanyId, // Importar la nueva función
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
-} = require("../controllers/whatsappDispatcher");
+} = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
 const authenticateToken = require("../middleware/authenticateToken");
 
@@ -219,7 +219,7 @@ router.post("/test-recibir", (req, res) => {
 router.get("/ws-info/:companyId", async (req, res) => {
     const { companyId } = req.params;
     try {
-        const { getClientStatus } = require("../controllers/whatsappDispatcher");
+        const { getClientStatus } = require("../controllers/whatsappController");
         const status = getClientStatus(companyId);
         res.status(200).json(status);
     } catch (error) {

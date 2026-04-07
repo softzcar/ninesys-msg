@@ -14,7 +14,7 @@ const routes = require("./routes/index");
 const { initWebSocket } = require("./websocket");
 
 // *** Importar la función de inicialización de sesiones ***
-const { initializeAllClientsFromSessions } = require("./controllers/whatsappDispatcher");
+const { initializeAllClientsFromSessions } = require("./controllers/whatsappController");
 
 // Servir archivos estáticos desde la carpeta "public"
 app.use(express.static(path.join(__dirname, "public")));
