@@ -237,12 +237,17 @@ async function sendTemplateMessage(req, res) {
 
 async function sendDirectMessage(req, res) {
     const { companyId } = req.params;
-    const { phone, message } = req.body || {};
+    const { phone, message, sent_by_user } = req.body || {};
     if (!phone || !message) {
         return res.status(400).json({ success: false, message: 'phone y message son requeridos' });
     }
     try {
-        const sent = await waManager.sendText(companyId, toJid(phone), message);
+        // Si el caller indica un usuario humano (panel), se reenvía como
+        // via='human' + sentByUser → dispara handoff manual en waManager.
+        const opts = sent_by_user
+            ? { via: 'human', sentByUser: Number(sent_by_user) }
+            : {};
+        const sent = await waManager.sendText(companyId, toJid(phone), message, opts);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         console.error(`[whatsappController] sendDirectMessage falló para ${companyId}:`, e.message);

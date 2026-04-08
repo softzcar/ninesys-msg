@@ -1,0 +1,51 @@
+- **Solicitud del Usuario:** Implementar Fase 8 — auto-respuestas IA con Gemini, toggles global / por conversación, modo bot/human/hybrid y handoff manual al humano para conversaciones individuales.
+- **Fecha y Hora:** 2026-04-08 00:00:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/services/aiService.js (NUEVO — wrapper @google/genai)
+    - msg_ninesys/src/services/waManager.js (maybeAutoReply, sendText acepta opts.via/sentByUser, logging wa_send_log endpoint='ai_auto')
+    - msg_ninesys/src/services/conversationStore.js (recordOutbound acepta via, helpers updateConversationFlags / getConversationFlags / tagSentByUser)
+    - msg_ninesys/controllers/whatsappController.js (7 handlers nuevos + sendDirectMessage acepta sent_by_user)
+    - msg_ninesys/routes/index.js (7 rutas nuevas /ai/* y /conversations/:id/:jid/{ai/toggle,mode,assign,release})
+    - msg_ninesys/db/migrations/001_wa_tables.sql (defaults gemini, columna respond_in_groups)
+    - ninesys-api/public/model/create_new_company_api_emp_N.sql (replicado por regla GEMINI.md)
+    - msg_ninesys/.env.example (GEMINI_API_KEY, AI_DEFAULT_PROVIDER=gemini, modelo gemini-2.5-flash)
+    - msg_ninesys/package.json (+ @google/genai)
+    - msg_ninesys/docs/PHASE_8_TEST_PLAN.md (NUEVO — plan de pruebas manuales)
+    - msg_ninesys/scripts/test-phase-8.js (NUEVO — suite automatizada bloques A-D)
+- **Commits Relacionados:**
+    - msg_ninesys: 4f9a68d feat(ia): Fase 8 - auto-respuestas Gemini con handoff humano (rama feat/baileys-migration)
+    - msg_ninesys: pendiente — fix sendDirectMessage forwarding sent_by_user + este log
+- **Acción Realizada:**
+    1. **8.0 Config:** Añadí GEMINI_API_KEY al .env, defaults Gemini en migración 001 y plantilla create_new_company. Nueva columna respond_in_groups (default 0) anticipada para evitar otra migración.
+    2. **8.1 aiService:** Wrapper sobre @google/genai con generateReply() que lee wa_ai_settings, arma historial de los últimos 12 mensajes en formato Gemini (from_me=true → 'model'), inyecta system_prompt + knowledge_base, llama gemini-2.5-flash. loadSettings/updateSettings/setGlobalEnabled exportadas para los endpoints REST.
+    3. **8.2 Hook auto-respuesta:** Función maybeAutoReply en waManager con 6 guardrails (from_me, conv inexistente, grupo, mode=human, ai_disabled conv, throttle 4s anti-loop). El toggle global lo evalúa aiService leyendo wa_ai_settings.enabled. La respuesta se envía con via='ai' vía sendText extendido.
+    4. **8.3 Handoff manual:** sendText acepta opts.sentByUser; cuando viene presente, después del envío exitoso ejecuta tagSentByUser + updateConversationFlags(mode='human', ai_enabled=0, assigned_to=user) y emite Socket.IO 'conversation:handoff'. Es la implementación de "el empleado tomó la conversación".
+    5. **8.4 Endpoints REST:** 7 rutas nuevas todas con authenticateToken — GET/PUT /ai/settings/:id, POST /ai/toggle/:id (global), POST /conversations/:id/:jid/{ai/toggle,mode,assign,release}. Validaciones 400 (body inválido) y 404 (conversación inexistente).
+    6. **8.5 Guardrails y logging:** Cada auto-respuesta IA queda en wa_send_log con endpoint='ai_auto', requested_by='gemini:<modelo>'. Skip de grupos hardcodeado (decisión del usuario: grupos no son prioridad). Throttle in-memory por jid. Inserts de logging en best-effort para no enmascarar errores reales.
+    7. **8.6 Pruebas:** Creé docs/PHASE_8_TEST_PLAN.md (matriz T1-T10) y scripts/test-phase-8.js (suite automatizada con bloques A=settings+Gemini real, B=reglas decisión, C=handoff DB, D=endpoints REST con JWT generado on-the-fly y express embebido).
+    8. **Bug fix tardío:** sendDirectMessage no propagaba sent_by_user → handoff via /send-direct-message no etiquetaba el mensaje. Añadidas 4 líneas para reenviar via='human' + sentByUser cuando el body lo incluye. Importante para cuando llegue el frontend tipo Wasapi.
+- **Inconvenientes y Desafíos:**
+    1. **Deploy mecanismo confuso:** El VPS no se actualiza por git pull sino por scripts/deploy_msg_ninesys.sh (rsync + pm2 restart). Inicialmente intenté con git pull y fallaron las pruebas porque el VPS estaba en main + commits viejos mientras el código real venía por rsync.
+    2. **ALTER TABLE silencioso:** Mi snippet inicial usaba `ADD COLUMN IF NOT EXISTS` que MariaDB del VPS no soporta para columnas. Falló silenciosamente y los tests A1/A2/B2/B7/D1/D4 fallaron con "Unknown column 'respond_in_groups'". Resuelto con ALTER sin IF NOT EXISTS.
+    3. **Sesión Baileys post-restart:** Tras `pm2 restart`, la sesión se vuelve a inicializar lazy en el primer hit a /ws-info. Si el usuario manda un mensaje WhatsApp en los primeros 5-10 s, llega al teléfono pero Baileys (linked device) aún no está conectado y nada llega al ingest. Esperar a status=READY antes de probar.
+    4. **node -e desde shell separado no ve la sesión:** Intenté disparar handoff con `node -e "waManager.sendText(...)"` pero corrí en proceso aparte sin la sesión Baileys en memoria → "Sesión NONE". Solución: usar el endpoint HTTP /send-direct-message que sí va por el proceso PM2.
+    5. **API key compartida con el frontend:** El SDK @google/genai lee primero GOOGLE_API_KEY antes que GEMINI_API_KEY. En el VPS había ambas seteadas (mismo valor) → warning informativo "Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using GOOGLE_API_KEY." Inocuo, pero documentado.
+- **Decisión Final y Justificación:**
+    - **Modelo gemini-2.5-flash como default:** Latencia 1-3s vs 5-8s de Pro, costo ~10x menor, calidad sobrada para atención al cliente. Editable por tenant vía PUT /ai/settings.
+    - **Opción A para la API key (env global compartida):** Más simple que pedirla a ninesys-api por endpoint interno. Si en el futuro queremos por-tenant, basta añadir columna api_key a wa_ai_settings.
+    - **Grupos hardcoded skip:** El usuario explicitó que no son prioridad. Dejé la columna respond_in_groups creada (valor 0 default) para no requerir nueva migración cuando se cablee. La regla actual ignora la columna.
+    - **Handoff por timeout NO implementado:** Solo handoff manual. El usuario pidió mantenerlo simple en esta fase; reglas declarativas (handoff_rules JSON) quedan como Fase futura.
+    - **Throttle in-memory en lugar de tabla:** 4 segundos por jid en un Map. Suficiente para anti-loop sin agregar I/O. Se pierde en cada PM2 restart, lo cual es deseable (fresh start).
+    - **Prefijo TEST-PH8- en jids del script de pruebas:** No chocan con conversaciones reales, cleanup() los borra al inicio y al final con DELETE WHERE jid LIKE 'TEST-PH8-%'.
+- **Herramienta(s) Utilizada(s):** Edit, Write, Read, Bash (npm install, git, ssh vps-ninesys, rsync, mysql, curl), TaskCreate/TaskUpdate.
+- **Resultado:** Éxito completo. Suite automatizada 20/20 PASS contra tenant 163. Tests manuales T1, T6, T7 confirmados visualmente con teléfono real (cliente 584147307169 ↔ bot 584268730136).
+- **Verificación:**
+    - `node scripts/test-phase-8.js 163 584147307169` en VPS → 20/20 PASS, incluyendo "Gemini dijo: PONG" como confirmación de llamada real al modelo.
+    - T1 round-trip: cliente envió "Hola, ¿qué servicios ofrecen?", bot respondió en español natural en ~2s. Mensaje persistido con via='ai', fila en wa_send_log endpoint='ai_auto' status='ok'.
+    - T6: send-direct-message + assign → cliente recibió "Hola, te atiende Ozcar 👋". Cliente envió otro mensaje, IA NO respondió (mode=human bloquea). DB confirmó mode=human, ai_enabled=0, assigned_to=1.
+    - T7: /release → DB volvió a hybrid + ai_enabled=1 + assigned_to=NULL. Cliente envió mensaje, IA volvió a responder.
+- **Logro Conseguido:** msg_ninesys ahora tiene auto-respuestas IA bidireccionales con Gemini, tres niveles de control (global del tenant, por conversación, por modo) y handoff manual cuando un humano interviene. Listo para que el frontend tipo Wasapi (fase futura) consuma los endpoints sin tocar más el backend.
+- **Referencias de Sesión (Contexto):** Fases 0-7 cerradas previamente (logs 2026-04-06 a 2026-04-07). Fase 7 dejó la persistencia de conversaciones lista; Fase 8 construyó encima sin tocar el contrato HTTP/WS heredado.
+- **Observaciones de Gemini:** N/A — esta sesión fue ejecutada por Claude Opus 4.6, no Gemini. El log mantiene el formato del directorio logs_gemini por consistencia con las fases anteriores.
+- **Respuesta de Claude:** Fase 8 completada y validada end-to-end en el VPS. Próximas fases candidatas: 9 (hardening/observabilidad), 10 (despliegue formal), o el rediseño de frontend tipo Wasapi pospuesto.
