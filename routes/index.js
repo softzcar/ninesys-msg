@@ -29,6 +29,13 @@ const {
     deleteClientByCompanyId, // Importar la nueva función
     getConversationMessages,
     markConversationRead,
+    getAiSettings,
+    updateAiSettings,
+    toggleAiGlobal,
+    toggleAiConversation,
+    setConversationMode,
+    assignConversation,
+    releaseConversation,
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
@@ -93,6 +100,17 @@ router.get("/chats/:companyId", authenticateToken, getChatsByCompanyId);
  */
 router.get("/conversations/:companyId/:jid/messages", authenticateToken, getConversationMessages);
 router.post("/conversations/:companyId/:jid/read", authenticateToken, markConversationRead);
+
+/**
+ * Fase 8 — Control de IA / handoff
+ */
+router.get("/ai/settings/:companyId", authenticateToken, getAiSettings);
+router.put("/ai/settings/:companyId", authenticateToken, updateAiSettings);
+router.post("/ai/toggle/:companyId", authenticateToken, toggleAiGlobal);
+router.post("/conversations/:companyId/:jid/ai/toggle", authenticateToken, toggleAiConversation);
+router.post("/conversations/:companyId/:jid/mode", authenticateToken, setConversationMode);
+router.post("/conversations/:companyId/:jid/assign", authenticateToken, assignConversation);
+router.post("/conversations/:companyId/:jid/release", authenticateToken, releaseConversation);
 
 /**
  * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)

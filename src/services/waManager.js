@@ -33,6 +33,11 @@ const QRCode = require('qrcode');
 const tenantResolver = require('../db/tenantResolver');
 const { useMySQLAuthState } = require('./baileysAuthState');
 const conversationStore = require('./conversationStore');
+const aiService = require('./aiService');
+
+// Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
+const AI_THROTTLE_MS = 4000;
+const _aiLastReply = new Map(); // jid → ts ms
 
 let baileys;
 function loadBaileys() {
@@ -76,6 +81,67 @@ async function persistState(pool, patch) {
         `UPDATE wa_session_state SET ${fields.join(', ')} WHERE id = 1`,
         values
     );
+}
+
+/**
+ * Evalúa la regla de auto-respuesta IA y, si pasa, genera y envía la
+ * respuesta. Best-effort: cualquier error se loguea pero NO interrumpe el
+ * pipeline de ingest.
+ *
+ * Regla (Fase 8):
+ *   1. wa_ai_settings.enabled  (toggle global del tenant)            ← en aiService
+ *   2. wa_conversations.ai_enabled  (toggle por conversación)
+ *   3. wa_conversations.mode != 'human'  (no estamos en modo humano)
+ *   4. !is_group  (grupos quedan fuera de Fase 8 por decisión del usuario)
+ *   5. throttle: no responder si ya respondimos a este jid en los últimos
+ *      AI_THROTTLE_MS milisegundos (anti-loop)
+ *
+ * El paso 1 lo evalúa aiService.generateReply leyendo wa_ai_settings, así
+ * que aquí sólo aplicamos los pasos 2-5 antes de invocarlo.
+ */
+async function maybeAutoReply(idEmpresa, pool, ingestResult) {
+    try {
+        const incoming = ingestResult?.message;
+        const jid = ingestResult?.jid;
+        if (!incoming || !jid || incoming.from_me) return;
+
+        const flags = await conversationStore.getConversationFlags(pool, jid);
+        if (!flags) return;
+        if (flags.isGroup) return;            // Fase 8: grupos fuera
+        if (flags.mode === 'human') return;   // empleado tomó la conversación
+        if (!flags.aiEnabled) return;         // toggle por conversación off
+
+        // Throttle anti-loop por jid
+        const now = Date.now();
+        const last = _aiLastReply.get(jid) || 0;
+        if (now - last < AI_THROTTLE_MS) return;
+        _aiLastReply.set(jid, now);
+
+        const reply = await aiService.generateReply({
+            pool,
+            jid,
+            incomingText: incoming.body,
+        });
+        if (!reply) return;
+
+        try {
+            await sendText(idEmpresa, jid, reply.text, { via: 'ai' });
+            await pool.query(
+                `INSERT INTO wa_send_log (endpoint, phone, status, requested_by)
+                 VALUES (?, ?, 'ok', ?)`,
+                ['ai_auto', jid, `gemini:${reply.model}`]
+            );
+        } catch (sendErr) {
+            await pool.query(
+                `INSERT INTO wa_send_log (endpoint, phone, status, error, requested_by)
+                 VALUES (?, ?, 'error', ?, ?)`,
+                ['ai_auto', jid, sendErr.message, `gemini:${reply.model}`]
+            ).catch(() => {});
+            throw sendErr;
+        }
+    } catch (e) {
+        console.error(`[waManager:${idEmpresa}] maybeAutoReply falló:`, e.message);
+    }
 }
 
 /**
@@ -134,6 +200,10 @@ async function init(idEmpresa) {
                 if (type === 'notify') {
                     emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
                     emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
+                    // Fase 8: auto-respuesta IA (best-effort, no bloquea el ingest)
+                    if (!result.message.from_me) {
+                        maybeAutoReply(id, pool, result);
+                    }
                 }
             } catch (e) {
                 console.error(`[waManager:${id}] ingestMessage falló:`, e.message);
@@ -331,14 +401,91 @@ async function destroy(idEmpresa) {
 
 /**
  * Helper para enviar texto. jid: '521xxxxxxxxxx@s.whatsapp.net'
+ *
+ * Persistencia unificada (Fase 7):
+ *   - En éxito registra el mensaje con status='sent' y emite
+ *     'message:new' + 'conversation:updated' al room del tenant.
+ *   - En error registra status='failed' con un wa_message_id local
+ *     para que quede trazabilidad y re-lanza el error.
+ *
+ * Devuelve el payload persistido del mensaje (wa_message_id, ts, etc.).
  */
-async function sendText(idEmpresa, jid, body) {
+/**
+ * Envía un mensaje de texto.
+ *
+ * @param {object} [opts]
+ * @param {'human'|'api'|'ai'|'template'} [opts.via='api']
+ * @param {number} [opts.sentByUser]  - id del usuario humano que envía desde
+ *   el panel. Si está presente, dispara handoff automático: la conversación
+ *   pasa a mode='human', ai_enabled=0, assigned_to=sentByUser. Es la
+ *   implementación de "el empleado tomó la conversación" (Fase 8.3).
+ */
+async function sendText(idEmpresa, jid, body, opts = {}) {
     const id = parseInt(idEmpresa, 10);
+    const via = opts.via || 'api';
+    const sentByUser = opts.sentByUser || null;
     const s = sessions.get(id);
     if (!s || s.status !== 'READY') {
-        throw new Error(`Sesión de empresa ${id} no está READY (estado=${s?.status || 'NONE'}).`);
+        const err = new Error(`Sesión de empresa ${id} no está READY (estado=${s?.status || 'NONE'}).`);
+        try {
+            const pool = await tenantResolver.getPool(id);
+            await conversationStore.recordOutbound(pool, {
+                jid,
+                wa_message_id: `FAIL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                body,
+                status: 'failed',
+                ts: Math.floor(Date.now() / 1000),
+                via,
+            });
+        } catch (_) { /* best-effort */ }
+        throw err;
     }
-    return s.sock.sendMessage(jid, { text: body });
+
+    try {
+        const sent = await s.sock.sendMessage(jid, { text: body });
+        const wa_message_id = sent?.key?.id;
+        const ts = Number(sent?.messageTimestamp) || Math.floor(Date.now() / 1000);
+        const pool = await tenantResolver.getPool(id);
+        const result = await conversationStore.recordOutbound(pool, {
+            jid, wa_message_id, body, status: 'sent', ts, via,
+        });
+        if (result) {
+            emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
+            emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
+        }
+        // Fase 8.3: handoff manual al humano. Si el envío vino de un usuario
+        // del panel, etiquetamos el mensaje y silenciamos a la IA en esta
+        // conversación hasta que un endpoint /release la devuelva al bot.
+        if (sentByUser) {
+            try {
+                await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
+                await conversationStore.updateConversationFlags(pool, jid, {
+                    mode: 'human',
+                    aiEnabled: false,
+                    assignedTo: sentByUser,
+                });
+                emit(id, 'conversation:handoff', {
+                    companyId: id, jid, mode: 'human', assignedTo: sentByUser,
+                });
+            } catch (e) {
+                console.error(`[waManager:${id}] handoff manual falló:`, e.message);
+            }
+        }
+        return { wa_message_id, ts, jid, body, status: 'sent' };
+    } catch (e) {
+        try {
+            const pool = await tenantResolver.getPool(id);
+            await conversationStore.recordOutbound(pool, {
+                jid,
+                wa_message_id: `FAIL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                body,
+                status: 'failed',
+                ts: Math.floor(Date.now() / 1000),
+                via,
+            });
+        } catch (_) { /* best-effort */ }
+        throw e;
+    }
 }
 
 /**

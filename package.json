@@ -16,6 +16,7 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
+        "@google/genai": "^1.48.0",
         "axios": "^1.9.0",
         "baileys": "^6.8.0",
         "body-parser": "^1.20.3",

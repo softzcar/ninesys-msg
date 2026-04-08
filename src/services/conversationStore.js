@@ -75,13 +75,16 @@ async function ingestMessage(pool, m) {
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
     const pushname = m.pushName || null;
 
-    // 1) Insert mensaje (idempotente por wa_message_id)
-    await pool.query(
+    // 1) Insert mensaje (idempotente por wa_message_id). Si ya existía
+    //    (p.ej. persistido por recordOutbound antes del upsert), salimos
+    //    sin emitir nada para evitar eventos duplicados.
+    const [ins] = await pool.query(
         `INSERT IGNORE INTO wa_messages
             (jid, wa_message_id, from_me, sender, type, body, via, status, ts)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [jid, wa_message_id, from_me, sender, type, body, from_me ? 'api' : 'human', 'delivered', ts]
     );
+    if (ins.affectedRows === 0) return null;
 
     // 2) Upsert conversación + bump last_*
     const lastPreview = (body || `[${type}]`).slice(0, 500);
@@ -101,6 +104,49 @@ async function ingestMessage(pool, m) {
         jid,
         message: { wa_message_id, from_me: !!from_me, sender, type, body, ts, status: 'delivered' },
         conversation: { jid, last_message: lastPreview, last_ts: ts, unread_delta: from_me ? 0 : 1 },
+    };
+}
+
+/**
+ * Persistencia explícita de un mensaje saliente (enviado vía API).
+ * Se usa desde waManager.sendText para:
+ *   - registrar el mensaje de inmediato con el wa_message_id real
+ *   - permitir marcar 'failed' cuando Baileys revienta
+ *   - evitar el roundtrip del listener messages.upsert antes de emitir
+ *
+ * Idempotente: si el wa_message_id ya existe actualiza status/body.
+ * Devuelve { jid, message, conversation } o null si el jid es inválido.
+ */
+async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', status = 'sent', ts, via = 'api' }) {
+    if (!jid || !wa_message_id) return null;
+    const timestamp = Number(ts) || Math.floor(Date.now() / 1000);
+    const isGroup = jid.endsWith('@g.us') ? 1 : 0;
+
+    await pool.query(
+        `INSERT INTO wa_messages
+            (jid, wa_message_id, from_me, sender, type, body, via, status, ts)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+            status = VALUES(status),
+            body   = COALESCE(VALUES(body), body)`,
+        [jid, wa_message_id, jid, type, body, via, status, timestamp]
+    );
+
+    const lastPreview = (body || `[${type}]`).slice(0, 500);
+    await pool.query(
+        `INSERT INTO wa_conversations (jid, is_group, last_message, last_ts, unread_count)
+         VALUES (?, ?, ?, ?, 0)
+         ON DUPLICATE KEY UPDATE
+            last_message = VALUES(last_message),
+            last_ts      = VALUES(last_ts),
+            updated_at   = CURRENT_TIMESTAMP`,
+        [jid, isGroup, lastPreview, timestamp]
+    );
+
+    return {
+        jid,
+        message: { wa_message_id, from_me: true, sender: jid, type, body, ts: timestamp, status, via },
+        conversation: { jid, last_message: lastPreview, last_ts: timestamp, unread_delta: 0 },
     };
 }
 
@@ -178,6 +224,59 @@ async function listMessages(pool, jid, { before = null, limit = 50 } = {}) {
 }
 
 /**
+ * Lee los flags de una conversación necesarios para decidir si la IA debe
+ * auto-responder (Fase 8). Devuelve null si la conversación no existe.
+ */
+async function getConversationFlags(pool, jid) {
+    const [rows] = await pool.query(
+        `SELECT jid, is_group, mode, ai_enabled, assigned_to
+         FROM wa_conversations WHERE jid = ?`,
+        [jid]
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+        jid: r.jid,
+        isGroup: !!r.is_group,
+        mode: r.mode,
+        aiEnabled: !!r.ai_enabled,
+        assignedTo: r.assigned_to,
+    };
+}
+
+/**
+ * Actualiza dinámicamente los flags de control de una conversación
+ * (mode / ai_enabled / assigned_to). Cualquier campo undefined se omite.
+ * Devuelve true si afectó alguna fila.
+ */
+async function updateConversationFlags(pool, jid, { mode, aiEnabled, assignedTo } = {}) {
+    const sets = [];
+    const params = [];
+    if (mode !== undefined)       { sets.push('mode = ?');         params.push(mode); }
+    if (aiEnabled !== undefined)  { sets.push('ai_enabled = ?');   params.push(aiEnabled ? 1 : 0); }
+    if (assignedTo !== undefined) { sets.push('assigned_to = ?');  params.push(assignedTo); }
+    if (!sets.length) return false;
+    params.push(jid);
+    const [r] = await pool.query(
+        `UPDATE wa_conversations SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE jid = ?`,
+        params
+    );
+    return r.affectedRows > 0;
+}
+
+/**
+ * Persiste sent_by_user en el último mensaje saliente de una conversación
+ * con un wa_message_id concreto. Best-effort: si no existe, no falla.
+ */
+async function tagSentByUser(pool, wa_message_id, userId) {
+    if (!wa_message_id || !userId) return;
+    await pool.query(
+        `UPDATE wa_messages SET sent_by_user = ? WHERE wa_message_id = ?`,
+        [userId, wa_message_id]
+    );
+}
+
+/**
  * Marca como leída una conversación (resetea unread_count).
  */
 async function markRead(pool, jid) {
@@ -207,9 +306,13 @@ async function upsertChatNames(pool, chats) {
 
 module.exports = {
     ingestMessage,
+    recordOutbound,
     updateMessageStatus,
     listConversations,
     listMessages,
     markRead,
     upsertChatNames,
+    getConversationFlags,
+    updateConversationFlags,
+    tagSentByUser,
 };

@@ -14,6 +14,7 @@ const loadTemplates = require('../templates/templates-loader');
 const waManager = require('../src/services/waManager');
 const tenantResolver = require('../src/db/tenantResolver');
 const conversationStore = require('../src/services/conversationStore');
+const aiService = require('../src/services/aiService');
 
 let templates = {};
 try {
@@ -194,8 +195,8 @@ async function sendMessage(req, res) {
     }
     try {
         const body = `Hola ${name || ''}, ${message}`.trim();
-        await waManager.sendText(companyId, toJid(phone), body);
-        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+        const sent = await waManager.sendText(companyId, toJid(phone), body);
+        res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
@@ -208,8 +209,8 @@ async function sendMessageCustom(req, res) {
         return res.status(400).json({ message: 'phone y message son requeridos' });
     }
     try {
-        await waManager.sendText(companyId, toJid(phone), message);
-        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+        const sent = await waManager.sendText(companyId, toJid(phone), message);
+        res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
@@ -227,8 +228,8 @@ async function sendTemplateMessage(req, res) {
     }
     try {
         const body = tpl({ ...vars, phone: phone_client });
-        await waManager.sendText(companyId, toJid(phone_client), body);
-        res.status(200).json({ success: true, message: 'Mensaje enviado' });
+        const sent = await waManager.sendText(companyId, toJid(phone_client), body);
+        res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
@@ -240,11 +241,127 @@ async function sendDirectMessage(req, res) {
     if (!phone || !message) {
         return res.status(400).json({ success: false, message: 'phone y message son requeridos' });
     }
-    // fire-and-forget como el legacy
-    waManager.sendText(companyId, toJid(phone), message).catch((e) => {
+    try {
+        const sent = await waManager.sendText(companyId, toJid(phone), message);
+        res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
+    } catch (e) {
         console.error(`[whatsappController] sendDirectMessage falló para ${companyId}:`, e.message);
-    });
-    res.status(200).json({ success: true, message: 'Solicitud aceptada' });
+        res.status(500).json({ success: false, message: e.message });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fase 8 — Endpoints de control IA
+// ---------------------------------------------------------------------------
+
+const VALID_MODES = new Set(['bot', 'human', 'hybrid']);
+
+async function getAiSettings(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const settings = await aiService.loadSettings(pool);
+        if (!settings) return res.status(404).json({ message: 'wa_ai_settings no inicializada' });
+        res.status(200).json(settings);
+    } catch (e) {
+        res.status(500).json({ message: 'Error leyendo settings IA', error: e.message });
+    }
+}
+
+async function updateAiSettings(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        await aiService.updateSettings(pool, req.body || {});
+        const settings = await aiService.loadSettings(pool);
+        res.status(200).json(settings);
+    } catch (e) {
+        res.status(500).json({ message: 'Error actualizando settings IA', error: e.message });
+    }
+}
+
+async function toggleAiGlobal(req, res) {
+    const { companyId } = req.params;
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ message: 'Body requiere { enabled: boolean }' });
+    }
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        await aiService.setGlobalEnabled(pool, enabled);
+        res.status(200).json({ companyId: Number(companyId), enabled });
+    } catch (e) {
+        res.status(500).json({ message: 'Error toggling IA global', error: e.message });
+    }
+}
+
+async function toggleAiConversation(req, res) {
+    const { companyId, jid } = req.params;
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ message: 'Body requiere { enabled: boolean }' });
+    }
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.updateConversationFlags(pool, jid, { aiEnabled: enabled });
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+        res.status(200).json({ jid, aiEnabled: enabled });
+    } catch (e) {
+        res.status(500).json({ message: 'Error toggling IA por conversación', error: e.message });
+    }
+}
+
+async function setConversationMode(req, res) {
+    const { companyId, jid } = req.params;
+    const { mode } = req.body || {};
+    if (!VALID_MODES.has(mode)) {
+        return res.status(400).json({ message: `mode debe ser uno de: ${[...VALID_MODES].join(', ')}` });
+    }
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.updateConversationFlags(pool, jid, { mode });
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+        res.status(200).json({ jid, mode });
+    } catch (e) {
+        res.status(500).json({ message: 'Error cambiando modo', error: e.message });
+    }
+}
+
+async function assignConversation(req, res) {
+    const { companyId, jid } = req.params;
+    const { userId } = req.body || {};
+    if (!userId || isNaN(Number(userId))) {
+        return res.status(400).json({ message: 'Body requiere { userId: number }' });
+    }
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.updateConversationFlags(pool, jid, {
+            assignedTo: Number(userId),
+            mode: 'human',
+            aiEnabled: false,
+        });
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+        res.status(200).json({ jid, assignedTo: Number(userId), mode: 'human', aiEnabled: false });
+    } catch (e) {
+        res.status(500).json({ message: 'Error asignando conversación', error: e.message });
+    }
+}
+
+async function releaseConversation(req, res) {
+    // Devuelve la conversación al bot: hybrid + ai_enabled=1 + sin asignar.
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.updateConversationFlags(pool, jid, {
+            mode: 'hybrid',
+            aiEnabled: true,
+            assignedTo: null,
+        });
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+        res.status(200).json({ jid, mode: 'hybrid', aiEnabled: true, assignedTo: null });
+    } catch (e) {
+        res.status(500).json({ message: 'Error liberando conversación', error: e.message });
+    }
 }
 
 module.exports = {
@@ -270,4 +387,12 @@ module.exports = {
     // Fase 6
     getConversationMessages,
     markConversationRead,
+    // Fase 8
+    getAiSettings,
+    updateAiSettings,
+    toggleAiGlobal,
+    toggleAiConversation,
+    setConversationMode,
+    assignConversation,
+    releaseConversation,
 };

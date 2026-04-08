@@ -93,14 +93,15 @@ CREATE TABLE IF NOT EXISTS `wa_templates` (
 -- ---------- 6. Configuración IA por empresa ----------
 CREATE TABLE IF NOT EXISTS `wa_ai_settings` (
   `id`             TINYINT NOT NULL DEFAULT 1,
-  `provider`       ENUM('anthropic','gemini') NOT NULL DEFAULT 'anthropic',
-  `enabled`        TINYINT(1) NOT NULL DEFAULT 0,
-  `model`          VARCHAR(64) NOT NULL DEFAULT 'claude-sonnet-4-6',
-  `system_prompt`  TEXT NULL,
-  `temperature`    DECIMAL(3,2) NOT NULL DEFAULT 0.30,
-  `max_tokens`     INT NOT NULL DEFAULT 1024,
-  `handoff_rules`  JSON NULL,
-  `knowledge_base` JSON NULL,
+  `provider`          ENUM('anthropic','gemini') NOT NULL DEFAULT 'gemini',
+  `enabled`           TINYINT(1) NOT NULL DEFAULT 0,
+  `model`             VARCHAR(64) NOT NULL DEFAULT 'gemini-2.5-flash',
+  `system_prompt`     TEXT NULL,
+  `temperature`       DECIMAL(3,2) NOT NULL DEFAULT 0.30,
+  `max_tokens`        INT NOT NULL DEFAULT 1024,
+  `respond_in_groups` TINYINT(1) NOT NULL DEFAULT 0,
+  `handoff_rules`     JSON NULL,
+  `knowledge_base`    JSON NULL,
   `updated_at`     DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   CONSTRAINT `wa_ai_settings_singleton` CHECK (`id` = 1)
