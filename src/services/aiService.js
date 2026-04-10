@@ -223,6 +223,166 @@ async function loadSettings(pool) {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Agentes IA (Fase A): múltiples personalidades por tenant
+// ---------------------------------------------------------------------------
+
+/**
+ * Carga un agente IA por su ID. Si agentId es null/undefined, devuelve el
+ * agente marcado como is_default. Devuelve null si no encuentra ninguno.
+ */
+async function loadAgent(pool, agentId) {
+    let rows;
+    if (agentId) {
+        [rows] = await pool.query(
+            `SELECT id, name, slug, system_prompt, knowledge_base, model,
+                    temperature, max_tokens, enabled
+             FROM wa_ai_agents WHERE id = ? AND enabled = 1`,
+            [agentId]
+        );
+    } else {
+        [rows] = await pool.query(
+            `SELECT id, name, slug, system_prompt, knowledge_base, model,
+                    temperature, max_tokens, enabled
+             FROM wa_ai_agents WHERE is_default = 1 AND enabled = 1
+             LIMIT 1`
+        );
+    }
+    const a = rows[0];
+    if (!a) return null;
+    return {
+        id: a.id,
+        name: a.name,
+        slug: a.slug,
+        systemPrompt: a.system_prompt || null,
+        knowledgeBase: a.knowledge_base || null,
+        model: a.model || 'gemini-2.5-flash',
+        temperature: Number(a.temperature ?? 0.3),
+        maxTokens: Number(a.max_tokens ?? 1024),
+        enabled: !!a.enabled,
+    };
+}
+
+/**
+ * Lista todos los agentes de un tenant.
+ */
+async function listAgents(pool) {
+    const [rows] = await pool.query(
+        `SELECT id, name, slug, system_prompt, knowledge_base, model,
+                temperature, max_tokens, enabled, is_default, created_at, updated_at
+         FROM wa_ai_agents ORDER BY is_default DESC, name ASC`
+    );
+    return rows.map((a) => ({
+        id: a.id,
+        name: a.name,
+        slug: a.slug,
+        systemPrompt: a.system_prompt || null,
+        knowledgeBase: a.knowledge_base || null,
+        model: a.model || 'gemini-2.5-flash',
+        temperature: Number(a.temperature ?? 0.3),
+        maxTokens: Number(a.max_tokens ?? 1024),
+        enabled: !!a.enabled,
+        isDefault: !!a.is_default,
+        createdAt: a.created_at,
+        updatedAt: a.updated_at,
+    }));
+}
+
+/**
+ * Crea un nuevo agente IA. Devuelve el agente creado con su ID.
+ */
+async function createAgent(pool, { name, slug, systemPrompt, knowledgeBase, model, temperature, maxTokens, enabled, isDefault }) {
+    // Si se marca como default, quitar el flag de los demás
+    if (isDefault) {
+        await pool.query(`UPDATE wa_ai_agents SET is_default = 0`);
+    }
+    const kb = knowledgeBase && typeof knowledgeBase !== 'string'
+        ? JSON.stringify(knowledgeBase) : knowledgeBase || null;
+    const [result] = await pool.query(
+        `INSERT INTO wa_ai_agents (name, slug, system_prompt, knowledge_base, model, temperature, max_tokens, enabled, is_default)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            name,
+            slug,
+            systemPrompt || null,
+            kb,
+            model || 'gemini-2.5-flash',
+            temperature ?? 0.3,
+            maxTokens ?? 1024,
+            enabled !== false ? 1 : 0,
+            isDefault ? 1 : 0,
+        ]
+    );
+    return loadAgent(pool, result.insertId);
+}
+
+/**
+ * Actualiza campos de un agente existente. Solo aplica claves whitelisteadas.
+ */
+const AGENT_WHITELIST = new Set([
+    'name', 'slug', 'system_prompt', 'knowledge_base', 'model',
+    'temperature', 'max_tokens', 'enabled', 'is_default',
+]);
+
+async function updateAgent(pool, agentId, patch = {}) {
+    // Si se marca como default, quitar el flag de los demás
+    if (patch.is_default || patch.isDefault) {
+        await pool.query(`UPDATE wa_ai_agents SET is_default = 0`);
+        patch.is_default = 1;
+        delete patch.isDefault;
+    }
+    // Normalizar camelCase a snake_case
+    const normalized = {};
+    if (patch.systemPrompt !== undefined) normalized.system_prompt = patch.systemPrompt;
+    if (patch.knowledgeBase !== undefined) normalized.knowledge_base = patch.knowledgeBase;
+    if (patch.maxTokens !== undefined) normalized.max_tokens = patch.maxTokens;
+    if (patch.isDefault !== undefined) normalized.is_default = patch.isDefault ? 1 : 0;
+    // Copiar los que ya vienen en snake_case
+    for (const k of Object.keys(patch)) {
+        if (AGENT_WHITELIST.has(k) && normalized[k] === undefined) {
+            normalized[k] = patch[k];
+        }
+    }
+
+    const sets = [];
+    const params = [];
+    for (const [k, v] of Object.entries(normalized)) {
+        if (!AGENT_WHITELIST.has(k)) continue;
+        sets.push(`\`${k}\` = ?`);
+        if ((k === 'knowledge_base') && v && typeof v !== 'string') {
+            params.push(JSON.stringify(v));
+        } else if (k === 'enabled' || k === 'is_default') {
+            params.push(v ? 1 : 0);
+        } else {
+            params.push(v);
+        }
+    }
+    if (!sets.length) return null;
+    params.push(agentId);
+    await pool.query(
+        `UPDATE wa_ai_agents SET ${sets.join(', ')} WHERE id = ?`,
+        params
+    );
+    return loadAgent(pool, agentId);
+}
+
+/**
+ * Elimina un agente. No permite eliminar el agente default si es el único.
+ * Desvincula las conversaciones que tenían este agente asignado.
+ */
+async function deleteAgent(pool, agentId) {
+    // Desvincular conversaciones
+    await pool.query(
+        `UPDATE wa_conversations SET ai_agent_id = NULL WHERE ai_agent_id = ?`,
+        [agentId]
+    );
+    const [result] = await pool.query(
+        `DELETE FROM wa_ai_agents WHERE id = ?`,
+        [agentId]
+    );
+    return result.affectedRows > 0;
+}
+
 /**
  * Lee los últimos N mensajes de la conversación en orden cronológico ASC
  * para inyectarlos como historial al modelo.
@@ -283,11 +443,14 @@ function buildSystemInstruction(settings) {
  * @param {string}  [params.incomingText] - texto entrante (ya está persistido,
  *                                          se incluye sólo por trazabilidad/log)
  * @param {number}  [params.historyLimit]
- * @returns {Promise<{text:string, model:string}|null>}
+ * @param {number}  [params.agentId]    - ID del agente IA asignado a la
+ *                                        conversación. Si se pasa, usa el prompt
+ *                                        y config del agente en lugar de wa_ai_settings.
+ * @returns {Promise<{text:string, model:string, agentId:number|null}|null>}
  *          null si IA está deshabilitada en el tenant o si el modelo no
  *          devolvió texto.
  */
-async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT }) {
+async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId }) {
     const settings = await loadSettings(pool);
     if (!settings || !settings.enabled) return null;
 
@@ -297,27 +460,45 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
         return null;
     }
 
+    // Fase A: intentar cargar el agente asignado (o el default).
+    // Si existe, sus campos sobreescriben model/prompt/temperature/maxTokens.
+    // Si no existe (tabla aún no migrada, o sin agentes), cae al
+    // comportamiento legacy usando wa_ai_settings.
+    let agent = null;
+    try {
+        agent = await loadAgent(pool, agentId || null);
+    } catch (_) {
+        // Tabla wa_ai_agents puede no existir en tenants sin migrar → fallback silencioso
+    }
+
+    const effectiveModel = agent?.model || settings.model;
+    const effectiveTemp = agent ? agent.temperature : settings.temperature;
+    const effectiveMaxTokens = agent ? agent.maxTokens : settings.maxTokens;
+    const effectiveSettings = agent
+        ? { systemPrompt: agent.systemPrompt, knowledgeBase: agent.knowledgeBase }
+        : settings;
+
     const history = await loadHistory(pool, jid, historyLimit);
     if (!history.length && !incomingText) return null;
 
     const contents = buildContents(history);
-    const systemInstruction = buildSystemInstruction(settings);
+    const systemInstruction = buildSystemInstruction(effectiveSettings);
 
     let response;
     const startedAt = Date.now();
     try {
         const client = getClient();
         response = await callGeminiWithResilience(client, {
-            model: settings.model,
+            model: effectiveModel,
             contents,
             config: {
                 systemInstruction,
-                temperature: settings.temperature,
-                maxOutputTokens: settings.maxTokens,
+                temperature: effectiveTemp,
+                maxOutputTokens: effectiveMaxTokens,
             },
         });
         log.info(
-            { jid, model: settings.model, durMs: Date.now() - startedAt },
+            { jid, model: effectiveModel, agentId: agent?.id || null, durMs: Date.now() - startedAt },
             'Gemini ok'
         );
     } catch (e) {
@@ -331,7 +512,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     const text = (response?.text || '').trim();
     if (!text) return null;
 
-    return { text, model: settings.model };
+    return { text, model: effectiveModel, agentId: agent?.id || null };
 }
 
 /**
@@ -382,6 +563,12 @@ module.exports = {
     loadSettings,
     updateSettings,
     setGlobalEnabled,
+    // Agentes IA (Fase A)
+    loadAgent,
+    listAgents,
+    createAgent,
+    updateAgent,
+    deleteAgent,
     // Hardening (Fase 9.2)
     getBreakerState,
     resetBreaker,

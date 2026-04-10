@@ -37,6 +37,13 @@ const {
     setConversationMode,
     assignConversation,
     releaseConversation,
+    // Fase A — Agentes IA
+    listAiAgents,
+    getAiAgent,
+    createAiAgent,
+    updateAiAgent,
+    deleteAiAgent,
+    assignAgentToConversation,
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
@@ -229,6 +236,16 @@ router.post("/conversations/:companyId/:jid/ai/toggle", authenticateToken, toggl
 router.post("/conversations/:companyId/:jid/mode", authenticateToken, setConversationMode);
 router.post("/conversations/:companyId/:jid/assign", authenticateToken, assignConversation);
 router.post("/conversations/:companyId/:jid/release", authenticateToken, releaseConversation);
+
+/**
+ * Fase A — CRUD de Agentes IA
+ */
+router.get("/ai/agents/:companyId", authenticateToken, listAiAgents);
+router.get("/ai/agents/:companyId/:agentId", authenticateToken, getAiAgent);
+router.post("/ai/agents/:companyId", authenticateToken, createAiAgent);
+router.put("/ai/agents/:companyId/:agentId", authenticateToken, updateAiAgent);
+router.delete("/ai/agents/:companyId/:agentId", authenticateToken, deleteAiAgent);
+router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAgentToConversation);
 
 /**
  * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)

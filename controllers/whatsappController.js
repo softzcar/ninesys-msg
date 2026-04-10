@@ -257,6 +257,109 @@ async function sendDirectMessage(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Fase A — CRUD de Agentes IA
+// ---------------------------------------------------------------------------
+
+async function listAiAgents(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const agents = await aiService.listAgents(pool);
+        res.status(200).json(agents);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId }, 'listAiAgents falló');
+        res.status(500).json({ message: 'Error listando agentes IA', error: e.message });
+    }
+}
+
+async function getAiAgent(req, res) {
+    const { companyId, agentId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const agent = await aiService.loadAgent(pool, Number(agentId));
+        if (!agent) return res.status(404).json({ message: 'Agente no encontrado' });
+        res.status(200).json(agent);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId }, 'getAiAgent falló');
+        res.status(500).json({ message: 'Error obteniendo agente', error: e.message });
+    }
+}
+
+async function createAiAgent(req, res) {
+    const { companyId } = req.params;
+    const { name, slug, systemPrompt, knowledgeBase, model, temperature, maxTokens, enabled, isDefault } = req.body || {};
+    if (!name || !slug) {
+        return res.status(400).json({ message: 'name y slug son requeridos' });
+    }
+    if (!/^[a-z0-9_-]+$/.test(slug)) {
+        return res.status(400).json({ message: 'slug debe contener solo letras minúsculas, números, guiones y guiones bajos' });
+    }
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const agent = await aiService.createAgent(pool, {
+            name, slug, systemPrompt, knowledgeBase, model, temperature, maxTokens, enabled, isDefault,
+        });
+        res.status(201).json(agent);
+    } catch (e) {
+        if (e.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ message: `El slug '${slug}' ya existe` });
+        }
+        log.error({ err: e, tenantId: companyId }, 'createAiAgent falló');
+        res.status(500).json({ message: 'Error creando agente', error: e.message });
+    }
+}
+
+async function updateAiAgent(req, res) {
+    const { companyId, agentId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const agent = await aiService.updateAgent(pool, Number(agentId), req.body || {});
+        if (!agent) return res.status(404).json({ message: 'Agente no encontrado o sin cambios' });
+        res.status(200).json(agent);
+    } catch (e) {
+        if (e.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ message: 'El slug ya está en uso por otro agente' });
+        }
+        log.error({ err: e, tenantId: companyId }, 'updateAiAgent falló');
+        res.status(500).json({ message: 'Error actualizando agente', error: e.message });
+    }
+}
+
+async function deleteAiAgent(req, res) {
+    const { companyId, agentId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const deleted = await aiService.deleteAgent(pool, Number(agentId));
+        if (!deleted) return res.status(404).json({ message: 'Agente no encontrado' });
+        res.status(200).json({ message: 'Agente eliminado', agentId: Number(agentId) });
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId }, 'deleteAiAgent falló');
+        res.status(500).json({ message: 'Error eliminando agente', error: e.message });
+    }
+}
+
+async function assignAgentToConversation(req, res) {
+    const { companyId, jid } = req.params;
+    const { agentId } = req.body || {};
+    // agentId null = desvincular (volver al default)
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        if (agentId) {
+            const agent = await aiService.loadAgent(pool, Number(agentId));
+            if (!agent) return res.status(404).json({ message: 'Agente no encontrado' });
+        }
+        const ok = await conversationStore.updateConversationFlags(pool, jid, {
+            aiAgentId: agentId ? Number(agentId) : null,
+        });
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+        res.status(200).json({ jid, aiAgentId: agentId ? Number(agentId) : null });
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, jid }, 'assignAgent falló');
+        res.status(500).json({ message: 'Error asignando agente', error: e.message });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Fase 8 — Endpoints de control IA
 // ---------------------------------------------------------------------------
 
@@ -401,4 +504,11 @@ module.exports = {
     setConversationMode,
     assignConversation,
     releaseConversation,
+    // Fase A — Agentes IA
+    listAiAgents,
+    getAiAgent,
+    createAiAgent,
+    updateAiAgent,
+    deleteAiAgent,
+    assignAgentToConversation,
 };

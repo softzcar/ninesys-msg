@@ -166,10 +166,12 @@ async function updateMessageStatus(pool, wa_message_id, status) {
  */
 async function listConversations(pool, { limit = 100 } = {}) {
     const [rows] = await pool.query(
-        `SELECT id, jid, name, is_group, mode, ai_enabled, assigned_to,
-                unread_count, last_message, last_ts, tags, created_at, updated_at
-         FROM wa_conversations
-         ORDER BY last_ts DESC
+        `SELECT c.id, c.jid, c.name, c.is_group, c.mode, c.ai_enabled, c.assigned_to,
+                c.ai_agent_id, c.unread_count, c.last_message, c.last_ts, c.tags,
+                c.created_at, c.updated_at, a.name AS agent_name
+         FROM wa_conversations c
+         LEFT JOIN wa_ai_agents a ON a.id = c.ai_agent_id
+         ORDER BY c.last_ts DESC
          LIMIT ?`,
         [limit]
     );
@@ -185,6 +187,8 @@ async function listConversations(pool, { limit = 100 } = {}) {
         mode: r.mode,
         aiEnabled: !!r.ai_enabled,
         assignedTo: r.assigned_to,
+        aiAgentId: r.ai_agent_id || null,
+        agentName: r.agent_name || null,
     }));
 }
 
@@ -229,7 +233,7 @@ async function listMessages(pool, jid, { before = null, limit = 50 } = {}) {
  */
 async function getConversationFlags(pool, jid) {
     const [rows] = await pool.query(
-        `SELECT jid, is_group, mode, ai_enabled, assigned_to
+        `SELECT jid, is_group, mode, ai_enabled, assigned_to, ai_agent_id
          FROM wa_conversations WHERE jid = ?`,
         [jid]
     );
@@ -241,6 +245,7 @@ async function getConversationFlags(pool, jid) {
         mode: r.mode,
         aiEnabled: !!r.ai_enabled,
         assignedTo: r.assigned_to,
+        aiAgentId: r.ai_agent_id || null,
     };
 }
 
@@ -249,12 +254,13 @@ async function getConversationFlags(pool, jid) {
  * (mode / ai_enabled / assigned_to). Cualquier campo undefined se omite.
  * Devuelve true si afectó alguna fila.
  */
-async function updateConversationFlags(pool, jid, { mode, aiEnabled, assignedTo } = {}) {
+async function updateConversationFlags(pool, jid, { mode, aiEnabled, assignedTo, aiAgentId } = {}) {
     const sets = [];
     const params = [];
     if (mode !== undefined)       { sets.push('mode = ?');         params.push(mode); }
     if (aiEnabled !== undefined)  { sets.push('ai_enabled = ?');   params.push(aiEnabled ? 1 : 0); }
     if (assignedTo !== undefined) { sets.push('assigned_to = ?');  params.push(assignedTo); }
+    if (aiAgentId !== undefined)  { sets.push('ai_agent_id = ?');  params.push(aiAgentId); }
     if (!sets.length) return false;
     params.push(jid);
     const [r] = await pool.query(

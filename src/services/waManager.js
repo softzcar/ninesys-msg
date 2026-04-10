@@ -139,6 +139,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
             pool,
             jid,
             incomingText: incoming.body,
+            agentId: flags.aiAgentId || null,
         });
         if (!reply) return;
 
