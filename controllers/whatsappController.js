@@ -15,13 +15,14 @@ const waManager = require('../src/services/waManager');
 const tenantResolver = require('../src/db/tenantResolver');
 const conversationStore = require('../src/services/conversationStore');
 const aiService = require('../src/services/aiService');
+const log = require('../src/lib/logger').createLogger('whatsappController');
 
 let templates = {};
 try {
     templates = loadTemplates();
-    console.log(`[whatsappController] Templates cargados: ${Object.keys(templates).join(', ')}`);
+    log.info({ templates: Object.keys(templates) }, 'Templates cargados');
 } catch (e) {
-    console.warn('[whatsappController] No se pudieron cargar templates:', e.message);
+    log.warn({ err: e }, 'No se pudieron cargar templates');
 }
 
 /**
@@ -44,7 +45,7 @@ function getClientStatus(companyId) {
     // llamada (o el subscribe de Socket.IO) verá el estado actualizado.
     if (status.status === 'NOT_REGISTERED') {
         waManager.init(companyId).catch((e) => {
-            console.error(`[whatsappController] init lazy de ${companyId} falló:`, e.message);
+            log.error({ err: e, tenantId: companyId }, 'init lazy falló');
         });
         return { ...status, status: 'INITIALIZING', message: 'Reanudando sesión...' };
     }
@@ -69,7 +70,7 @@ async function disconnectClient(companyId) {
  * app.js no cambie.
  */
 async function initializeAllClientsFromSessions() {
-    console.log('[whatsappController] Las sesiones se inician lazy bajo demanda.');
+    log.info('Las sesiones se inician lazy bajo demanda');
     return;
 }
 
@@ -121,7 +122,7 @@ async function getChatsByCompanyId(req, res) {
         const chats = await conversationStore.listConversations(pool, { limit });
         res.status(200).json(chats);
     } catch (e) {
-        console.error(`[whatsappController] getChats(${companyId}) falló:`, e.message);
+        log.error({ err: e, tenantId: companyId }, 'getChats falló');
         res.status(500).json({ message: 'Error obteniendo conversaciones', error: e.message });
     }
 }
@@ -137,7 +138,7 @@ async function getConversationMessages(req, res) {
         const messages = await conversationStore.listMessages(pool, jid, { before, limit });
         res.status(200).json({ jid, messages });
     } catch (e) {
-        console.error(`[whatsappController] getMessages(${companyId},${jid}) falló:`, e.message);
+        log.error({ err: e, tenantId: companyId, jid }, 'getMessages falló');
         res.status(500).json({ message: 'Error obteniendo mensajes', error: e.message });
     }
 }
@@ -149,7 +150,7 @@ async function markConversationRead(req, res) {
         await conversationStore.markRead(pool, jid);
         res.status(200).json({ jid, unread_count: 0 });
     } catch (e) {
-        console.error(`[whatsappController] markRead(${companyId},${jid}) falló:`, e.message);
+        log.error({ err: e, tenantId: companyId, jid }, 'markRead falló');
         res.status(500).json({ message: 'Error marcando como leído', error: e.message });
     }
 }
@@ -250,7 +251,7 @@ async function sendDirectMessage(req, res) {
         const sent = await waManager.sendText(companyId, toJid(phone), message, opts);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
-        console.error(`[whatsappController] sendDirectMessage falló para ${companyId}:`, e.message);
+        log.error({ err: e, tenantId: companyId }, 'sendDirectMessage falló');
         res.status(500).json({ success: false, message: e.message });
     }
 }

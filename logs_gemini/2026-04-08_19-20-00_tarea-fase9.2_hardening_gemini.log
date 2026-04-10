@@ -1,0 +1,34 @@
+- **Solicitud del Usuario:** Continuar con Fase 9.2 — hardening de Gemini para que las llamadas al modelo no congelen el ingest ni martillen el API ante errores transientes.
+- **Fecha y Hora:** 2026-04-08 19:20:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/services/aiService.js (timeout + retry + circuit breaker + helpers exportados)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente — feat(observability): Fase 9.2 hardening Gemini (timeout/retry/breaker)
+- **Acción Realizada:**
+    1. **Timeout duro por intento:** `withTimeout(promise, ms)` envuelve la llamada en `Promise.race` con un setTimeout. Default 8000ms (env GEMINI_TIMEOUT_MS). No cancela la llamada subyacente porque el SDK @google/genai no expone AbortController público, pero libera el await para que el ingest de WhatsApp no quede colgado.
+    2. **Retry con backoff exponencial + jitter:** `callGeminiWithResilience` reintenta hasta GEMINI_RETRIES veces (default 2 → max 3 intentos). Backoff: `500ms * 2^(attempt-1)` + jitter aleatorio del 50%. La función `isRetryable(err)` filtra: 429, 502, 503, 504, ETIMEDOUT, ECONNRESET, errores con /timeout/i. Errores 4xx no-429 (ej. 400 bad request) NO se reintentan.
+    3. **Circuit breaker global:** Estados closed → open → half-open → closed. Threshold 5 fallos consecutivos abre el circuito durante 60s (env GEMINI_CB_THRESHOLD / GEMINI_CB_COOLDOWN_MS). Tras el cooldown pasa a half-open y el siguiente intento decide: éxito → closed, fallo → open de nuevo. Cuando está open, las llamadas fallan rápido con `error.code='CIRCUIT_OPEN'` sin invocar el SDK.
+    4. **Logging del breaker:** info al cerrar, warn al pasar a half-open, error al abrir (con cooldownMs). Cada intento fallido loguea attempt/maxAttempts/retryable.
+    5. **Wire en generateReply:** Reemplacé la llamada directa `client.models.generateContent` por `callGeminiWithResilience(client, request)`. Añadí log estructurado de éxito con durMs y log de fallo con code para correlacionar timeouts vs breaker vs errores reales.
+    6. **Helpers exportados:** `getBreakerState()` para /health (Fase 9.4), `resetBreaker()` para tests/admin, y `_internal` con las funciones puras (isRetryable, withTimeout, callGeminiWithResilience) para tests unitarios.
+    7. **Suite de aserciones inline:** Smoke con un fakeClient que simula 503 → ok (retry success), 400 (no retry), 5x 503 (breaker abre), call posterior (short-circuit). Todas pasan.
+- **Inconvenientes y Desafíos:**
+    1. **SDK sin AbortController:** El SDK @google/genai actual no expone una API para cancelar requests in-flight. Documenté en el código que `withTimeout` solo libera el await; la request HTTP subyacente puede seguir corriendo en background hasta que el cliente HTTP del SDK timeoutee por su cuenta. No es ideal pero es suficiente para no bloquear el ingest.
+    2. **Breaker global vs por-tenant:** Decidí global (un Gemini API key compartido). Si en el futuro cada tenant tiene su propia key, basta convertirlo en `Map<tenantId, breakerState>`. Para el modelo actual (key compartida), un fallo masivo afecta a todos por igual y vale la pena pausar globalmente.
+    3. **Backoff puede acumular hasta ~3.5s:** Con 3 intentos: 0 + ~750ms + ~1500ms = ~2.25s extra encima del timeout duro. En el peor caso (3 timeouts de 8s c/u + backoff) un envío puede tomar ~26s. Es aceptable porque maybeAutoReply corre en background sin bloquear ingest, pero documentado por si en 9.4 lo exponemos en /metrics.
+- **Decisión Final y Justificación:**
+    - **Circuit breaker artesanal vs librería (opossum):** Artesanal por simplicidad. ~80 líneas vs una dependencia más, y nuestras necesidades son básicas (un solo método protegido). Si en 9.3 protegemos también Baileys o ninesys-api, evaluaremos opossum para tener métricas/eventos uniformes.
+    - **Defaults razonables vía env:** GEMINI_TIMEOUT_MS=8000, GEMINI_RETRIES=2, GEMINI_CB_THRESHOLD=5, GEMINI_CB_COOLDOWN_MS=60000. Editables sin recompilar; suficientes para producción típica.
+    - **Errores 400 NO se reintentan:** Son fallos del request (prompt inválido, tokens excedidos, etc), reintentarlos solo desperdiciaría cuota y haría que el breaker se abriera por errores que no son transientes.
+    - **Jitter del 50%:** Evita thundering herd si varios tenants/conversaciones disparan retries al mismo tiempo tras un blip de Gemini.
+- **Herramienta(s) Utilizada(s):** Edit, Read, Bash (suite inline de aserciones).
+- **Resultado:** Éxito completo. Las 6 aserciones del smoke pasan: isRetryable filtra correctamente, withTimeout dispara con código ETIMEDOUT, retry success al 2do intento, no-retry en 400, breaker abre tras 5 fallos consecutivos, short-circuit no invoca al client cuando está open.
+- **Verificación:**
+    - Suite inline `node -e "..."` con fakeClient → "--- ALL ASSERTIONS PASSED ---"
+    - Estado final del breaker tras la suite: `{ state: 'open', failures: 5, cooldownRemainingMs: 60000 }`
+    - Logs estructurados de Fase 9.1 emiten correctamente cada intento con attempt/retryable/err.
+- **Logro Conseguido:** El servicio ahora tolera blips de Gemini sin propagar errores al ingest ni colgar mensajes. Si Gemini cae sostenidamente, el breaker pausa las llamadas durante 1 minuto en lugar de seguir generando errores y desperdiciando cuota. El estado del breaker es consultable vía `getBreakerState()` y será expuesto en /health en Fase 9.4.
+- **Referencias de Sesión (Contexto):** Continuación inmediata de Fase 9.1 (logging estructurado). Próximo paso planificado: Fase 9.3 hardening de Baileys (backoff exponencial en reconexión, graceful shutdown SIGTERM).
+- **Observaciones de Gemini:** N/A — sesión ejecutada por Claude Opus 4.6.
+- **Respuesta de Claude:** Fase 9.2 completada. Suite de aserciones 6/6 PASS. Próximo: 9.3 (Baileys + graceful shutdown).

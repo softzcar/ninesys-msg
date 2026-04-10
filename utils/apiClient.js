@@ -1,5 +1,6 @@
 // apiClient.js
 const axios = require('axios');
+const log = require('../src/lib/logger').createLogger('apiClient');
 
 class ApiClient {
     constructor(baseUrl) {
@@ -29,7 +30,7 @@ class ApiClient {
             return response.data;  // Devolvemos la respuesta del servidor
         } catch (error) {
             // Imprimir el mensaje de error detallado
-            console.error('Error en la solicitud:', error.response ? error.response.data : error.message);
+            log.error({ err: error, response: error.response?.data }, 'Error en la solicitud');
             throw new Error('Error en la comunicación con la API principal.');
         }
     }

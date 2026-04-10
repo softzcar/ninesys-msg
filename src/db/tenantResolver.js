@@ -19,6 +19,7 @@
 
 const mysql = require('mysql2/promise');
 const credentialsClient = require('./credentialsClient');
+const log = require('../lib/logger').createLogger('tenantResolver');
 
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutos
 const POOL_DEFAULTS = {
@@ -77,8 +78,9 @@ async function getPool(idEmpresa) {
 
     entry.pool = pool;
     tenants.set(id, entry);
-    console.log(
-        `[tenantResolver] Pool creado para empresa ${id} → ${credentials.db_user}@${credentials.db_host}/${credentials.db_name}`
+    log.info(
+        { tenantId: id, dbUser: credentials.db_user, dbHost: credentials.db_host, dbName: credentials.db_name },
+        'Pool creado'
     );
     return pool;
 }
@@ -100,11 +102,11 @@ async function refresh(idEmpresa) {
         try {
             await entry.pool.end();
         } catch (e) {
-            console.warn(`[tenantResolver] Error cerrando pool de ${id}:`, e.message);
+            log.warn({ err: e, tenantId: id }, 'Error cerrando pool');
         }
     }
     tenants.delete(id);
-    console.log(`[tenantResolver] Cache y pool invalidados para empresa ${id}`);
+    log.info({ tenantId: id }, 'Cache y pool invalidados');
 }
 
 /**
@@ -117,9 +119,27 @@ async function testConnection(idEmpresa) {
     return rows[0].ok === 1;
 }
 
+/**
+ * Cierra todos los pools MySQL (graceful shutdown, Fase 9.3).
+ */
+async function shutdown() {
+    const entries = [...tenants.entries()];
+    log.info({ count: entries.length }, 'tenantResolver: shutdown iniciado');
+    await Promise.all(entries.map(async ([id, entry]) => {
+        if (entry.pool) {
+            try { await entry.pool.end(); }
+            catch (e) { log.warn({ err: e, tenantId: id }, 'error cerrando pool'); }
+        }
+    }));
+    tenants.clear();
+    log.info('tenantResolver: shutdown completado');
+}
+
 module.exports = {
     getCredentials,
     getPool,
     refresh,
     testConnection,
+    shutdown,
+    _state: { tenants },
 };

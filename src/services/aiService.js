@@ -25,10 +25,168 @@
  */
 
 const { GoogleGenAI } = require('@google/genai');
+const log = require('../lib/logger').createLogger('aiService');
 
 // Cuántos mensajes de historial inyectamos al prompt. Suficiente para
 // continuidad conversacional sin disparar tokens.
 const DEFAULT_HISTORY_LIMIT = 12;
+
+// ---------- Hardening Gemini (Fase 9.2) ----------
+// Timeout duro por intento. Gemini-flash promedia 1-3s; 8s deja margen
+// holgado para colas eventuales sin congelar el ingest de WhatsApp.
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS || 8000);
+
+// Reintentos con backoff exponencial + jitter ante errores transientes
+// (429 rate limit, 503 unavailable, timeouts, errores de red). Total
+// máximo de intentos = 1 + GEMINI_RETRIES.
+const GEMINI_RETRIES = Number(process.env.GEMINI_RETRIES || 2);
+const GEMINI_BACKOFF_BASE_MS = 500;
+
+// Circuit breaker global (proceso): si Gemini falla N veces consecutivas,
+// abrimos el circuito durante COOLDOWN_MS para no martillar al API ni
+// bloquear el ingest. Tras el cooldown pasa a half-open y un único intento
+// decide si cerramos o seguimos abiertos.
+const CB_FAIL_THRESHOLD = Number(process.env.GEMINI_CB_THRESHOLD || 5);
+const CB_COOLDOWN_MS = Number(process.env.GEMINI_CB_COOLDOWN_MS || 60_000);
+
+const breaker = {
+    state: 'closed',       // 'closed' | 'open' | 'half-open'
+    failures: 0,
+    openedAt: 0,
+};
+
+function breakerCanPass() {
+    if (breaker.state === 'closed') return true;
+    if (breaker.state === 'open') {
+        if (Date.now() - breaker.openedAt >= CB_COOLDOWN_MS) {
+            breaker.state = 'half-open';
+            log.warn({ cb: breaker.state }, 'circuit breaker half-open: probando 1 request');
+            return true;
+        }
+        return false;
+    }
+    // half-open: deja pasar el probe
+    return true;
+}
+
+function breakerOnSuccess() {
+    if (breaker.state !== 'closed' || breaker.failures > 0) {
+        log.info({ cb: 'closed', prevFailures: breaker.failures }, 'circuit breaker cerrado');
+    }
+    breaker.state = 'closed';
+    breaker.failures = 0;
+    breaker.openedAt = 0;
+}
+
+function breakerOnFailure() {
+    breaker.failures += 1;
+    if (breaker.state === 'half-open' || breaker.failures >= CB_FAIL_THRESHOLD) {
+        breaker.state = 'open';
+        breaker.openedAt = Date.now();
+        log.error(
+            { cb: 'open', failures: breaker.failures, cooldownMs: CB_COOLDOWN_MS },
+            'circuit breaker ABIERTO — pausando llamadas a Gemini'
+        );
+    }
+}
+
+/**
+ * Devuelve true si el error parece transiente y vale la pena reintentar.
+ * Cubre: 429 (rate limit), 5xx, timeouts artesanales, errores de red.
+ */
+function isRetryable(err) {
+    if (!err) return false;
+    if (err.name === 'AbortError' || err.code === 'ETIMEDOUT' || err.code === 'ECONNRESET') return true;
+    if (err.message && /timeout/i.test(err.message)) return true;
+    const status = err.status || err.code || err.response?.status;
+    if (status === 429 || status === 503 || status === 502 || status === 504) return true;
+    return false;
+}
+
+function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Envuelve una promesa en un timeout duro. Si el timer dispara primero,
+ * la promesa rechaza con un Error('Gemini timeout NNNms'). NO cancela la
+ * llamada subyacente (el SDK no expone AbortController público), pero sí
+ * libera el await para que el caller no quede colgado.
+ */
+function withTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const e = new Error(`Gemini timeout ${ms}ms`);
+            e.code = 'ETIMEDOUT';
+            reject(e);
+        }, ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Llama a Gemini con timeout + reintentos + circuit breaker.
+ * Lanza el último error si todos los intentos fallan.
+ */
+async function callGeminiWithResilience(client, request) {
+    if (!breakerCanPass()) {
+        const e = new Error('circuit breaker abierto');
+        e.code = 'CIRCUIT_OPEN';
+        throw e;
+    }
+
+    let lastErr;
+    const maxAttempts = 1 + GEMINI_RETRIES;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const res = await withTimeout(
+                client.models.generateContent(request),
+                GEMINI_TIMEOUT_MS
+            );
+            breakerOnSuccess();
+            return res;
+        } catch (e) {
+            lastErr = e;
+            const retryable = isRetryable(e);
+            log.warn(
+                { err: e, attempt, maxAttempts, retryable },
+                'Gemini intento falló'
+            );
+            if (!retryable || attempt === maxAttempts) break;
+            // Backoff exponencial + jitter (50%)
+            const base = GEMINI_BACKOFF_BASE_MS * Math.pow(2, attempt - 1);
+            const jitter = Math.random() * base * 0.5;
+            await sleep(base + jitter);
+        }
+    }
+    breakerOnFailure();
+    throw lastErr;
+}
+
+/**
+ * Devuelve el estado actual del breaker (para /health o tests).
+ */
+function getBreakerState() {
+    return {
+        state: breaker.state,
+        failures: breaker.failures,
+        openedAt: breaker.openedAt || null,
+        cooldownRemainingMs:
+            breaker.state === 'open'
+                ? Math.max(0, CB_COOLDOWN_MS - (Date.now() - breaker.openedAt))
+                : 0,
+    };
+}
+
+/**
+ * Resetea el breaker manualmente. Útil para tests o un endpoint admin.
+ */
+function resetBreaker() {
+    breaker.state = 'closed';
+    breaker.failures = 0;
+    breaker.openedAt = 0;
+}
 
 let _client = null;
 function getClient() {
@@ -135,7 +293,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
 
     // Sólo Gemini está cableado en Fase 8. Otros providers → no-op silencioso.
     if (settings.provider !== 'gemini') {
-        console.warn(`[aiService] provider='${settings.provider}' no cableado, omitiendo respuesta.`);
+        log.warn({ provider: settings.provider }, 'provider no cableado, omitiendo respuesta');
         return null;
     }
 
@@ -146,9 +304,10 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     const systemInstruction = buildSystemInstruction(settings);
 
     let response;
+    const startedAt = Date.now();
     try {
         const client = getClient();
-        response = await client.models.generateContent({
+        response = await callGeminiWithResilience(client, {
             model: settings.model,
             contents,
             config: {
@@ -157,8 +316,15 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
                 maxOutputTokens: settings.maxTokens,
             },
         });
+        log.info(
+            { jid, model: settings.model, durMs: Date.now() - startedAt },
+            'Gemini ok'
+        );
     } catch (e) {
-        console.error(`[aiService] Gemini falló para jid=${jid}:`, e.message);
+        log.error(
+            { err: e, jid, durMs: Date.now() - startedAt, code: e.code || null },
+            'Gemini falló (tras retries/breaker)'
+        );
         return null;
     }
 
@@ -204,9 +370,25 @@ async function setGlobalEnabled(pool, enabled) {
     return updateSettings(pool, { enabled: !!enabled });
 }
 
+// Wrapper indireccionado para permitir monkey-patch en tests sin tocar
+// el objeto exportado. En runtime apunta al generateReply real.
+let _generateReplyImpl = generateReply;
+async function generateReplyExport(params) {
+    return _generateReplyImpl(params);
+}
+
 module.exports = {
-    generateReply,
+    generateReply: generateReplyExport,
     loadSettings,
     updateSettings,
     setGlobalEnabled,
+    // Hardening (Fase 9.2)
+    getBreakerState,
+    resetBreaker,
+    _internal: { isRetryable, withTimeout, callGeminiWithResilience },
+    // Hooks de test (Fase 9.5)
+    _test: {
+        setGenerateReplyImpl(fn) { _generateReplyImpl = fn || generateReply; },
+        restore() { _generateReplyImpl = generateReply; },
+    },
 };

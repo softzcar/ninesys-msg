@@ -1,0 +1,42 @@
+- **Solicitud del Usuario:** Continuar Fase 9 paso por paso. Sub-fase 9.4: endpoints de observabilidad /health, /ready, /metrics para probes de PM2/k8s/Prometheus y para que el frontend pueda mostrar un badge de salud del servicio.
+- **Fecha y Hora:** 2026-04-09 13:45:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/routes/index.js (3 rutas nuevas sin auth + imports de waManager/aiService)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente — feat(observability): Fase 9.4 /health /ready /metrics
+- **Acción Realizada:**
+    1. **GET /health (liveness):** Responde 200 siempre que el proceso esté vivo. Payload: `{status, service, uptime_s, timestamp}`. NO verifica dependencias externas — esa es la responsabilidad de /ready. Pensado para probes de PM2 y el `livenessProbe` de k8s.
+    2. **GET /ready (readiness):** Verifica: (a) circuit breaker de Gemini NO abierto, (b) ninguna sesión Baileys en estado DEGRADED. Si alguna falla, responde 503 con `status: 'degraded'` y el detalle de cada check. Si no hay sesiones aún (caso boot), devuelve ready=true porque las sesiones se crean lazy. Pensado para `readinessProbe` de k8s y para que el frontend muestre un badge "servicio degradado".
+    3. **GET /metrics (Prometheus):** Content-Type `text/plain; version=0.0.4`. Expone:
+       - `msg_ninesys_process_uptime_seconds` (gauge)
+       - `msg_ninesys_process_memory_bytes{type="rss|heap_used|heap_total|external"}` (gauge)
+       - `msg_ninesys_wa_sessions{status="READY|DEGRADED|..."}` (gauge, agrupado por status_detail)
+       - `msg_ninesys_wa_sessions_total` (gauge)
+       - `msg_ninesys_ai_breaker_state` (gauge, 0=closed, 1=half-open, 2=open)
+       - `msg_ninesys_ai_breaker_failures` (gauge)
+       - `msg_ninesys_ai_breaker_cooldown_ms` (gauge)
+       Formato Prometheus estándar con # HELP y # TYPE por métrica.
+    4. **Sin auth:** Las 3 rutas son públicas (montadas antes del router con authenticateToken). Justificación: probes externos no tienen JWT, y los datos expuestos son estado derivado, no sensibles. Para producción se puede restringir por IP en nginx si es necesario.
+    5. **Imports nuevos en routes/index.js:** Añadí `waManager` y `aiService` al tope. Consumen `waManager.listSessions()` y `aiService.getBreakerState()` (helpers que expusimos en 9.2 y 9.3).
+- **Inconvenientes y Desafíos:**
+    1. **Cuándo devolver 503 en /ready:** Consideré si tener sesiones en REQUIRES_QR debería marcar degraded. Decidí que NO: REQUIRES_QR es un estado normal que requiere acción del usuario (escanear QR), pero el servicio HTTP sigue funcional. Solo DEGRADED (reconexión agotada) y breaker Gemini open cuentan como degraded del servicio global.
+    2. **Counter vs gauge para el breaker:** Gemini breaker "state" es un gauge (representa estado actual, no un conteo monótono). failures es contador interno que se resetea al cerrar, así que también va como gauge. En 9.5/futuro podríamos añadir counters reales (`msg_ninesys_ai_calls_total{result="ok|error|timeout"}`) si queremos historial, pero requiere instrumentación en aiService.
+    3. **No hay counters de mensajes in/out:** Para exponerlos tendría que instrumentar conversationStore.ingestMessage / waManager.sendText con un módulo de counters. Lo dejé fuera del scope de 9.4 por simplicidad; las métricas actuales son suficientes para alerting básico (breaker open, sesiones degraded, memoria alta).
+- **Decisión Final y Justificación:**
+    - **Métricas artesanales vs prom-client:** Artesanal porque solo expongo ~10 gauges y no quiero una dep más. Si en el futuro añadimos histogramas (latencia Gemini, tiempo de ingest), migraremos a `prom-client` que da buckets automáticos.
+    - **/health siempre 200:** La filosofía de liveness es "¿debo matar el proceso?". Si /health respondiera 503 ante breaker open, k8s reiniciaría el pod innecesariamente — el breaker no es un problema del proceso, es un problema del API externo. Por eso los checks externos van en /ready.
+    - **Content-Type versión 0.0.4 exacto:** Es el que reconoce Prometheus y Grafana Agent sin configuración extra. version=0.0.4 es el formato text exposition estable.
+    - **Sin auth en observabilidad:** Estándar de la industria (Prometheus scraping rara vez lleva JWT). Si el operador quiere proteger, lo hace a nivel de red (nginx allowlist, firewall, mesh).
+- **Herramienta(s) Utilizada(s):** Edit, Read, Bash (smoke test con express embebido y fetch).
+- **Resultado:** Éxito. Smoke test con server embebido en puerto aleatorio:
+    - GET /health → 200 `{status:"ok", service:"msg_ninesys", uptime_s:1, timestamp}`
+    - GET /ready → 200 `{status:"ready", checks:{ai_breaker:{state:"closed",ok:true}, wa_sessions:{total:0,ready:0,degraded:0,ok:true}}}`
+    - GET /metrics → 200 text/plain con todas las métricas esperadas renderizadas correctamente en formato Prometheus.
+- **Verificación:**
+    - Las 3 aserciones del smoke pasan: status codes correctos, content-type correcto en /metrics, presencia de las métricas clave (uptime, breaker_state, wa_sessions).
+    - Output Prometheus validado manualmente: HELP + TYPE + valores bien formados.
+- **Logro Conseguido:** msg_ninesys ahora expone observabilidad estándar consumible por PM2, k8s y Prometheus sin configuración extra. El frontend podrá pegarle a /ready para mostrar un badge "servicio operativo / degradado" y a /health como ping básico. La siguiente fase (9.5 tests integración) puede usar estos endpoints como fixture de validación.
+- **Referencias de Sesión (Contexto):** Continuación de 9.1 (logging), 9.2 (hardening Gemini), 9.3 (hardening Baileys + shutdown). Último paso de Fase 9: 9.5 tests de integración con mocks.
+- **Observaciones de Gemini:** N/A — sesión ejecutada por Claude Opus 4.6.
+- **Respuesta de Claude:** Fase 9.4 completada. Smoke test 3/3 PASS. Próximo y último: 9.5 tests integración con mocks Baileys + stub Gemini.

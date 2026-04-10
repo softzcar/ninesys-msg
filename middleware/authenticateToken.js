@@ -23,6 +23,7 @@ module.exports = (req, res, next) => {
 } */
 
 const jwt = require("jsonwebtoken")
+const log = require('../src/lib/logger').createLogger('authenticateToken');
 
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers["authorization"];
@@ -35,11 +36,10 @@ const authenticateToken = (req, res, next) => {
     // Verificar el token
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
-            console.log("Token NO válido", token)
-            return res.status(403).json({ message: "Token no válido" })
-        } else {
-            console.log("Token válido", token)
+            (req.log || log).warn({ err }, 'Token NO válido');
+            return res.status(403).json({ message: "Token no válido" });
         }
+        ;(req.log || log).debug('Token válido');
 
         req.user = user // Guardar los datos del usuario para futuros usos
         next()

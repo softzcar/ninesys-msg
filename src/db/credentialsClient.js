@@ -12,15 +12,16 @@
  */
 
 const axios = require('axios');
+const log = require('../lib/logger').createLogger('credentialsClient');
 
 const API_URL = process.env.API_URL;
 const TOKEN = process.env.MSG_SERVICE_INTERNAL_TOKEN;
 
 if (!API_URL) {
-    console.warn('[credentialsClient] API_URL no está definida en .env');
+    log.warn('API_URL no está definida en .env');
 }
 if (!TOKEN) {
-    console.warn('[credentialsClient] MSG_SERVICE_INTERNAL_TOKEN no está definida en .env');
+    log.warn('MSG_SERVICE_INTERNAL_TOKEN no está definida en .env');
 }
 
 const http = axios.create({

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const ApiClient = require('../utils/apiClient'); // Importa la clase ApiClient
 const apiUrl = process.env.API_URL; // La URL de la API principal
+const log = require('../src/lib/logger').createLogger('authController');
 
 exports.verifyCredentials = async (req, res) => {
     const { username, password } = req.body;
@@ -31,7 +32,7 @@ exports.verifyCredentials = async (req, res) => {
                     const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: '1h' });
                     res.status(200).json({ token });
                 } catch (tokenError) {
-                    console.error('Error al generar el token:', tokenError);
+                    log.error({ err: tokenError }, 'Error al generar el token');
                     res.status(500).json({ message: 'Error al generar el token', error: tokenError });
                 }
             }
@@ -39,7 +40,7 @@ exports.verifyCredentials = async (req, res) => {
             res.status(500).json({ msg: 'Ocurrió un error al obtener una respuesta del servidor', error: response });
         }
     } catch (error) {
-        console.error('Error al verificar las credenciales:', JSON.stringify(error));
+        log.error({ err: error }, 'Error al verificar las credenciales');
         res.status(500).json({ message: 'Error en la verificación de credenciales', error: error });
     }
 };
@@ -55,7 +56,7 @@ exports.loginManager = (req, res) => {
             const token = jwt.sign({ user: 'admin' }, process.env.JWT_SECRET, { expiresIn: '8h' });
             res.status(200).json({ token });
         } catch (error) {
-            console.error('Error al generar el token para el gestor:', error);
+            log.error({ err: error }, 'Error al generar el token para el gestor');
             res.status(500).json({ message: 'Error interno al generar el token.' });
         }
     } else {

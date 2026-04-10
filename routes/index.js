@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require('cors');
 const pm2 = require('pm2'); // Mantenemos pm2 si la ruta de reinicio del servidor es necesaria
+const log = require('../src/lib/logger').createLogger('routes');
 
 const router = express.Router();
 
@@ -59,13 +60,130 @@ router.get("/", (req, res) => {
  */
 router.post("/login", authController.loginManager);
 
+// ---------------------------------------------------------------------------
+// Observabilidad (Fase 9.4): /health, /ready, /metrics
+// Sin auth: pensados para probes de PM2/k8s/Prometheus. No exponen datos
+// sensibles (solo conteos y estados derivados).
+// ---------------------------------------------------------------------------
+
+const waManager = require('../src/services/waManager');
+const aiService = require('../src/services/aiService');
+
+/**
+ * Liveness probe. Responde 200 mientras el proceso esté vivo y el event
+ * loop no esté saturado. No verifica dependencias externas (eso es /ready).
+ */
+router.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'ok',
+        service: 'msg_ninesys',
+        uptime_s: Math.round(process.uptime()),
+        timestamp: new Date().toISOString(),
+    });
+});
+
+/**
+ * Readiness probe. Devuelve 200 si el servicio está apto para recibir
+ * tráfico, 503 en caso contrario. Criterios:
+ *   - circuit breaker de Gemini NO abierto (si abierto, las auto-respuestas
+ *     IA fallarían; el servicio sigue funcional para mensajes manuales
+ *     pero lo marcamos como degraded).
+ *   - al menos una sesión Baileys existe y no está en estado DEGRADED
+ *     terminal (si no hay sesiones todavía, devolvemos ready=true igual
+ *     porque las sesiones se crean lazy).
+ */
+router.get('/ready', (req, res) => {
+    const checks = {};
+
+    const breaker = aiService.getBreakerState();
+    checks.ai_breaker = {
+        state: breaker.state,
+        ok: breaker.state !== 'open',
+    };
+
+    const sessions = waManager.listSessions();
+    const degraded = sessions.filter((s) => s.status_detail === 'DEGRADED');
+    checks.wa_sessions = {
+        total: sessions.length,
+        ready: sessions.filter((s) => s.whatsapp_ready).length,
+        degraded: degraded.length,
+        ok: degraded.length === 0,
+    };
+
+    const allOk = Object.values(checks).every((c) => c.ok);
+    res.status(allOk ? 200 : 503).json({
+        status: allOk ? 'ready' : 'degraded',
+        checks,
+        timestamp: new Date().toISOString(),
+    });
+});
+
+/**
+ * Métricas estilo Prometheus (text/plain; version=0.0.4).
+ * Expone: uptime, memoria del proceso, sesiones Baileys por estado,
+ * estado del breaker de Gemini.
+ */
+router.get('/metrics', (req, res) => {
+    const lines = [];
+    const push = (help, type, name, value, labels = '') => {
+        lines.push(`# HELP ${name} ${help}`);
+        lines.push(`# TYPE ${name} ${type}`);
+        lines.push(`${name}${labels ? `{${labels}}` : ''} ${value}`);
+    };
+
+    // Proceso
+    push('Uptime del proceso en segundos', 'gauge',
+        'msg_ninesys_process_uptime_seconds', process.uptime().toFixed(0));
+
+    const mem = process.memoryUsage();
+    lines.push('# HELP msg_ninesys_process_memory_bytes Memoria del proceso Node en bytes');
+    lines.push('# TYPE msg_ninesys_process_memory_bytes gauge');
+    lines.push(`msg_ninesys_process_memory_bytes{type="rss"} ${mem.rss}`);
+    lines.push(`msg_ninesys_process_memory_bytes{type="heap_used"} ${mem.heapUsed}`);
+    lines.push(`msg_ninesys_process_memory_bytes{type="heap_total"} ${mem.heapTotal}`);
+    lines.push(`msg_ninesys_process_memory_bytes{type="external"} ${mem.external}`);
+
+    // Sesiones Baileys agrupadas por estado
+    const sessions = waManager.listSessions();
+    const byStatus = {};
+    for (const s of sessions) {
+        const st = s.status_detail || 'UNKNOWN';
+        byStatus[st] = (byStatus[st] || 0) + 1;
+    }
+    lines.push('# HELP msg_ninesys_wa_sessions Sesiones Baileys agrupadas por estado');
+    lines.push('# TYPE msg_ninesys_wa_sessions gauge');
+    if (Object.keys(byStatus).length === 0) {
+        lines.push(`msg_ninesys_wa_sessions{status="NONE"} 0`);
+    } else {
+        for (const [status, count] of Object.entries(byStatus)) {
+            lines.push(`msg_ninesys_wa_sessions{status="${status}"} ${count}`);
+        }
+    }
+    push('Total de sesiones registradas en memoria', 'gauge',
+        'msg_ninesys_wa_sessions_total', sessions.length);
+
+    // Circuit breaker Gemini
+    const breaker = aiService.getBreakerState();
+    const cbStateNum = { closed: 0, 'half-open': 1, open: 2 }[breaker.state] ?? -1;
+    push('Estado del circuit breaker de Gemini (0=closed, 1=half-open, 2=open)',
+        'gauge', 'msg_ninesys_ai_breaker_state', cbStateNum);
+    push('Fallos consecutivos acumulados en el breaker de Gemini', 'gauge',
+        'msg_ninesys_ai_breaker_failures', breaker.failures);
+    push('Milisegundos restantes antes de que el breaker pase a half-open',
+        'gauge', 'msg_ninesys_ai_breaker_cooldown_ms', breaker.cooldownRemainingMs);
+
+    res.set('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(lines.join('\n') + '\n');
+});
+
+
 /**
  * Endpoint para obtener el estado del servidor desde PM2
  */
 router.get("/server-status", authenticateToken, (req, res) => {
     pm2.describe('ntmsg-app', (err, processDescription) => {
         if (err) {
-            console.error('Error al obtener descripción de PM2:', err);
+            log.error({ err }, 'Error al obtener descripción de PM2');
             return res.status(500).json({ error: 'Error al obtener datos del servidor.' });
         }
         if (processDescription && processDescription.length > 0) {
@@ -131,11 +249,11 @@ router.delete("/client/:companyId", authenticateToken, deleteClientByCompanyId);
  * Restart Server usando PM2 (POST para acciones que cambian estado del servidor)
  */
 router.post('/restart-server', authenticateToken, (req, res) => {
-    console.log('Recibida petición para reiniciar el servidor usando PM2.');
+    log.info('Petición de reinicio del servidor (PM2)');
 
     pm2.connect(err => {
         if (err) {
-            console.error('Error al conectar con PM2:', err);
+            log.error({ err }, 'Error al conectar con PM2');
             return res.status(500).json({ error: 'Error al conectar con el administrador de procesos.' });
         }
 
@@ -143,7 +261,7 @@ router.post('/restart-server', authenticateToken, (req, res) => {
         pm2.restart('ntmsg-app', (err, proc) => {
             pm2.disconnect(); // Desconectar de PM2 después de la operación
             if (err) {
-                console.error('Error al reiniciar la aplicación con PM2:', err);
+                log.error({ err }, 'Error al reiniciar la aplicación con PM2');
                 return res.status(500).json({ error: 'Error al reiniciar la aplicación con PM2.' });
             }
             // La respuesta se envía inmediatamente después de solicitar el reinicio a PM2
@@ -166,7 +284,7 @@ router.get("/session-info/:companyId", authenticateToken, async (req, res) => {
         }
         res.status(200).json(sessionInfo); // Enviar siempre JSON con el estado
     } catch (error) {
-        console.error(`Error en ruta /session-info/${companyId}:`, error);
+        log.error({ err: error, tenantId: companyId }, 'Error en /session-info');
         res.status(500).json({
             message: "Error al obtener información de la sesión",
             error: error.message
@@ -234,7 +352,7 @@ router.post("/send-direct-message/:companyId", sendDirectMessage);
 
 // Ruta de prueba simple
 router.post("/test-recibir", (req, res) => {
-    console.log("Received test data:", req.body);
+    log.debug({ body: req.body }, 'Received test data');
     res.status(200).json({ received: req.body, status: "ok" });
 });
 
@@ -249,7 +367,7 @@ router.get("/ws-info/:companyId", async (req, res) => {
         const status = getClientStatus(companyId);
         res.status(200).json(status);
     } catch (error) {
-        console.error(`Error en /ws-info/${companyId}:`, error);
+        log.error({ err: error, tenantId: companyId }, 'Error en /ws-info');
         res.status(500).json({
             status: 'ERROR',
             ws_ready: false,

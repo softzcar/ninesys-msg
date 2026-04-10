@@ -22,6 +22,8 @@
 
 // Carga diferida: baileys es ESM y solo debe importarse cuando el flag
 // USE_BAILEYS=1 está activo, para no romper el modo legacy (sin la dep).
+const log = require('../lib/logger').createLogger('baileysAuthState');
+
 let _baileys;
 function lib() {
     if (!_baileys) _baileys = require('baileys');
@@ -37,7 +39,7 @@ async function readKey(pool, key) {
     try {
         return JSON.parse(rows[0].key_value.toString('utf8'), lib().BufferJSON.reviver);
     } catch (e) {
-        console.warn(`[baileysAuthState] No pude parsear ${key}:`, e.message);
+        log.warn({ err: e, key }, 'No pude parsear key');
         return null;
     }
 }

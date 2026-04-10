@@ -1,0 +1,36 @@
+- **Solicitud del Usuario:** Continuar Fase 9 paso por paso. Sub-fase 9.3: hardening Baileys (backoff exponencial en reconexión, cap de intentos) + graceful shutdown del proceso.
+- **Fecha y Hora:** 2026-04-09 13:00:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/services/waManager.js (backoff exponencial, reconnectAttempts, estado DEGRADED, shutdown())
+    - msg_ninesys/src/db/tenantResolver.js (shutdown() que cierra todos los pools)
+    - msg_ninesys/app.js (handler SIGTERM/SIGINT + unhandledRejection/uncaughtException)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente — feat(observability): Fase 9.3 hardening Baileys + graceful shutdown
+- **Acción Realizada:**
+    1. **Backoff exponencial en reconexión:** Reemplacé el `setTimeout(..., 1500)` fijo por `computeBackoff(attempt)` que hace `base * 2^(attempt-1)` con cap 60s y jitter 30%. Secuencia típica: 1.5s → 3s → 6s → 12s → 24s → 48s → 60s → 60s...
+    2. **reconnectAttempts persistente entre inits:** Añadí `session.reconnectAttempts` y lo preservo cuando `init()` se vuelve a llamar (antes se reseteaba cada init). Se resetea a 0 cuando `connection === 'open'` (sesión READY).
+    3. **Cap de intentos → estado DEGRADED:** Tras `BAILEYS_MAX_RECONNECT` (default 20) intentos consecutivos fallidos, la sesión entra en estado 'DEGRADED' persistido en wa_session_state. El frontend puede mostrarlo como "requiere intervención manual" y el usuario debe disparar `/restart/:companyId` explícitamente.
+    4. **Flag _shuttingDown global:** Los handlers de `connection.close` revisan esta bandera antes de programar reconexión. Evita la carrera "recibo close justo mientras estoy cerrando".
+    5. **waManager.shutdown({timeoutMs}):** Cierra todas las sesiones en paralelo con timeout por sesión (default 5s). Remueve listeners de `connection.update` antes del `sock.end()` para no disparar la lógica de reconexión durante el cierre. Idempotente: segunda llamada es no-op.
+    6. **tenantResolver.shutdown():** Cierra todos los pools mysql2 en paralelo y vacía el cache. Separado de waManager porque los pools los consumen también endpoints HTTP que no pasan por Baileys.
+    7. **Handler SIGTERM/SIGINT en app.js:** Flujo de cierre ordenado: (a) `server.close()` deja de aceptar HTTP nuevo, (b) `io.close()` cierra Socket.IO, (c) `waManager.shutdown(4s)`, (d) `tenantResolver.shutdown()`, (e) `process.exit(0)`. Hard timeout de 10s con `process.exit(1)` si algo no responde (unref para no bloquear el event loop si termina antes).
+    8. **unhandledRejection / uncaughtException:** Handlers globales que loguean con `logger.error` / `logger.fatal` antes de morir. Antes de 9.1 estos errores iban a stderr sin correlación; ahora quedan en los logs estructurados con stack trace serializado.
+- **Inconvenientes y Desafíos:**
+    1. **sock.end() de Baileys puede colgar:** La librería a veces no resuelve el cierre si el WebSocket ya está medio-muerto. Por eso envolví cada cierre en `Promise.race([closePromise, setTimeout(timeoutMs)])`: si una sesión no responde en 4s, seguimos con las demás y confiamos en el hard exit.
+    2. **Orden de cierre importa:** Primero HTTP (para no aceptar requests que tocarían un pool a medio cerrar), luego Socket.IO (para que los clientes reciban el `disconnect` antes que un RST), luego Baileys, finalmente pools. Si se cierra al revés, una request en vuelo puede hitar un pool `end()`-ed y loggear un error falso.
+    3. **PM2 `pm2 restart` manda SIGINT, no SIGTERM:** Por eso registré ambos. Docker/systemd usan SIGTERM por default. Kubernetes también SIGTERM.
+- **Decisión Final y Justificación:**
+    - **Backoff con cap 60s vs sin cap:** Sin cap, tras ~15 intentos el delay superaría los 5 minutos, lo cual es peor UX. 60s es un compromiso razonable para un servicio de mensajería donde queremos recuperar conexión rápido tras blips de red.
+    - **DEGRADED en vez de auto-logout:** Si tras 20 intentos sigue fallando, probablemente requiere acción humana (QR caducado, número bloqueado, credenciales corruptas). Marcar DEGRADED y emitir evento al panel es mejor que intentar infinito.
+    - **Hard timeout 10s en graceful shutdown:** PM2 por default mata con SIGKILL tras 1.6s si no sale. El `killTimeout` se puede aumentar en ecosystem.config.js; 10s en nuestro lado cubre ese caso para la mayoría de deploys. Si PM2 mata antes, al menos el shutdown intentó lo mejor posible y los logs dejan rastro.
+    - **No persistir reconnectAttempts en DB:** Es estado in-memory volátil por diseño: si el proceso muere, los intentos se resetean en el nuevo proceso (que es lo correcto — el nuevo proceso empieza fresco).
+- **Herramienta(s) Utilizada(s):** Edit, Read, Bash (smoke test inline).
+- **Resultado:** Éxito. Smoke test local: módulos cargan sin errores, `waManager.shutdown()` es idempotente (2 llamadas seguidas OK), `tenantResolver.shutdown()` maneja el caso vacío, exports correctos.
+- **Verificación:**
+    - `node -e "const wa=require('./src/services/waManager'); wa.shutdown().then(()=>wa.shutdown()).then(()=>require('./src/db/tenantResolver').shutdown());"` → logs estructurados de inicio/fin de shutdown, cero errores.
+    - Exports: `wa.shutdown`, `tr.shutdown` presentes.
+- **Logro Conseguido:** El servicio ahora sobrevive a blips de red de Baileys con backoff exponencial (antes reintentaba cada 1.5s de forma agresiva) y cierra limpiamente en deploys PM2/Docker/k8s. El estado DEGRADED le da al frontend una señal clara de "esta sesión necesita intervención manual" en lugar de seguir quemando intentos para siempre.
+- **Referencias de Sesión (Contexto):** Continuación de Fase 9.1 (logging) y 9.2 (hardening Gemini). Próximo paso planificado: Fase 9.4 — endpoints /health, /ready, /metrics que consumirán `waManager.listSessions()`, `aiService.getBreakerState()` y contadores nuevos.
+- **Observaciones de Gemini:** N/A — sesión ejecutada por Claude Opus 4.6.
+- **Respuesta de Claude:** Fase 9.3 completada. Smoke test OK. Próximo: 9.4 (endpoints observabilidad).

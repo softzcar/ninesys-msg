@@ -34,10 +34,28 @@ const tenantResolver = require('../db/tenantResolver');
 const { useMySQLAuthState } = require('./baileysAuthState');
 const conversationStore = require('./conversationStore');
 const aiService = require('./aiService');
+const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
 const AI_THROTTLE_MS = 4000;
 const _aiLastReply = new Map(); // jid → ts ms
+
+// ---------- Hardening Baileys (Fase 9.3) ----------
+// Backoff exponencial en reconexión: 1.5s → 3s → 6s → 12s → ... cap 60s.
+// Se resetea a 0 cuando la sesión llega a READY.
+const RECONNECT_BASE_MS = 1500;
+const RECONNECT_MAX_MS = 60_000;
+const RECONNECT_MAX_ATTEMPTS = Number(process.env.BAILEYS_MAX_RECONNECT || 20);
+
+function computeBackoff(attempt) {
+    const base = Math.min(RECONNECT_BASE_MS * Math.pow(2, attempt - 1), RECONNECT_MAX_MS);
+    const jitter = Math.random() * base * 0.3;
+    return Math.floor(base + jitter);
+}
+
+// Flag de shutdown: cuando está en true, los handlers de `connection.close`
+// no intentan reconectar para no pelearse con el graceful shutdown.
+let _shuttingDown = false;
 
 let baileys;
 function loadBaileys() {
@@ -140,7 +158,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
             throw sendErr;
         }
     } catch (e) {
-        console.error(`[waManager:${idEmpresa}] maybeAutoReply falló:`, e.message);
+        log.error({ err: e, tenantId: idEmpresa }, 'maybeAutoReply falló');
     }
 }
 
@@ -175,6 +193,9 @@ async function init(idEmpresa) {
         markOnlineOnConnect: false,
     });
 
+    // Preservamos reconnectAttempts entre inits consecutivos para que el
+    // backoff escale correctamente en un ciclo de fallos.
+    const prev = sessions.get(id);
     const session = {
         sock,
         clear,
@@ -183,6 +204,7 @@ async function init(idEmpresa) {
         lastError: null,
         info: null,
         pausedUntil: null,
+        reconnectAttempts: prev?.reconnectAttempts || 0,
     };
     sessions.set(id, session);
     await persistState(pool, { status: 'INITIALIZING', last_error: null });
@@ -206,7 +228,7 @@ async function init(idEmpresa) {
                     }
                 }
             } catch (e) {
-                console.error(`[waManager:${id}] ingestMessage falló:`, e.message);
+                log.error({ err: e, tenantId: id }, 'ingestMessage falló');
             }
         }
     });
@@ -223,7 +245,7 @@ async function init(idEmpresa) {
                     await conversationStore.updateMessageStatus(pool, wa_message_id, mapped);
                     emit(id, 'message:status', { companyId: id, wa_message_id, status: mapped });
                 } catch (e) {
-                    console.error(`[waManager:${id}] updateMessageStatus falló:`, e.message);
+                    log.error({ err: e, tenantId: id, wa_message_id }, 'updateMessageStatus falló');
                 }
             }
         }
@@ -233,7 +255,7 @@ async function init(idEmpresa) {
         try {
             await conversationStore.upsertChatNames(pool, chats);
         } catch (e) {
-            console.error(`[waManager:${id}] upsertChatNames falló:`, e.message);
+            log.error({ err: e, tenantId: id }, 'upsertChatNames falló');
         }
     });
 
@@ -248,7 +270,7 @@ async function init(idEmpresa) {
                 await persistState(pool, { status: 'REQUIRES_QR' });
                 emit(id, 'qr', { qr: dataUrl });
             } catch (e) {
-                console.error(`[waManager:${id}] Error generando QR base64:`, e);
+                log.error({ err: e, tenantId: id }, 'Error generando QR base64');
             }
         }
 
@@ -257,6 +279,7 @@ async function init(idEmpresa) {
             session.qr = null;
             session.info = sock.user || null;
             session.lastError = null;
+            session.reconnectAttempts = 0; // reset backoff al reconectar ok
             await persistState(pool, {
                 status: 'READY',
                 phone_number: sock.user?.id?.split(':')[0] || null,
@@ -279,13 +302,39 @@ async function init(idEmpresa) {
             });
             emit(id, 'disconnected', { reason });
 
-            // Re-conectar excepto si fue logout explícito
-            if (code !== DisconnectReason.loggedOut) {
-                console.log(`[waManager:${id}] Reconectando (motivo=${reason})...`);
-                setTimeout(() => init(id).catch((e) => {
-                    console.error(`[waManager:${id}] Reconexión falló:`, e.message);
-                    emit(id, 'error', { message: e.message });
-                }), 1500);
+            // Re-conectar excepto si fue logout explícito o si estamos en shutdown
+            if (_shuttingDown) {
+                log.info({ tenantId: id, reason }, 'Close durante shutdown, no reconectando');
+            } else if (code !== DisconnectReason.loggedOut) {
+                session.reconnectAttempts += 1;
+                if (session.reconnectAttempts > RECONNECT_MAX_ATTEMPTS) {
+                    session.status = 'DEGRADED';
+                    await persistState(pool, {
+                        status: 'DEGRADED',
+                        last_error: `Reconexión agotada tras ${RECONNECT_MAX_ATTEMPTS} intentos`,
+                    });
+                    emit(id, 'status', {
+                        status: 'DEGRADED',
+                        message: `Reconexión agotada tras ${RECONNECT_MAX_ATTEMPTS} intentos. Requiere restart manual.`,
+                    });
+                    log.error(
+                        { tenantId: id, attempts: session.reconnectAttempts },
+                        'Reconexión agotada — estado DEGRADED'
+                    );
+                } else {
+                    const delay = computeBackoff(session.reconnectAttempts);
+                    log.info(
+                        { tenantId: id, reason, attempt: session.reconnectAttempts, delayMs: delay },
+                        'Reconectando sesión con backoff'
+                    );
+                    setTimeout(() => {
+                        if (_shuttingDown) return;
+                        init(id).catch((e) => {
+                            log.error({ err: e, tenantId: id }, 'Reconexión falló');
+                            emit(id, 'error', { message: e.message });
+                        });
+                    }, delay);
+                }
             } else {
                 // Logout: limpiar credenciales y dejar listo para nuevo QR
                 try { await clear(); } catch (_) {}
@@ -386,7 +435,7 @@ async function disconnect(idEmpresa) {
     try {
         await s.sock.logout();
     } catch (e) {
-        console.warn(`[waManager:${id}] logout warning:`, e.message);
+        log.warn({ err: e, tenantId: id }, 'logout warning');
     }
     try { await s.clear(); } catch (_) {}
     sessions.delete(id);
@@ -468,7 +517,7 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
                     companyId: id, jid, mode: 'human', assignedTo: sentByUser,
                 });
             } catch (e) {
-                console.error(`[waManager:${id}] handoff manual falló:`, e.message);
+                log.error({ err: e, tenantId: id, jid }, 'handoff manual falló');
             }
         }
         return { wa_message_id, ts, jid, body, status: 'sent' };
@@ -486,6 +535,41 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
         } catch (_) { /* best-effort */ }
         throw e;
     }
+}
+
+/**
+ * Graceful shutdown (Fase 9.3). Cierra todas las sesiones Baileys en
+ * paralelo con un timeout corto por sesión, para que PM2/systemd no tenga
+ * que mandar SIGKILL. Idempotente.
+ */
+async function shutdown({ timeoutMs = 5000 } = {}) {
+    if (_shuttingDown) return;
+    _shuttingDown = true;
+    const entries = [...sessions.entries()];
+    log.info({ count: entries.length }, 'waManager: shutdown iniciado');
+
+    const closeOne = async ([id, s]) => {
+        try {
+            if (s?.sock) {
+                const p = new Promise((resolve) => {
+                    try { s.sock.ev.removeAllListeners('connection.update'); } catch (_) {}
+                    try { s.sock.end(undefined); } catch (_) {}
+                    resolve();
+                });
+                await Promise.race([
+                    p,
+                    new Promise((r) => setTimeout(r, timeoutMs)),
+                ]);
+            }
+            log.info({ tenantId: id }, 'sesión cerrada');
+        } catch (e) {
+            log.warn({ err: e, tenantId: id }, 'error cerrando sesión');
+        }
+    };
+
+    await Promise.all(entries.map(closeOne));
+    sessions.clear();
+    log.info('waManager: shutdown completado');
 }
 
 /**
@@ -513,4 +597,21 @@ module.exports = {
     destroy,
     sendText,
     listSessions,
+    shutdown,
+    _state: { sessions },
+    // Hooks sólo para tests de integración (Fase 9.5). NO usar en runtime.
+    _test: {
+        maybeAutoReply,
+        setSession(idEmpresa, partial) {
+            const id = parseInt(idEmpresa, 10);
+            const existing = sessions.get(id) || {};
+            sessions.set(id, { ...existing, ...partial });
+        },
+        deleteSession(idEmpresa) {
+            sessions.delete(parseInt(idEmpresa, 10));
+        },
+        resetShutdownFlag() {
+            _shuttingDown = false;
+        },
+    },
 };

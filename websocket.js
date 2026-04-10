@@ -1,4 +1,5 @@
 const { Server } = require('socket.io');
+const log = require('./src/lib/logger').createLogger('websocket');
 
 let io;
 
@@ -25,7 +26,7 @@ const initWebSocket = (httpServer) => {
                 if (matchingOrigin) {
                     callback(null, matchingOrigin);
                 } else {
-                    console.error(`[WS-CORS] DEBUG-CORS-BLOCKER-V2: ${origin}`);
+                    log.error({ origin }, 'CORS block');
                     callback(new Error("No permitido por CORS"));
                 }
             },
@@ -37,12 +38,12 @@ const initWebSocket = (httpServer) => {
     });
 
     io.on('connection', (socket) => {
-        console.log(`[WS] Cliente conectado: ${socket.id}`);
+        log.info({ socketId: socket.id }, 'Cliente conectado');
 
         socket.on('subscribe', (companyId) => {
             const room = `company-${companyId}`;
             socket.join(room);
-            console.log(`[WS] ${socket.id} suscrito a ${room}`);
+            log.info({ socketId: socket.id, room }, 'subscribe');
 
             try {
                 const { getClientStatus, initializeClient } = require('./controllers/whatsappController');
@@ -50,7 +51,7 @@ const initWebSocket = (httpServer) => {
 
                 if (status && (status.status === 'NOT_REGISTERED' || status.status === 'INITIALIZING')) {
                     // La empresa no tiene cliente en memoria: inicializar para generar QR
-                    console.log(`[WS] Empresa ${companyId} sin cliente activo. Iniciando inicialización...`);
+                    log.info({ tenantId: companyId }, 'sin cliente activo, iniciando');
                     initializeClient(companyId);
                 } else if (status) {
                     // Ya hay un cliente activo o con sesión, devolver su estado actual
@@ -62,40 +63,40 @@ const initWebSocket = (httpServer) => {
                     }
                 }
             } catch (error) {
-                console.error(`[WS] Error en subscribe para ${companyId}:`, error);
+                log.error({ err: error, tenantId: companyId }, 'Error en subscribe');
             }
         });
 
         socket.on('restart-client', async (companyId) => {
-            console.log(`[WS] Comando 'restart-client' recibido para ${companyId}`);
+            log.info({ tenantId: companyId }, "restart-client recibido");
             try {
                 const { restartClient } = require('./controllers/whatsappController');
                 await restartClient(companyId);
             } catch (error) {
-                console.error(`[WS] Error reiniciando cliente ${companyId}:`, error);
+                log.error({ err: error, tenantId: companyId }, 'Error reiniciando cliente');
                 socket.emit('error', { message: error.message || 'Error al reiniciar cliente' });
             }
         });
 
         socket.on('disconnect-client', async (companyId) => {
-            console.log(`[WS] Comando 'disconnect-client' recibido para ${companyId}`);
+            log.info({ tenantId: companyId }, "disconnect-client recibido");
             try {
                 const { disconnectClient, initializeClient } = require('./controllers/whatsappController');
                 await disconnectClient(companyId);
-                console.log(`[WS] Reinicializando cliente tras desconexión para generar nuevo QR para ${companyId}`);
+                log.info({ tenantId: companyId }, 'Reinicializando cliente tras desconexión');
                 initializeClient(companyId);
             } catch (error) {
-                console.error(`[WS] Error desconectando cliente ${companyId}:`, error);
+                log.error({ err: error, tenantId: companyId }, 'Error desconectando cliente');
                 socket.emit('error', { message: error.message || 'Error al desconectar cliente' });
             }
         });
 
         socket.on('disconnect', (reason) => {
-            console.log(`[WS] Cliente desconectado: ${socket.id} - Razón: ${reason}`);
+            log.info({ socketId: socket.id, reason }, 'Cliente desconectado');
         });
 
         socket.on('error', (error) => {
-            console.error(`[WS] Error en socket ${socket.id}:`, error);
+            log.error({ err: error, socketId: socket.id }, 'Error en socket');
         });
     });
 
@@ -103,9 +104,8 @@ const initWebSocket = (httpServer) => {
     // a las salas company-<id>.
     const waManager = require('./src/services/waManager');
     waManager.setIo(io);
-    console.log('[WS] waManager enlazado al servidor Socket.IO');
-
-    console.log('[WS] Servidor WebSocket inicializado con CORS robusto y auto-inicialización de clientes');
+    log.info('waManager enlazado al servidor Socket.IO');
+    log.info('Servidor WebSocket inicializado');
     return io;
 };
 
@@ -113,9 +113,9 @@ const emitToCompany = (companyId, event, data) => {
     if (io) {
         const room = `company-${companyId}`;
         io.to(room).emit(event, data);
-        console.log(`[WS] Emitido '${event}' a ${room}`);
+        log.debug({ event, room }, 'emit');
     } else {
-        console.warn('[WS] Servidor no inicializado, no se puede emitir');
+        log.warn('Servidor no inicializado, no se puede emitir');
     }
 };
 

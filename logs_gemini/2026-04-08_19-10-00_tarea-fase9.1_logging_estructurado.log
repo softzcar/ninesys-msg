@@ -1,0 +1,49 @@
+- **Solicitud del Usuario:** Iniciar Fase 9 (hardening / observabilidad) sub-fase a sub-fase. Comenzar con 9.1: logging estructurado para que cuando llegue el frontend pueda recibir información completa de lo que sale bien y lo que sale mal.
+- **Fecha y Hora:** 2026-04-08 19:10:00
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/lib/logger.js (NUEVO — Pino base + createLogger)
+    - msg_ninesys/src/middleware/requestLogger.js (NUEVO — request ID + child logger por request)
+    - msg_ninesys/app.js (wire logger + middleware)
+    - msg_ninesys/src/services/waManager.js (~7 reemplazos console.*)
+    - msg_ninesys/src/services/aiService.js (2 reemplazos)
+    - msg_ninesys/src/services/baileysAuthState.js (1 reemplazo)
+    - msg_ninesys/src/db/tenantResolver.js (3 reemplazos)
+    - msg_ninesys/src/db/credentialsClient.js (2 reemplazos)
+    - msg_ninesys/controllers/whatsappController.js (7 reemplazos)
+    - msg_ninesys/controllers/authController.js (3 reemplazos)
+    - msg_ninesys/middleware/authenticateToken.js (2 reemplazos)
+    - msg_ninesys/websocket.js (~13 reemplazos)
+    - msg_ninesys/routes/index.js (7 reemplazos)
+    - msg_ninesys/utils/apiClient.js (1 reemplazo)
+    - msg_ninesys/.env.example (LOG_LEVEL + nota NODE_ENV=production)
+    - msg_ninesys/package.json (+ pino, pino-http, pino-pretty)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente — feat(observability): Fase 9.1 logging estructurado con Pino (rama feat/baileys-migration)
+- **Acción Realizada:**
+    1. **Instalación deps:** `npm install pino pino-http pino-pretty` → pino 10.3.1, pino-http 11.0.0, pino-pretty 13.1.3.
+    2. **Logger base (src/lib/logger.js):** Wrapper Pino con `service: 'msg_ninesys'` fijo, serializers para err/req/res, transport pino-pretty en dev y JSON puro en prod (NODE_ENV=production). Exporta `logger` (root) y `createLogger(moduleName)` factory que devuelve un child con `module` fijo.
+    3. **Middleware requestLogger (src/middleware/requestLogger.js):** Lee `X-Request-ID` del header (o genera shortId hex 8 chars), expone `req.id` y `req.log` (child con reqId/method/path), responde header `X-Request-ID`, loguea `request:start` al entrar y `request:end` al `res.finish` con nivel según status (5xx=error, 4xx=warn, otro=info) y duración en ms via `process.hrtime.bigint()`.
+    4. **Wire en app.js:** import logger + requestLogger, montado DESPUÉS de bodyParser y ANTES de routes para que todos los handlers tengan `req.log`.
+    5. **Reemplazo console.* → log estructurado:** ~50 reemplazos quirúrgicos en los archivos del runtime principal. Patrón uniforme: `const log = require('.../lib/logger').createLogger('moduleName')` al tope del archivo y luego `log.error({ err, tenantId, jid }, 'mensaje')` con campos contextuales en lugar de string interpolation. Los scripts de pruebas (scripts/test-*) NO se tocaron porque corren standalone.
+    6. **.env.example:** Añadidas `LOG_LEVEL=info` y comentario sobre `NODE_ENV=production` para conmutar a JSON.
+    7. **Smoke test:** `node -e "require('./...'); console.log('OK')"` cargando todos los módulos del runtime principal. Output verificado con pino-pretty mostrando module/service/campos contextuales correctamente.
+- **Inconvenientes y Desafíos:**
+    1. **ASI en authenticateToken.js:** Al quitar el `else { console.log(...) }` quedó `}` seguido de `(req.log || log).debug(...)` que JS interpreta como llamada a función sobre el `}`. Resuelto añadiendo punto y coma inicial: `;(req.log || log).debug(...)`.
+    2. **routes/index.js no tiene acceso a req.log en handlers que toman (req,res) directamente:** Decidí usar el module logger (`log` del módulo) en lugar de `req.log` para mantener el cambio mecánico. Si en el futuro queremos correlación por request en estos handlers, basta cambiar a `req.log` (ya disponible gracias al middleware).
+    3. **credentialsClient.js loguea en módulo top-level (al require):** El warning "API_URL no está definida" se dispara al momento del require, lo cual es correcto pero hace que aparezca dos veces si algún test require el módulo más de una vez. Inocuo, dejado como estaba.
+- **Decisión Final y Justificación:**
+    - **Pino sobre Winston/Bunyan:** Pino es el más rápido (benchmark ~5x Winston), tiene transport asíncrono, JSON nativo y pino-pretty para dev. Standard de facto en Node moderno.
+    - **createLogger(moduleName) factory en lugar de import directo:** Cada archivo declara su `module` una sola vez al tope. Más limpio que pasar `{module: '...'}` en cada call site.
+    - **child logger por request en lugar de async_hooks/cls:** Más simple, menos magia, suficiente para correlación HTTP. Si en el futuro necesitamos contexto en código async no-HTTP (cron jobs, listeners Baileys), evaluaremos AsyncLocalStorage.
+    - **Mantener console.* en scripts/ y public/:** Los scripts son standalone (no cargan logger config) y public/ es código de browser. Out of scope.
+    - **No adoptar pino-http:** Está instalado pero no usado. El middleware artesanal nos da más control sobre el formato (request:start / request:end como eventos separados, status-based level). Lo dejé en deps por si en 9.4 (/health, /metrics) lo necesitamos.
+- **Herramienta(s) Utilizada(s):** Edit, Read, Grep, Bash (npm install, node -e smoke test).
+- **Resultado:** Éxito. Smoke test cargando 11 módulos del runtime principal devuelve "OK" con logs pretty correctamente formateados (service, module, campos contextuales).
+- **Verificación:**
+    - `node -e "require('./src/lib/logger'); require('./src/middleware/requestLogger'); require('./websocket'); require('./src/services/waManager'); require('./src/services/aiService'); require('./src/services/baileysAuthState'); require('./controllers/whatsappController'); require('./controllers/authController'); require('./middleware/authenticateToken'); require('./routes/index'); console.log('OK');"` → OK
+    - `grep -r "console\.\(log\|error\|warn\)" --include='*.js'` solo devuelve matches en scripts/ y public/ (esperado).
+- **Logro Conseguido:** msg_ninesys ahora emite logs estructurados JSON-friendly con correlación por request via X-Request-ID. Cada log lleva module + service + campos contextuales (tenantId, jid, reqId), listo para que el frontend de Fase futura los consuma desde un agregador (pm2 logs, journald o un logger centralizado tipo Loki/Datadog). Base sólida para 9.4 (/metrics) y para que el panel pueda mostrar errores reales con su contexto en lugar de strings opacos.
+- **Referencias de Sesión (Contexto):** Fase 9 fue propuesta como hardening/observabilidad después de cerrar Fase 8 (auto-respuestas IA + handoff). Sub-fases planificadas: 9.1 logging (esta), 9.2 hardening Gemini (timeout/retry/circuit breaker), 9.3 hardening Baileys + graceful shutdown, 9.4 /health /ready /metrics, 9.5 tests integración con mocks.
+- **Observaciones de Gemini:** N/A — sesión ejecutada por Claude Opus 4.6.
+- **Respuesta de Claude:** Fase 9.1 completada. Smoke test OK. Próximo paso: 9.2 hardening de Gemini (timeout 8s, retry exponencial para 429/503/timeout, circuit breaker básico).
