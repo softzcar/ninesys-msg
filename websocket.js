@@ -18,6 +18,7 @@ const initWebSocket = (httpServer) => {
         cors: {
             origin: (origin, callback) => {
                 // Permitir si no hay origen (p.ej. servidores o herramientas de terminal)
+                if (!origin) return callback(null, true);
 
                 // Manejar múltiples orígenes (separados por coma) si el proxy los duplica
                 const origins = origin.split(',').map(o => o.trim());

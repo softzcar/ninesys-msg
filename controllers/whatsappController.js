@@ -10,10 +10,12 @@
  * congelado en docs/API_CONTRACT.md y consumido por app_multi.
  */
 
+const fs = require('fs');
 const loadTemplates = require('../templates/templates-loader');
 const waManager = require('../src/services/waManager');
 const tenantResolver = require('../src/db/tenantResolver');
 const conversationStore = require('../src/services/conversationStore');
+const mediaStore = require('../src/services/mediaStore');
 const aiService = require('../src/services/aiService');
 const log = require('../src/lib/logger').createLogger('whatsappController');
 
@@ -238,17 +240,29 @@ async function sendTemplateMessage(req, res) {
 
 async function sendDirectMessage(req, res) {
     const { companyId } = req.params;
-    const { phone, message, sent_by_user } = req.body || {};
-    if (!phone || !message) {
-        return res.status(400).json({ success: false, message: 'phone y message son requeridos' });
+    const { phone, jid: rawJid, message, sent_by_user } = req.body || {};
+    if (!message || (!phone && !rawJid)) {
+        return res.status(400).json({
+            success: false,
+            message: 'message y (phone o jid) son requeridos',
+        });
     }
     try {
+        // Si el caller pasa jid directamente (p.ej. el inbox del panel), lo
+        // usamos tal cual para no romper el formato original que Baileys
+        // necesita (puede ser @s.whatsapp.net, @lid, @g.us, etc.). Sólo si
+        // no hay jid reconstruimos a partir del teléfono (flujo legacy).
+        const targetJid = rawJid && typeof rawJid === 'string' && rawJid.includes('@')
+            ? rawJid
+            : toJid(phone);
+
         // Si el caller indica un usuario humano (panel), se reenvía como
         // via='human' + sentByUser → dispara handoff manual en waManager.
         const opts = sent_by_user
             ? { via: 'human', sentByUser: Number(sent_by_user) }
             : {};
-        const sent = await waManager.sendText(companyId, toJid(phone), message, opts);
+        log.info({ tenantId: companyId, jid: targetJid, via: opts.via || 'api' }, 'sendDirectMessage');
+        const sent = await waManager.sendText(companyId, targetJid, message, opts);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         log.error({ err: e, tenantId: companyId }, 'sendDirectMessage falló');
@@ -473,6 +487,87 @@ async function releaseConversation(req, res) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fase B.1 — Media (servir y enviar archivos multimedia)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /media/:companyId/:waMessageId
+ * Sirve el archivo multimedia asociado a un mensaje. Busca en BD el path
+ * relativo y lo resuelve contra mediaStore. Aplica auth (se monta en routes
+ * bajo authenticateToken).
+ */
+async function getMedia(req, res) {
+    const { companyId, waMessageId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const row = await conversationStore.getMediaByMessageId(pool, waMessageId);
+        if (!row || !row.media_url) {
+            return res.status(404).json({ message: 'Archivo no encontrado' });
+        }
+        const abs = mediaStore.resolveRelative(row.media_url);
+        if (!abs || !fs.existsSync(abs)) {
+            return res.status(404).json({ message: 'Archivo no disponible en storage' });
+        }
+        res.setHeader('Content-Type', row.media_mime || 'application/octet-stream');
+        res.setHeader('Cache-Control', 'private, max-age=3600');
+        // Para documentos, forzar descarga con el nombre original (body)
+        if (row.type === 'document' && row.body) {
+            const safeName = String(row.body).replace(/"/g, '');
+            res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+        }
+        fs.createReadStream(abs).pipe(res);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, waMessageId }, 'getMedia falló');
+        res.status(500).json({ message: 'Error al servir archivo', error: e.message });
+    }
+}
+
+/**
+ * POST /send-media/:companyId  (multipart/form-data)
+ * Campos:
+ *   - file  : el archivo (requerido, max MEDIA_MAX_SIZE_MB)
+ *   - phone : número destino (requerido)
+ *   - type  : 'image' | 'document' (requerido)
+ *   - caption: texto opcional (ignorado si type=document, ahí usa fileName)
+ *   - sentByUser: id del usuario del panel (para handoff)
+ */
+async function uploadAndSendMedia(req, res) {
+    const { companyId } = req.params;
+    const { phone, jid: rawJid, type, caption, sentByUser } = req.body || {};
+    const file = req.file;
+
+    if (!file) return res.status(400).json({ message: 'Archivo requerido (campo "file")' });
+    if (!phone && !rawJid) return res.status(400).json({ message: 'phone o jid requerido' });
+    if (!['image', 'document'].includes(type)) {
+        return res.status(400).json({ message: `type debe ser 'image' o 'document'` });
+    }
+
+    try {
+        // Preferimos el jid crudo (respeta @lid/@s.whatsapp.net/@g.us) y sólo
+        // reconstruimos desde phone si no vino jid, mismo criterio que
+        // sendDirectMessage.
+        const jid = rawJid && typeof rawJid === 'string' && rawJid.includes('@')
+            ? rawJid
+            : toJid(phone);
+        const result = await waManager.sendMedia(companyId, jid, {
+            type,
+            buffer: file.buffer,
+            mimeType: file.mimetype,
+            fileName: file.originalname,
+            caption: caption || '',
+        }, {
+            via: sentByUser ? 'human' : 'api',
+            sentByUser: sentByUser ? Number(sentByUser) : undefined,
+        });
+        res.status(200).json(result);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, type }, 'uploadAndSendMedia falló');
+        const code = /READY|buffer|límite|excede/i.test(e.message) ? 400 : 500;
+        res.status(code).json({ message: e.message });
+    }
+}
+
 module.exports = {
     // Bajo nivel
     getClientStatus,
@@ -511,4 +606,7 @@ module.exports = {
     updateAiAgent,
     deleteAiAgent,
     assignAgentToConversation,
+    // Fase B.1 — Media
+    getMedia,
+    uploadAndSendMedia,
 };

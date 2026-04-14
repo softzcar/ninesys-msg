@@ -37,6 +37,9 @@ notes.md
 .wwebjs_cache/
 .wwebjs_auth/
 
+# Media storage (Fase B.1)
+storage/
+
 
 # Docker
 # docker-compose.*

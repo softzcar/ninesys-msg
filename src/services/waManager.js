@@ -33,6 +33,7 @@ const QRCode = require('qrcode');
 const tenantResolver = require('../db/tenantResolver');
 const { useMySQLAuthState } = require('./baileysAuthState');
 const conversationStore = require('./conversationStore');
+const mediaStore = require('./mediaStore');
 const aiService = require('./aiService');
 const log = require('../lib/logger').createLogger('waManager');
 
@@ -214,11 +215,49 @@ async function init(idEmpresa) {
     sock.ev.on('creds.update', saveCreds);
 
     // ---------- Persistencia de conversaciones / mensajes (Fase 6) ----------
+    // Fase B.1: handler de descarga de media. Se inyecta a ingestMessage solo
+    // para eventos 'notify' (mensajes nuevos) — evitamos descargar el histórico
+    // en 'append'.
+    const { downloadMediaMessage } = loadBaileys();
+    const mediaHandler = async ({ msg, type, waMessageId, ts }) => {
+        try {
+            const buffer = await downloadMediaMessage(
+                msg,
+                'buffer',
+                {},
+                { reuploadRequest: sock.updateMediaMessage }
+            );
+            if (!buffer || !buffer.length) return null;
+            const mimeType =
+                msg.message?.imageMessage?.mimetype
+                || msg.message?.audioMessage?.mimetype
+                || msg.message?.videoMessage?.mimetype
+                || msg.message?.documentMessage?.mimetype
+                || msg.message?.stickerMessage?.mimetype
+                || 'application/octet-stream';
+            const saved = mediaStore.saveBuffer({
+                companyId: id,
+                waMessageId,
+                buffer,
+                mimeType,
+                ts,
+            });
+            return { relativePath: saved.relativePath, mimeType: saved.mimeType };
+        } catch (e) {
+            log.warn({ err: e, wa_message_id: waMessageId, type, tenantId: id },
+                'descarga de media falló');
+            return null;
+        }
+    };
+
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         // type: 'notify' (mensaje nuevo entrante) | 'append' (sync histórico)
         for (const m of messages || []) {
             try {
-                const result = await conversationStore.ingestMessage(pool, m);
+                const result = await conversationStore.ingestMessage(pool, m, {
+                    mediaHandler: type === 'notify' ? mediaHandler : undefined,
+                    log,
+                });
                 if (!result) continue;
                 if (type === 'notify') {
                     emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
@@ -295,6 +334,14 @@ async function init(idEmpresa) {
         if (connection === 'close') {
             const code = lastDisconnect?.error?.output?.statusCode;
             const reason = DisconnectReason[code] || `code:${code}`;
+            // Si esta sesión ya no es la activa en el mapa significa que
+            // otro init()/restart() tomó el relevo. No tocamos estado
+            // persistente ni reintentamos reconexión — es un close tardío
+            // de un socket obsoleto.
+            if (sessions.get(id) !== session) {
+                log.info({ tenantId: id, reason }, 'Close de socket obsoleto, ignorando');
+                return;
+            }
             session.status = 'DISCONNECTED';
             session.lastError = lastDisconnect?.error?.message || null;
             await persistState(pool, {
@@ -423,6 +470,12 @@ async function restart(idEmpresa) {
     const id = parseInt(idEmpresa, 10);
     const s = sessions.get(id);
     if (s?.sock) {
+        // Evitamos que el connection.update del socket viejo (que se va a
+        // cerrar) dispare el handler de reconexión/cleanup mientras el nuevo
+        // init() ya está levantando el socket — condición de carrera que
+        // puede borrar credenciales nuevas o eliminar la sesión recién
+        // creada del Map.
+        try { s.sock.ev.removeAllListeners('connection.update'); } catch (_) {}
         try { s.sock.end(new Error('restart')); } catch (_) {}
     }
     sessions.delete(id);
@@ -433,11 +486,21 @@ async function disconnect(idEmpresa) {
     const id = parseInt(idEmpresa, 10);
     const s = sessions.get(id);
     if (!s) return { ok: true, message: 'No había sesión activa.' };
+    // Desengancha el listener del socket viejo ANTES del logout: el close
+    // resultante se procesaría async y, si llega después de que el usuario
+    // dispare un nuevo init() (para pedir QR), el handler del socket viejo
+    // ejecutaría clear() sobre la DB borrando las credenciales frescas
+    // y haría sessions.delete(id) eliminando la nueva sesión del mapa.
+    // Síntoma observado: "No se pudo vincular el dispositivo" al reintentar.
+    try { s.sock.ev.removeAllListeners('connection.update'); } catch (_) {}
     try {
         await s.sock.logout();
     } catch (e) {
         log.warn({ err: e, tenantId: id }, 'logout warning');
     }
+    // Asegura cierre del WebSocket aunque logout haya fallado (no hay
+    // handler ya, así que no reconecta).
+    try { s.sock.end(new Error('logout')); } catch (_) {}
     try { await s.clear(); } catch (_) {}
     sessions.delete(id);
     const pool = await tenantResolver.getPool(id);
@@ -539,6 +602,132 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
 }
 
 /**
+ * Envía un archivo multimedia (imagen o documento en MVP Fase B.1).
+ *
+ * @param {number|string} idEmpresa
+ * @param {string} jid
+ * @param {object} params
+ * @param {'image'|'document'} params.type
+ * @param {Buffer} params.buffer          - contenido del archivo
+ * @param {string} params.mimeType        - MIME real del archivo
+ * @param {string} [params.fileName]      - obligatorio para type='document'
+ * @param {string} [params.caption]       - texto opcional (imagen)
+ * @param {object} [opts]
+ * @param {'human'|'api'|'template'} [opts.via='api']
+ * @param {number} [opts.sentByUser]
+ * @returns {Promise<{wa_message_id, ts, jid, type, status}>}
+ */
+async function sendMedia(idEmpresa, jid, params, opts = {}) {
+    const id = parseInt(idEmpresa, 10);
+    const via = opts.via || 'api';
+    const sentByUser = opts.sentByUser || null;
+    const { type, buffer, mimeType, fileName, caption } = params;
+
+    if (!['image', 'document'].includes(type)) {
+        throw new Error(`sendMedia: tipo no soportado '${type}' (MVP solo image|document)`);
+    }
+    if (!Buffer.isBuffer(buffer) || !buffer.length) {
+        throw new Error('sendMedia: buffer vacío o inválido');
+    }
+    if (buffer.length > mediaStore.MAX_SIZE_BYTES) {
+        throw new Error(`sendMedia: excede ${mediaStore.MAX_SIZE_MB} MB`);
+    }
+    if (type === 'document' && !fileName) {
+        throw new Error('sendMedia: fileName requerido para documentos');
+    }
+
+    const s = sessions.get(id);
+    if (!s || s.status !== 'READY') {
+        const err = new Error(`Sesión de empresa ${id} no está READY (estado=${s?.status || 'NONE'}).`);
+        throw err;
+    }
+
+    // Construir el payload Baileys según el tipo
+    let payload;
+    if (type === 'image') {
+        payload = { image: buffer, caption: caption || '', mimetype: mimeType };
+    } else {
+        payload = {
+            document: buffer,
+            mimetype: mimeType,
+            fileName,
+            caption: caption || '',
+        };
+    }
+
+    try {
+        const sent = await s.sock.sendMessage(jid, payload);
+        const wa_message_id = sent?.key?.id;
+        const ts = Number(sent?.messageTimestamp) || Math.floor(Date.now() / 1000);
+
+        // Persistir el binario en nuestro storage para poder re-servirlo desde el panel
+        let savedRelative = null;
+        try {
+            const saved = mediaStore.saveBuffer({
+                companyId: id,
+                waMessageId: wa_message_id,
+                buffer,
+                mimeType,
+                ts,
+            });
+            savedRelative = saved.relativePath;
+        } catch (e) {
+            log.warn({ err: e, tenantId: id, wa_message_id }, 'saveBuffer outgoing falló');
+        }
+
+        const bodyForDb = type === 'document' ? fileName : (caption || null);
+        const pool = await tenantResolver.getPool(id);
+        const result = await conversationStore.recordOutbound(pool, {
+            jid,
+            wa_message_id,
+            body: bodyForDb,
+            type,
+            status: 'sent',
+            ts,
+            via,
+            media_url: savedRelative,
+            media_mime: mimeType,
+        });
+        if (result) {
+            emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
+            emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
+        }
+
+        if (sentByUser) {
+            try {
+                await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
+                await conversationStore.updateConversationFlags(pool, jid, {
+                    mode: 'human',
+                    aiEnabled: false,
+                    assignedTo: sentByUser,
+                });
+                emit(id, 'conversation:handoff', {
+                    companyId: id, jid, mode: 'human', assignedTo: sentByUser,
+                });
+            } catch (e) {
+                log.error({ err: e, tenantId: id, jid }, 'handoff manual (media) falló');
+            }
+        }
+
+        return { wa_message_id, ts, jid, type, status: 'sent' };
+    } catch (e) {
+        try {
+            const pool = await tenantResolver.getPool(id);
+            await conversationStore.recordOutbound(pool, {
+                jid,
+                wa_message_id: `FAIL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                body: type === 'document' ? fileName : (caption || `[${type}]`),
+                type,
+                status: 'failed',
+                ts: Math.floor(Date.now() / 1000),
+                via,
+            });
+        } catch (_) { /* best-effort */ }
+        throw e;
+    }
+}
+
+/**
  * Graceful shutdown (Fase 9.3). Cierra todas las sesiones Baileys en
  * paralelo con un timeout corto por sesión, para que PM2/systemd no tenga
  * que mandar SIGKILL. Idempotente.
@@ -597,6 +786,7 @@ module.exports = {
     disconnect,
     destroy,
     sendText,
+    sendMedia,
     listSessions,
     shutdown,
     _state: { sessions },

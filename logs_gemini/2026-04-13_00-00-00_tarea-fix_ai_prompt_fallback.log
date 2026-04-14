@@ -1,0 +1,32 @@
+- **Solicitud del Usuario:** Diagnosticar y corregir por que la IA de la empresa 163 seguia respondiendo como "empresa de tecnologia" a pesar de haber actualizado el system_prompt en wa_ai_settings indicando que es una empresa textil. Adicionalmente, crear la base de conocimiento JSON para el agente de Ventas y corregir el modal de edicion de agentes en el frontend.
+- **Fecha y Hora:** 2026-04-13
+- **Proyecto(s):** Backend (msg_ninesys), Frontend (app_multi)
+- **Archivos Involucrados:**
+    - msg_ninesys/src/services/aiService.js (FIX — fallback campo a campo en generateReply)
+    - msg_ninesys/scripts/update_kb_ventas.sql (NUEVO — script SQL para insertar knowledge_base del agente Ventas)
+    - app_multi/components/whatsapp/WaAgentes.vue (FIX — doble-encoding knowledgeBase + validacion JSON en tiempo real)
+- **Commits Relacionados:**
+    - msg_ninesys: pendiente — fix(ia): fallback campo a campo cuando agente tiene system_prompt/knowledge_base NULL
+    - app_multi: pendiente — fix(wa-agentes): corregir doble-encoding knowledgeBase y agregar validacion JSON en tiempo real
+- **Accion Realizada:**
+    1. **Diagnostico del bug de prompt:** Se identifico que en `generateReply` (aiService.js:477-479) cuando existia un agente default activo, la linea `effectiveSettings = agent ? { systemPrompt: agent.systemPrompt, knowledgeBase: agent.knowledgeBase } : settings` reemplazaba TODO el settings incluso si los campos del agente eran NULL. Esto causaba que no se usara el system_prompt de wa_ai_settings y en su lugar se cayera al fallback generico hardcodeado ("Eres un asistente de atencion al cliente via WhatsApp..."), dejando a Gemini sin contexto de la empresa y permitiendole inventar.
+    2. **Fix del fallback campo a campo (aiService.js):** Se cambio la logica para que cada campo haga fallback individual a wa_ai_settings cuando el agente lo tiene en NULL:
+       - ANTES: `{ systemPrompt: agent.systemPrompt, knowledgeBase: agent.knowledgeBase }`
+       - DESPUES: `{ systemPrompt: agent.systemPrompt || settings.systemPrompt, knowledgeBase: agent.knowledgeBase || settings.knowledgeBase }`
+       Esto permite tener un agente default que solo personalice modelo/temperatura sin perder el prompt principal de wa_ai_settings.
+    3. **Creacion del knowledge_base para agente Ventas:** Se armo un JSON con datos iniciales de la empresa Nineteen Custom (textil): metodos de pago (efectivo, transferencia, pago movil, zelle, pesos, dolares), horario (L-V 8:30-12 y 1-5:30), envios (toda Venezuela), politica de pedido minimo (1 pieza). Campos de productos, contacto y FAQ quedaron como placeholders para completar luego.
+    4. **Problema con constraint JSON en MariaDB 10.11:** Al intentar UPDATE directo via SQL, el constraint CHECK(JSON_VALID(...)) de la columna knowledge_base (tipo JSON = LONGTEXT en MariaDB) rechazaba el valor. Se descubrio que al copiar/pegar desde el chat se insertaban caracteres invisibles o comillas tipograficas. Solucion: crear archivo .sql limpio (scripts/update_kb_ventas.sql) y ejecutarlo directamente.
+    5. **Fix doble-encoding en modal Editar Agente (WaAgentes.vue:252):** En `openEdit()`, si `agent.knowledgeBase` venia de la API como string (MariaDB JSON = LONGTEXT, mysql2 puede no auto-parsear), `JSON.stringify()` lo doble-codificaba. Fix: detectar tipo y parsear primero si es string antes de formatear.
+       - ANTES: `JSON.stringify(agent.knowledgeBase, null, 2)`
+       - DESPUES: `typeof === 'string' ? JSON.stringify(JSON.parse(...), null, 2) : JSON.stringify(..., null, 2)`
+    6. **Validacion JSON en tiempo real (WaAgentes.vue):** Se agregaron computed properties `kbValid` y `kbDescription` que validan el contenido del textarea con JSON.parse() mientras el usuario escribe. El textarea muestra borde verde (valido), rojo (invalido) o neutro (vacio) usando el prop `:state` de BootstrapVue. Se aumento las filas del textarea de 4 a 6.
+- **Inconvenientes y Desafios:**
+    1. **Caracteres invisibles al copiar JSON:** Copiar JSON desde interfaces de chat (Claude, terminales) introduce caracteres Unicode invisibles o comillas tipograficas que rompen JSON.parse y el constraint de MariaDB. Solucion definitiva: la validacion en tiempo real en el frontend previene este problema mostrando el error inmediatamente.
+    2. **MariaDB JSON vs MySQL JSON:** MariaDB 10.11 implementa JSON como alias de LONGTEXT con CHECK(JSON_VALID(...)). No soporta CAST(... AS JSON). El driver mysql2 puede devolver el valor como string plano en vez de objeto parseado, lo que requiere manejo especial en el frontend.
+- **Decision Final y Justificacion:**
+    - El fallback campo a campo es la solucion correcta porque permite una jerarquia de configuracion: wa_ai_settings define los defaults globales del tenant, y cada agente puede sobreescribir solo los campos que necesite. Un agente de Ventas puede tener su propio prompt pero heredar el knowledge_base global, o viceversa.
+- **Pendientes para proxima sesion:**
+    - Completar los campos placeholder del knowledge_base de Ventas (productos, contacto, FAQ)
+    - Crear knowledge_base para otros agentes si existen (Cobranza, Soporte, etc.)
+    - Commit y deploy de los cambios en msg_ninesys y app_multi
+    - Probar el flujo completo: editar agente desde modal → guardar → verificar que la IA responde con el contexto correcto

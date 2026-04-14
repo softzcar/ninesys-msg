@@ -46,13 +46,28 @@ function extractBody(msg) {
     if (msg.extendedTextMessage?.text) return msg.extendedTextMessage.text;
     if (msg.imageMessage?.caption) return msg.imageMessage.caption;
     if (msg.videoMessage?.caption) return msg.videoMessage.caption;
-    if (msg.documentMessage?.fileName) return `[archivo] ${msg.documentMessage.fileName}`;
+    if (msg.documentMessage?.fileName) return msg.documentMessage.fileName;
     if (msg.audioMessage) return '[audio]';
     if (msg.stickerMessage) return '[sticker]';
     if (msg.locationMessage) return '[ubicación]';
     if (msg.contactMessage) return `[contacto] ${msg.contactMessage.displayName || ''}`;
     return null;
 }
+
+/**
+ * Extrae el MIME type nativo del mensaje Baileys para tipos con media.
+ */
+function extractMime(msg) {
+    if (!msg) return null;
+    return msg.imageMessage?.mimetype
+        || msg.audioMessage?.mimetype
+        || msg.videoMessage?.mimetype
+        || msg.documentMessage?.mimetype
+        || msg.stickerMessage?.mimetype
+        || null;
+}
+
+const MEDIA_TYPES = new Set(['image', 'audio', 'video', 'document', 'sticker']);
 
 /**
  * Upsert de un mensaje Baileys + actualización de la conversación.
@@ -62,7 +77,7 @@ function extractBody(msg) {
  * @param {Pool} pool
  * @param {object} m  - mensaje Baileys (proto.IWebMessageInfo)
  */
-async function ingestMessage(pool, m) {
+async function ingestMessage(pool, m, opts = {}) {
     const jid = m.key?.remoteJid;
     if (!jid) return null;
 
@@ -75,14 +90,33 @@ async function ingestMessage(pool, m) {
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
     const pushname = m.pushName || null;
 
+    // Fase B.1: descargar media si aplica. El caller (waManager) provee el
+    // handler que sabe usar Baileys + mediaStore. Si la descarga falla, seguimos
+    // ingestando el mensaje sin media para no perder el registro.
+    let media_url = null;
+    let media_mime = extractMime(m.message);
+    if (MEDIA_TYPES.has(type) && typeof opts.mediaHandler === 'function') {
+        try {
+            const saved = await opts.mediaHandler({ msg: m, type, waMessageId: wa_message_id, ts });
+            if (saved) {
+                media_url = saved.relativePath || null;
+                media_mime = saved.mimeType || media_mime;
+            }
+        } catch (e) {
+            // log best-effort; no rompemos el ingest
+            if (opts.log) opts.log.warn({ err: e, wa_message_id, type }, 'media download falló');
+        }
+    }
+
     // 1) Insert mensaje (idempotente por wa_message_id). Si ya existía
     //    (p.ej. persistido por recordOutbound antes del upsert), salimos
     //    sin emitir nada para evitar eventos duplicados.
     const [ins] = await pool.query(
         `INSERT IGNORE INTO wa_messages
-            (jid, wa_message_id, from_me, sender, type, body, via, status, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [jid, wa_message_id, from_me, sender, type, body, from_me ? 'api' : 'human', 'delivered', ts]
+            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [jid, wa_message_id, from_me, sender, type, body, media_url, media_mime,
+         from_me ? 'api' : 'human', 'delivered', ts]
     );
     if (ins.affectedRows === 0) return null;
 
@@ -102,7 +136,7 @@ async function ingestMessage(pool, m) {
 
     return {
         jid,
-        message: { wa_message_id, from_me: !!from_me, sender, type, body, ts, status: 'delivered' },
+        message: { wa_message_id, from_me: !!from_me, sender, type, body, media_url, media_mime, ts, status: 'delivered' },
         conversation: { jid, last_message: lastPreview, last_ts: ts, unread_delta: from_me ? 0 : 1 },
     };
 }
@@ -117,19 +151,21 @@ async function ingestMessage(pool, m) {
  * Idempotente: si el wa_message_id ya existe actualiza status/body.
  * Devuelve { jid, message, conversation } o null si el jid es inválido.
  */
-async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', status = 'sent', ts, via = 'api' }) {
+async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', status = 'sent', ts, via = 'api', media_url = null, media_mime = null }) {
     if (!jid || !wa_message_id) return null;
     const timestamp = Number(ts) || Math.floor(Date.now() / 1000);
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
 
     await pool.query(
         `INSERT INTO wa_messages
-            (jid, wa_message_id, from_me, sender, type, body, via, status, ts)
-         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-            status = VALUES(status),
-            body   = COALESCE(VALUES(body), body)`,
-        [jid, wa_message_id, jid, type, body, via, status, timestamp]
+            status     = VALUES(status),
+            body       = COALESCE(VALUES(body), body),
+            media_url  = COALESCE(VALUES(media_url), media_url),
+            media_mime = COALESCE(VALUES(media_mime), media_mime)`,
+        [jid, wa_message_id, jid, type, body, media_url, media_mime, via, status, timestamp]
     );
 
     const lastPreview = (body || `[${type}]`).slice(0, 500);
@@ -145,9 +181,23 @@ async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', s
 
     return {
         jid,
-        message: { wa_message_id, from_me: true, sender: jid, type, body, ts: timestamp, status, via },
+        message: { wa_message_id, from_me: true, sender: jid, type, body, media_url, media_mime, ts: timestamp, status, via },
         conversation: { jid, last_message: lastPreview, last_ts: timestamp, unread_delta: 0 },
     };
+}
+
+/**
+ * Recupera la info de media de un mensaje por wa_message_id. Devuelve
+ * { jid, media_url, media_mime, type, body } o null.
+ */
+async function getMediaByMessageId(pool, wa_message_id) {
+    if (!wa_message_id) return null;
+    const [rows] = await pool.query(
+        `SELECT jid, type, body, media_url, media_mime
+         FROM wa_messages WHERE wa_message_id = ? LIMIT 1`,
+        [wa_message_id]
+    );
+    return rows[0] || null;
 }
 
 /**
@@ -321,4 +371,5 @@ module.exports = {
     getConversationFlags,
     updateConversationFlags,
     tagSentByUser,
+    getMediaByMessageId,
 };

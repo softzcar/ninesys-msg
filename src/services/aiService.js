@@ -474,8 +474,12 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     const effectiveModel = agent?.model || settings.model;
     const effectiveTemp = agent ? agent.temperature : settings.temperature;
     const effectiveMaxTokens = agent ? agent.maxTokens : settings.maxTokens;
+    // Fallback campo a campo: si el agente tiene el campo NULL, usa wa_ai_settings
     const effectiveSettings = agent
-        ? { systemPrompt: agent.systemPrompt, knowledgeBase: agent.knowledgeBase }
+        ? {
+            systemPrompt: agent.systemPrompt || settings.systemPrompt,
+            knowledgeBase: agent.knowledgeBase || settings.knowledgeBase,
+        }
         : settings;
 
     const history = await loadHistory(pool, jid, historyLimit);

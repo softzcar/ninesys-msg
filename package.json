@@ -10,13 +10,15 @@
         "stop": "pm2 stop ntmsg-app",
         "pm2": "pm2 start app.js --name \"ntmsg-app\"",
         "pm2-logs": "pm2 logs ntmsg-app",
-        "pm2-monit": "pm2 monit"
+        "pm2-monit": "pm2 monit",
+        "cleanup-media": "node scripts/cleanup-media.js"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
     "dependencies": {
         "@google/genai": "^1.48.0",
+        "@supabase/supabase-js": "^2.103.0",
         "axios": "^1.9.0",
         "baileys": "^6.8.0",
         "body-parser": "^1.20.3",
@@ -24,6 +26,7 @@
         "dotenv": "^16.4.5",
         "express": "^4.21.0",
         "jsonwebtoken": "^9.0.2",
+        "multer": "^1.4.5-lts.1",
         "mysql2": "^3.11.2",
         "nodemailer": "^6.9.15",
         "pino": "^10.3.1",

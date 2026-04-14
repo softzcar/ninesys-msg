@@ -1,7 +1,16 @@
 const express = require("express");
 const cors = require('cors');
 const pm2 = require('pm2'); // Mantenemos pm2 si la ruta de reinicio del servidor es necesaria
+const multer = require('multer');
+const mediaStore = require('../src/services/mediaStore');
 const log = require('../src/lib/logger').createLogger('routes');
+
+// Multer en memoria: el archivo llega como Buffer y waManager lo envía directo
+// a Baileys + storage. Sin spill a /tmp en disco.
+const uploadMedia = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: mediaStore.MAX_SIZE_BYTES },
+});
 
 const router = express.Router();
 
@@ -44,6 +53,9 @@ const {
     updateAiAgent,
     deleteAiAgent,
     assignAgentToConversation,
+    // Fase B.1 — Media
+    getMedia,
+    uploadAndSendMedia,
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
@@ -246,6 +258,12 @@ router.post("/ai/agents/:companyId", authenticateToken, createAiAgent);
 router.put("/ai/agents/:companyId/:agentId", authenticateToken, updateAiAgent);
 router.delete("/ai/agents/:companyId/:agentId", authenticateToken, deleteAiAgent);
 router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAgentToConversation);
+
+/**
+ * Fase B.1 — Media (servir archivos recibidos y enviar imágenes/documentos)
+ */
+router.get("/media/:companyId/:waMessageId", authenticateToken, getMedia);
+router.post("/send-media/:companyId", authenticateToken, uploadMedia.single('file'), uploadAndSendMedia);
 
 /**
  * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)
