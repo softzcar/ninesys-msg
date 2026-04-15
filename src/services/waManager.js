@@ -34,6 +34,7 @@ const tenantResolver = require('../db/tenantResolver');
 const { useMySQLAuthState } = require('./baileysAuthState');
 const conversationStore = require('./conversationStore');
 const mediaStore = require('./mediaStore');
+const audioTranscode = require('./audioTranscode');
 const aiService = require('./aiService');
 const log = require('../lib/logger').createLogger('waManager');
 
@@ -621,7 +622,7 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
     const id = parseInt(idEmpresa, 10);
     const via = opts.via || 'api';
     const sentByUser = opts.sentByUser || null;
-    const { type, buffer, mimeType, fileName, caption, ptt, seconds } = params;
+    let { type, buffer, mimeType, fileName, caption, ptt, seconds } = params;
 
     if (!['image', 'document', 'audio', 'video'].includes(type)) {
         throw new Error(`sendMedia: tipo no soportado '${type}'`);
@@ -654,6 +655,22 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
             caption: caption || '',
         };
     } else if (type === 'audio') {
+        // WhatsApp espera notas de voz en Ogg/Opus. MediaRecorder en
+        // navegadores entrega WebM/Opus, por eso lo transcodificamos antes
+        // de enviar a Baileys (si no, el teléfono no reproduce el audio).
+        const needsTranscode = /webm|mp4|x-m4a|aac/i.test(mimeType || '')
+            || (ptt && !/ogg/i.test(mimeType || ''));
+        if (needsTranscode) {
+            try {
+                const ogg = await audioTranscode.toOggOpus(buffer, mimeType);
+                buffer = ogg;
+                mimeType = 'audio/ogg; codecs=opus';
+                log.info({ tenantId: id, jid, ptt: !!ptt, outBytes: buffer.length }, 'Audio transcodificado a ogg/opus para WhatsApp');
+            } catch (e) {
+                log.error({ err: e, tenantId: id, jid }, 'Falló transcodificación de audio; se intentará enviar tal cual');
+                // Continuamos con el buffer original como fallback
+            }
+        }
         // ptt=true → aparece como nota de voz (micro) en WhatsApp
         payload = {
             audio: buffer,
