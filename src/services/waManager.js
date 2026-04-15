@@ -621,10 +621,10 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
     const id = parseInt(idEmpresa, 10);
     const via = opts.via || 'api';
     const sentByUser = opts.sentByUser || null;
-    const { type, buffer, mimeType, fileName, caption } = params;
+    const { type, buffer, mimeType, fileName, caption, ptt, seconds } = params;
 
-    if (!['image', 'document'].includes(type)) {
-        throw new Error(`sendMedia: tipo no soportado '${type}' (MVP solo image|document)`);
+    if (!['image', 'document', 'audio', 'video'].includes(type)) {
+        throw new Error(`sendMedia: tipo no soportado '${type}'`);
     }
     if (!Buffer.isBuffer(buffer) || !buffer.length) {
         throw new Error('sendMedia: buffer vacío o inválido');
@@ -646,13 +646,29 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
     let payload;
     if (type === 'image') {
         payload = { image: buffer, caption: caption || '', mimetype: mimeType };
-    } else {
+    } else if (type === 'document') {
         payload = {
             document: buffer,
             mimetype: mimeType,
             fileName,
             caption: caption || '',
         };
+    } else if (type === 'audio') {
+        // ptt=true → aparece como nota de voz (micro) en WhatsApp
+        payload = {
+            audio: buffer,
+            mimetype: mimeType,
+            ptt: !!ptt,
+        };
+        if (seconds) payload.seconds = Number(seconds);
+    } else {
+        // video
+        payload = {
+            video: buffer,
+            mimetype: mimeType,
+            caption: caption || '',
+        };
+        if (fileName) payload.fileName = fileName;
     }
 
     try {
@@ -675,7 +691,12 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
             log.warn({ err: e, tenantId: id, wa_message_id }, 'saveBuffer outgoing falló');
         }
 
-        const bodyForDb = type === 'document' ? fileName : (caption || null);
+        // body en DB: documento→filename, audio PTT→null (nota de voz sin texto),
+        // resto (image/video/audio-archivo)→caption si hay.
+        let bodyForDb;
+        if (type === 'document') bodyForDb = fileName;
+        else if (type === 'audio' && ptt) bodyForDb = null;
+        else bodyForDb = caption || null;
         const pool = await tenantResolver.getPool(id);
         const result = await conversationStore.recordOutbound(pool, {
             jid,

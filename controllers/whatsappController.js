@@ -527,9 +527,12 @@ async function getMedia(req, res) {
  * POST /send-media/:companyId  (multipart/form-data)
  * Campos:
  *   - file  : el archivo (requerido, max MEDIA_MAX_SIZE_MB)
- *   - phone : número destino (requerido)
- *   - type  : 'image' | 'document' (requerido)
- *   - caption: texto opcional (ignorado si type=document, ahí usa fileName)
+ *   - phone : número destino (phone o jid requerido)
+ *   - jid   : jid crudo (opcional, se prefiere sobre phone)
+ *   - type  : 'image' | 'document' | 'audio' | 'video' (requerido)
+ *   - caption: texto opcional (ignorado en documento y audio-ptt)
+ *   - ptt   : 'true' para marcar audio como nota de voz (solo type=audio)
+ *   - seconds: duración en segundos (solo audio, opcional)
  *   - sentByUser: id del usuario del panel (para handoff)
  */
 async function uploadAndSendMedia(req, res) {
@@ -539,9 +542,12 @@ async function uploadAndSendMedia(req, res) {
 
     if (!file) return res.status(400).json({ message: 'Archivo requerido (campo "file")' });
     if (!phone && !rawJid) return res.status(400).json({ message: 'phone o jid requerido' });
-    if (!['image', 'document'].includes(type)) {
-        return res.status(400).json({ message: `type debe ser 'image' o 'document'` });
+    if (!['image', 'document', 'audio', 'video'].includes(type)) {
+        return res.status(400).json({ message: `type debe ser 'image' | 'document' | 'audio' | 'video'` });
     }
+
+    const ptt = String(req.body.ptt || '').toLowerCase() === 'true';
+    const seconds = req.body.seconds ? Number(req.body.seconds) : undefined;
 
     try {
         // Preferimos el jid crudo (respeta @lid/@s.whatsapp.net/@g.us) y sólo
@@ -556,6 +562,8 @@ async function uploadAndSendMedia(req, res) {
             mimeType: file.mimetype,
             fileName: file.originalname,
             caption: caption || '',
+            ptt,
+            seconds,
         }, {
             via: sentByUser ? 'human' : 'api',
             sentByUser: sentByUser ? Number(sentByUser) : undefined,
