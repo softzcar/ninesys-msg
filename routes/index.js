@@ -56,6 +56,12 @@ const {
     // Fase B.1 — Media
     getMedia,
     uploadAndSendMedia,
+    // Fase C — Eliminación de chats
+    softDeleteConversation,
+    restoreConversation,
+    listDeletedConversations,
+    purgeConversation,
+    purgeAllDeleted,
     // initializeClient ya no se importa aquí porque se usa internamente en el controlador
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
@@ -264,6 +270,15 @@ router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAge
  */
 router.get("/media/:companyId/:waMessageId", authenticateToken, getMedia);
 router.post("/send-media/:companyId", authenticateToken, uploadMedia.single('file'), uploadAndSendMedia);
+
+/**
+ * Fase C — Eliminación de chats (soft delete + papelera + purga)
+ */
+router.get("/conversations/:companyId/deleted", authenticateToken, listDeletedConversations);
+router.delete("/conversations/:companyId/purge-all", authenticateToken, purgeAllDeleted);
+router.delete("/conversations/:companyId/:jid/purge", authenticateToken, purgeConversation);
+router.post("/conversations/:companyId/:jid/restore", authenticateToken, restoreConversation);
+router.delete("/conversations/:companyId/:jid", authenticateToken, softDeleteConversation);
 
 /**
  * Reiniciar servicio para un cliente especifico (POST para acciones que cambian estado)

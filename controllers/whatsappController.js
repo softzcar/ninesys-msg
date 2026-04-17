@@ -576,6 +576,137 @@ async function uploadAndSendMedia(req, res) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fase C — Eliminación de chats (soft delete + purga)
+// ---------------------------------------------------------------------------
+
+/**
+ * DELETE /conversations/:companyId/:jid
+ * Soft delete: marca la conversación y sus mensajes como eliminados.
+ * Además intenta borrar el chat del lado WhatsApp vinculado (best-effort:
+ * si la sesión no está READY el soft-delete en BD procede igual).
+ */
+async function softDeleteConversation(req, res) {
+    const { companyId, jid } = req.params;
+    const userId = req.body && req.body.userId ? Number(req.body.userId) : null;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.softDeleteConversation(pool, jid, userId);
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada o ya eliminada' });
+
+        // Intento best-effort de borrar también en el WhatsApp vinculado
+        const waResult = await waManager.deleteWaChat(companyId, jid);
+
+        waManager.emit(companyId, 'conversation:deleted', { companyId: Number(companyId), jid });
+
+        res.status(200).json({
+            jid,
+            deleted: true,
+            whatsapp: waResult, // { ok: boolean, reason?: string }
+        });
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, jid }, 'softDeleteConversation falló');
+        res.status(500).json({ message: 'Error eliminando conversación', error: e.message });
+    }
+}
+
+/**
+ * POST /conversations/:companyId/:jid/restore
+ * Restaura una conversación soft-deleted.
+ */
+async function restoreConversation(req, res) {
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const ok = await conversationStore.restoreConversation(pool, jid);
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada o no estaba eliminada' });
+        waManager.emit(companyId, 'conversation:restored', { companyId: Number(companyId), jid });
+        res.status(200).json({ jid, restored: true });
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, jid }, 'restoreConversation falló');
+        res.status(500).json({ message: 'Error restaurando conversación', error: e.message });
+    }
+}
+
+/**
+ * GET /conversations/:companyId/deleted
+ * Lista conversaciones en la papelera (soft-deleted).
+ */
+async function listDeletedConversations(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+        const items = await conversationStore.listDeletedConversations(pool, { limit });
+        res.status(200).json(items);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId }, 'listDeletedConversations falló');
+        res.status(500).json({ message: 'Error listando papelera', error: e.message });
+    }
+}
+
+/**
+ * Helper: purga una conversación (BD + archivos físicos). Devuelve
+ * estadísticas para el response.
+ */
+async function purgeOne(pool, jid) {
+    const mediaPaths = await conversationStore.listMediaPathsForJid(pool, jid);
+    let filesDeleted = 0;
+    for (const p of mediaPaths) {
+        if (mediaStore.removeRelative(p)) filesDeleted++;
+    }
+    const ok = await conversationStore.purgeConversation(pool, jid);
+    return { jid, purged: ok, filesDeleted, mediaCount: mediaPaths.length };
+}
+
+/**
+ * DELETE /conversations/:companyId/:jid/purge
+ * Purga definitiva (hard delete) de una conversación: borra mensajes,
+ * conversación y archivos físicos del mediaStore. Irreversible.
+ */
+async function purgeConversation(req, res) {
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const result = await purgeOne(pool, jid);
+        if (!result.purged) return res.status(404).json({ message: 'Conversación no encontrada' });
+        waManager.emit(companyId, 'conversation:purged', { companyId: Number(companyId), jid });
+        res.status(200).json(result);
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId, jid }, 'purgeConversation falló');
+        res.status(500).json({ message: 'Error purgando conversación', error: e.message });
+    }
+}
+
+/**
+ * DELETE /conversations/:companyId/purge-all
+ * Purga definitiva de TODAS las conversaciones en papelera.
+ * Pensado para la vista de configuración (limpieza masiva).
+ */
+async function purgeAllDeleted(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const jids = await conversationStore.listDeletedJids(pool);
+        const results = [];
+        let totalFiles = 0;
+        for (const jid of jids) {
+            const r = await purgeOne(pool, jid);
+            results.push(r);
+            totalFiles += r.filesDeleted;
+            waManager.emit(companyId, 'conversation:purged', { companyId: Number(companyId), jid });
+        }
+        res.status(200).json({
+            purgedCount: results.filter((r) => r.purged).length,
+            filesDeleted: totalFiles,
+            details: results,
+        });
+    } catch (e) {
+        log.error({ err: e, tenantId: companyId }, 'purgeAllDeleted falló');
+        res.status(500).json({ message: 'Error purgando papelera', error: e.message });
+    }
+}
+
 module.exports = {
     // Bajo nivel
     getClientStatus,
@@ -617,4 +748,10 @@ module.exports = {
     // Fase B.1 — Media
     getMedia,
     uploadAndSendMedia,
+    // Fase C — Eliminación de chats
+    softDeleteConversation,
+    restoreConversation,
+    listDeletedConversations,
+    purgeConversation,
+    purgeAllDeleted,
 };

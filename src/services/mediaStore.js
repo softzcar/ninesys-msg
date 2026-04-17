@@ -145,6 +145,26 @@ function exists(relativePath) {
 }
 
 /**
+ * Borra un archivo concreto (best-effort) dado su path relativo guardado
+ * en wa_messages.media_url. Devuelve true si borró algo, false si no existía
+ * o el path era inválido. No lanza: la purga no debe abortar por un archivo
+ * faltante.
+ */
+function removeRelative(relativePath) {
+    const abs = resolveRelative(relativePath);
+    if (!abs) return false;
+    try {
+        if (fs.existsSync(abs)) {
+            fs.unlinkSync(abs);
+            return true;
+        }
+    } catch (e) {
+        log.warn({ err: e, relativePath }, 'removeRelative falló');
+    }
+    return false;
+}
+
+/**
  * Borra archivos modificados hace más de N días.
  * Devuelve estadísticas { scanned, deleted, bytes }.
  */
@@ -196,6 +216,7 @@ module.exports = {
     saveBuffer,
     resolveRelative,
     exists,
+    removeRelative,
     cleanupOlderThan,
     extFromMime,
     MAX_SIZE_MB,

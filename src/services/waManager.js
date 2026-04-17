@@ -766,6 +766,43 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
 }
 
 /**
+ * Borra el chat del lado WhatsApp vinculado (equivale a "Eliminar chat"
+ * en el móvil). No afecta al dispositivo del contacto — solo al histórico
+ * del teléfono enlazado via chatModify.
+ *
+ * Tolerante: si la sesión no está READY o chatModify falla, devuelve un
+ * warning en vez de lanzar, para que el soft-delete en BD proceda igual.
+ *
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+async function deleteWaChat(idEmpresa, jid, { lastMessageId, lastTs } = {}) {
+    const id = parseInt(idEmpresa, 10);
+    const s = sessions.get(id);
+    if (!s || s.status !== 'READY' || !s.sock) {
+        return { ok: false, reason: `session_not_ready:${s?.status || 'NONE'}` };
+    }
+    try {
+        // Baileys requiere al menos un lastMessages para borrar un chat.
+        // Si no conocemos el último mensaje usamos un stub; si tampoco hay
+        // lastTs usamos ahora. Es suficiente para que chatModify funcione.
+        const lastMessages = [{
+            key: {
+                remoteJid: jid,
+                id: lastMessageId || '0',
+                fromMe: true,
+            },
+            messageTimestamp: Number(lastTs) || Math.floor(Date.now() / 1000),
+        }];
+        await s.sock.chatModify({ delete: true, lastMessages }, jid);
+        log.info({ tenantId: id, jid }, 'chatModify delete ok');
+        return { ok: true };
+    } catch (e) {
+        log.warn({ err: e, tenantId: id, jid }, 'deleteWaChat falló');
+        return { ok: false, reason: e.message || 'unknown_error' };
+    }
+}
+
+/**
  * Graceful shutdown (Fase 9.3). Cierra todas las sesiones Baileys en
  * paralelo con un timeout corto por sesión, para que PM2/systemd no tenga
  * que mandar SIGKILL. Idempotente.
@@ -825,6 +862,8 @@ module.exports = {
     destroy,
     sendText,
     sendMedia,
+    deleteWaChat,
+    emit,
     listSessions,
     shutdown,
     _state: { sessions },

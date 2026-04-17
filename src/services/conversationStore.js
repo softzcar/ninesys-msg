@@ -213,14 +213,18 @@ async function updateMessageStatus(pool, wa_message_id, status) {
 
 /**
  * Lista las conversaciones más recientes de un tenant.
+ * Por defecto excluye las soft-deleted. Usar includeDeleted=true para
+ * verlas (p.ej. en la vista de papelera).
  */
-async function listConversations(pool, { limit = 100 } = {}) {
+async function listConversations(pool, { limit = 100, includeDeleted = false } = {}) {
+    const where = includeDeleted ? '' : 'WHERE c.deleted_at IS NULL';
     const [rows] = await pool.query(
         `SELECT c.id, c.jid, c.name, c.is_group, c.mode, c.ai_enabled, c.assigned_to,
                 c.ai_agent_id, c.unread_count, c.last_message, c.last_ts, c.tags,
-                c.created_at, c.updated_at, a.name AS agent_name
+                c.created_at, c.updated_at, c.deleted_at, a.name AS agent_name
          FROM wa_conversations c
          LEFT JOIN wa_ai_agents a ON a.id = c.ai_agent_id
+         ${where}
          ORDER BY c.last_ts DESC
          LIMIT ?`,
         [limit]
@@ -239,15 +243,18 @@ async function listConversations(pool, { limit = 100 } = {}) {
         assignedTo: r.assigned_to,
         aiAgentId: r.ai_agent_id || null,
         agentName: r.agent_name || null,
+        deletedAt: r.deleted_at || null,
     }));
 }
 
 /**
  * Mensajes de una conversación, paginado por timestamp descendente.
+ * Filtra los soft-deleted salvo que se pase includeDeleted=true.
  */
-async function listMessages(pool, jid, { before = null, limit = 50 } = {}) {
+async function listMessages(pool, jid, { before = null, limit = 50, includeDeleted = false } = {}) {
     const params = [jid];
     let where = 'jid = ?';
+    if (!includeDeleted) where += ' AND deleted_at IS NULL';
     if (before) {
         where += ' AND ts < ?';
         params.push(Number(before));
@@ -360,6 +367,111 @@ async function upsertChatNames(pool, chats) {
     }
 }
 
+/**
+ * Soft delete: marca la conversación y todos sus mensajes como eliminados.
+ * Idempotente: si ya está borrada no toca nada. Devuelve true si afectó
+ * filas, false si la conversación no existía o ya estaba borrada.
+ */
+async function softDeleteConversation(pool, jid, userId = null) {
+    if (!jid) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ?
+         WHERE jid = ? AND deleted_at IS NULL`,
+        [userId, jid]
+    );
+    if (r.affectedRows === 0) return false;
+    await pool.query(
+        `UPDATE wa_messages SET deleted_at = CURRENT_TIMESTAMP
+         WHERE jid = ? AND deleted_at IS NULL`,
+        [jid]
+    );
+    return true;
+}
+
+/**
+ * Restaurar una conversación soft-deleted y sus mensajes.
+ */
+async function restoreConversation(pool, jid) {
+    if (!jid) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET deleted_at = NULL, deleted_by = NULL
+         WHERE jid = ? AND deleted_at IS NOT NULL`,
+        [jid]
+    );
+    if (r.affectedRows === 0) return false;
+    await pool.query(
+        `UPDATE wa_messages SET deleted_at = NULL
+         WHERE jid = ? AND deleted_at IS NOT NULL`,
+        [jid]
+    );
+    return true;
+}
+
+/**
+ * Devuelve las rutas de media (media_url) asociadas a una conversación,
+ * para que el caller pueda borrarlas del filesystem antes de purgar.
+ */
+async function listMediaPathsForJid(pool, jid) {
+    if (!jid) return [];
+    const [rows] = await pool.query(
+        `SELECT media_url FROM wa_messages
+         WHERE jid = ? AND media_url IS NOT NULL AND media_url <> ''`,
+        [jid]
+    );
+    return rows.map((r) => r.media_url).filter(Boolean);
+}
+
+/**
+ * Purga definitiva (hard delete) de una conversación: borra mensajes y
+ * la conversación. El caller es responsable de limpiar archivos físicos
+ * del mediaStore (listMediaPathsForJid ayuda con eso).
+ * Devuelve true si borró la conversación.
+ */
+async function purgeConversation(pool, jid) {
+    if (!jid) return false;
+    await pool.query(`DELETE FROM wa_messages WHERE jid = ?`, [jid]);
+    const [r] = await pool.query(`DELETE FROM wa_conversations WHERE jid = ?`, [jid]);
+    return r.affectedRows > 0;
+}
+
+/**
+ * Lista solo las conversaciones soft-deleted (papelera). Shape igual al
+ * de listConversations para que el frontend pueda reusar el componente.
+ */
+async function listDeletedConversations(pool, { limit = 200 } = {}) {
+    const [rows] = await pool.query(
+        `SELECT c.jid, c.name, c.is_group, c.last_message, c.last_ts,
+                c.deleted_at, c.deleted_by
+         FROM wa_conversations c
+         WHERE c.deleted_at IS NOT NULL
+         ORDER BY c.deleted_at DESC
+         LIMIT ?`,
+        [limit]
+    );
+    return rows.map((r) => ({
+        id: r.jid,
+        name: r.name,
+        isGroup: !!r.is_group,
+        lastMessage: r.last_message,
+        timestamp: r.last_ts,
+        deletedAt: r.deleted_at,
+        deletedBy: r.deleted_by,
+    }));
+}
+
+/**
+ * Devuelve los jids de todas las conversaciones soft-deleted, útil para
+ * la purga masiva.
+ */
+async function listDeletedJids(pool) {
+    const [rows] = await pool.query(
+        `SELECT jid FROM wa_conversations WHERE deleted_at IS NOT NULL`
+    );
+    return rows.map((r) => r.jid);
+}
+
 module.exports = {
     ingestMessage,
     recordOutbound,
@@ -372,4 +484,11 @@ module.exports = {
     updateConversationFlags,
     tagSentByUser,
     getMediaByMessageId,
+    // Soft delete / papelera
+    softDeleteConversation,
+    restoreConversation,
+    purgeConversation,
+    listDeletedConversations,
+    listDeletedJids,
+    listMediaPathsForJid,
 };

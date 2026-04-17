@@ -139,6 +139,37 @@ Usa una plantilla de `/templates/`. Invocado por `mixins.js` →
 **Response 200:** `{ "success": true, "message": "..." }`
 Modo fire-and-forget (no await).
 
+### 🔒 Eliminación de chats (Fase C — aditivo)
+
+#### `DELETE /conversations/:companyId/:jid`
+Soft delete: marca la conversación y mensajes con `deleted_at`. También
+intenta borrar el chat en el WhatsApp vinculado vía `chatModify` (best-effort).
+**Body opcional:** `{ "userId": <id_empleado> }` para auditar quién borró.
+**Response 200:** `{ "jid", "deleted": true, "whatsapp": { "ok": boolean, "reason"?: string } }`
+
+#### `POST /conversations/:companyId/:jid/restore`
+Restaura una conversación previamente soft-deleted (vuelve a aparecer en la bandeja).
+**Response 200:** `{ "jid", "restored": true }`
+
+#### `GET /conversations/:companyId/deleted`
+Lista de la papelera. Shape similar a `/chats/:companyId` + `deletedAt`/`deletedBy`.
+
+#### `DELETE /conversations/:companyId/:jid/purge`
+Purga definitiva (hard delete) de una conversación: borra mensajes,
+conversación y archivos físicos del `mediaStore`. Irreversible.
+**Response 200:** `{ "jid", "purged": true, "filesDeleted": N, "mediaCount": N }`
+
+#### `DELETE /conversations/:companyId/purge-all`
+Purga todas las conversaciones en papelera. Irreversible.
+**Response 200:** `{ "purgedCount": N, "filesDeleted": N, "details": [...] }`
+
+Eventos Socket.IO asociados (sala `company-<id>`):
+- `conversation:deleted` — `{ companyId, jid }`
+- `conversation:restored` — `{ companyId, jid }`
+- `conversation:purged` — `{ companyId, jid }`
+
+---
+
 ### 🔒 `GET /server-status`
 Métricas de PM2 (`manager.html`).
 
