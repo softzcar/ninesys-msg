@@ -1,0 +1,17 @@
+- **Solicitud del Usuario:** Investigar por qué, tras un deploy, los archivos multimedia recibidos en la bandeja aparecían como "No se pudo cargar el audio/video" mientras que en WhatsApp Web y en el teléfono los mismos mensajes se veían bien. Evitar que vuelva a pasar de aquí en adelante.
+- **Fecha y Hora:** 2026-04-18
+- **Proyecto(s):** Backend (msg_ninesys)
+- **Archivos Involucrados:**
+    - msg_ninesys/scripts/deploy_msg_ninesys.sh (MODIFIED — agregado `--exclude='storage/'` al rsync del Paso 1)
+- **Acción Realizada:**
+    1. **Diagnóstico:** Se revisó `src/services/mediaStore.js` y se confirmó que `STORAGE_ROOT` por defecto es `<repo>/storage` y los archivos físicos viven en `<repo>/storage/media/<companyId>/<YYYY-MM>/<archivo>`. En `.gitignore` la línea 41 declara `storage/`, por lo que ese directorio NO está versionado y NO existe en el repo local — es runtime-generated en el VPS.
+    2. **Causa raíz:** El script `scripts/deploy_msg_ninesys.sh` usa `rsync -avz --delete` para sincronizar el código al VPS (Hostinger, `/home/ws.nineteengreen.com/public_html`). La lista de `--exclude` no incluía `storage/`. Como `storage/` existe sólo en el VPS pero no en local, `--delete` lo eliminaba por completo en cada despliegue, borrando todos los audios/videos/imágenes/documentos/stickers recibidos con anterioridad. Las filas en `wa_messages` conservan la columna `media_url` intacta, pero apuntan a archivos que ya no existen en disco → el frontend muestra "No se pudo cargar".
+    3. **Fix aplicado:** En `scripts/deploy_msg_ninesys.sh`, después de la línea `--exclude='.DS_Store' \`, se añadió `--exclude='storage/' \`. A partir del próximo deploy, el directorio `storage/` del VPS queda intacto y los medios recibidos sobreviven a futuros despliegues.
+- **Notas técnicas y consideraciones:**
+    1. **Por qué WhatsApp Web y el teléfono sí muestran los medios:** cada cliente oficial descarga y cachea su propia copia local de los archivos. Nuestro `msg_ninesys` también los descarga (vía `downloadMediaMessage`) y los guarda en `storage/`, pero esa copia es independiente de las copias de los clientes oficiales. Cuando el deploy borró nuestra carpeta, sólo se perdieron nuestras copias; WhatsApp Web y el teléfono siguen teniendo las suyas.
+    2. **Archivos ya perdidos son irrecuperables:** Baileys no permite re-descargar medios antiguos una vez caducada la URL de CDN de WhatsApp (ni siquiera los clientes oficiales pueden hacerlo directamente; lo que ven es su caché local). Tampoco guardamos el buffer original en BD. Los mensajes anteriores al deploy seguirán mostrando "No se pudo cargar". Se considera aceptable porque el periodo actual es de pruebas.
+    3. **Misma clase de riesgo en otras carpetas:** se revisó la lista de excludes y ya estaban contempladas `node_modules/`, `.env`, `.wwebjs_auth/`, `.wwebjs_cache/`, `session/`, `tmp/`, `logs/`. La única omisión crítica era `storage/`.
+- **Pendientes/Próximos pasos sugeridos:**
+    1. Desplegar con el script corregido para que el fix tome efecto (el script en sí es local, hay que commitear + ejecutar un deploy con la nueva versión).
+    2. (Opcional) Considerar un `flock` o checkeo previo que aborte el deploy si el directorio remoto `storage/` contiene archivos pero el local no — defensa en profundidad contra este tipo de errores de configuración en el futuro.
+    3. (Opcional, largo plazo) Política de backup de `storage/media/` en el VPS (rsync incremental a otro host o snapshot periódico), ya que los archivos no son regenerables.

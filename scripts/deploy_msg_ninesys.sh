@@ -81,6 +81,7 @@ rsync -avz --delete \
     --exclude='*.log' \
     --exclude='.vscode/' \
     --exclude='.DS_Store' \
+    --exclude='storage/' \
     "$PROJECT_DIR/" "$REMOTE_ALIAS:$REMOTE_PATH/"
 
 echo
