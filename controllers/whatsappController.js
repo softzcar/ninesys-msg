@@ -121,7 +121,22 @@ async function getChatsByCompanyId(req, res) {
     try {
         const pool = await tenantResolver.getPool(companyId);
         const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-        const chats = await conversationStore.listConversations(pool, { limit });
+
+        // Fase D.1: filtro de visibilidad por vendedor.
+        //   view=mine  → solo conversaciones asignadas al userId (default si se pasa).
+        //   view=queue → solo conversaciones sin asignar en modo humano (cola).
+        //   view=all   → todas (uso admin; el frontend controla quién lo pide).
+        // Si no viene ningún filtro, mantiene el comportamiento anterior (= all)
+        // para no romper consumidores legacy que aún no pasan parámetros.
+        const rawView = (req.query.view || '').toString().toLowerCase();
+        const userIdQ = req.query.userId != null ? Number(req.query.userId) : null;
+        const view = ['mine', 'queue', 'all'].includes(rawView) ? rawView : undefined;
+
+        const chats = await conversationStore.listConversations(pool, {
+            limit,
+            view,
+            userId: Number.isFinite(userIdQ) ? userIdQ : undefined,
+        });
         res.status(200).json(chats);
     } catch (e) {
         log.error({ err: e, tenantId: companyId }, 'getChats falló');
@@ -458,13 +473,23 @@ async function assignConversation(req, res) {
     }
     try {
         const pool = await tenantResolver.getPool(companyId);
+        const uid = Number(userId);
         const ok = await conversationStore.updateConversationFlags(pool, jid, {
-            assignedTo: Number(userId),
+            assignedTo: uid,
             mode: 'human',
             aiEnabled: false,
         });
         if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
-        res.status(200).json({ jid, assignedTo: Number(userId), mode: 'human', aiEnabled: false });
+        // Ownership persistente: la primera vez que un humano toma el chat
+        // se queda como "owner". Reasignaciones posteriores no lo pisan.
+        const claimedOwner = await conversationStore.claimOwnerIfEmpty(pool, jid, uid);
+        res.status(200).json({
+            jid,
+            assignedTo: uid,
+            ownerClaimed: claimedOwner,
+            mode: 'human',
+            aiEnabled: false,
+        });
     } catch (e) {
         res.status(500).json({ message: 'Error asignando conversación', error: e.message });
     }

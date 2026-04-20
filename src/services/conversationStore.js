@@ -215,19 +215,47 @@ async function updateMessageStatus(pool, wa_message_id, status) {
  * Lista las conversaciones más recientes de un tenant.
  * Por defecto excluye las soft-deleted. Usar includeDeleted=true para
  * verlas (p.ej. en la vista de papelera).
+ *
+ * Filtro por visibilidad (Fase D.1):
+ *   - view='all'   → sin filtro de asignación (uso admin/supervisor).
+ *   - view='queue' → solo sin asignar (assigned_to IS NULL) en modo humano.
+ *                    Útil para la vista de "cola" que cualquier vendedor puede tomar.
+ *   - view='mine'  → solo asignadas al userId recibido.
+ *                    Default cuando se pasa userId.
+ * Si no se pasan view ni userId se comporta como antes (= all).
  */
-async function listConversations(pool, { limit = 100, includeDeleted = false } = {}) {
-    const where = includeDeleted ? '' : 'WHERE c.deleted_at IS NULL';
+async function listConversations(pool, { limit = 100, includeDeleted = false, view, userId } = {}) {
+    const where = [];
+    const params = [];
+    if (!includeDeleted) where.push('c.deleted_at IS NULL');
+
+    const resolvedView = view || (userId != null ? 'mine' : 'all');
+    if (resolvedView === 'mine') {
+        if (userId == null) {
+            // sin userId no podemos filtrar por "mío"; devolvemos vacío para
+            // no exponer accidentalmente todo el inbox del tenant.
+            return [];
+        }
+        where.push('c.assigned_to = ?');
+        params.push(Number(userId));
+    } else if (resolvedView === 'queue') {
+        where.push("c.assigned_to IS NULL AND c.mode = 'human'");
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    params.push(limit);
+
     const [rows] = await pool.query(
-        `SELECT c.id, c.jid, c.name, c.is_group, c.mode, c.ai_enabled, c.assigned_to,
+        `SELECT c.id, c.jid, c.name, c.is_group, c.mode, c.ai_enabled,
+                c.assigned_to, c.owner_id, c.last_inbound_at,
                 c.ai_agent_id, c.unread_count, c.last_message, c.last_ts, c.tags,
                 c.created_at, c.updated_at, c.deleted_at, a.name AS agent_name
          FROM wa_conversations c
          LEFT JOIN wa_ai_agents a ON a.id = c.ai_agent_id
-         ${where}
+         ${whereSql}
          ORDER BY c.last_ts DESC
          LIMIT ?`,
-        [limit]
+        params
     );
     // Mapear al shape que esperaba el legacy /chats/:companyId
     return rows.map((r) => ({
@@ -241,6 +269,8 @@ async function listConversations(pool, { limit = 100, includeDeleted = false } =
         mode: r.mode,
         aiEnabled: !!r.ai_enabled,
         assignedTo: r.assigned_to,
+        ownerId: r.owner_id,
+        lastInboundAt: r.last_inbound_at || null,
         aiAgentId: r.ai_agent_id || null,
         agentName: r.agent_name || null,
         deletedAt: r.deleted_at || null,
@@ -290,7 +320,8 @@ async function listMessages(pool, jid, { before = null, limit = 50, includeDelet
  */
 async function getConversationFlags(pool, jid) {
     const [rows] = await pool.query(
-        `SELECT jid, is_group, mode, ai_enabled, assigned_to, ai_agent_id
+        `SELECT jid, is_group, mode, ai_enabled, assigned_to, owner_id,
+                last_inbound_at, ai_agent_id
          FROM wa_conversations WHERE jid = ?`,
         [jid]
     );
@@ -302,27 +333,57 @@ async function getConversationFlags(pool, jid) {
         mode: r.mode,
         aiEnabled: !!r.ai_enabled,
         assignedTo: r.assigned_to,
+        ownerId: r.owner_id,
+        lastInboundAt: r.last_inbound_at || null,
         aiAgentId: r.ai_agent_id || null,
     };
 }
 
 /**
  * Actualiza dinámicamente los flags de control de una conversación
- * (mode / ai_enabled / assigned_to). Cualquier campo undefined se omite.
+ * (mode / ai_enabled / assigned_to / owner_id / last_inbound_at / ai_agent_id).
+ * Cualquier campo undefined se omite.
+ *
+ * owner_id en esta función SOBRESCRIBE siempre; si se quiere "solo si era NULL",
+ * usar claimOwnerIfEmpty en su lugar (respeta la política de ownership persistente).
+ * lastInboundAt acepta Date | null.
+ *
  * Devuelve true si afectó alguna fila.
  */
-async function updateConversationFlags(pool, jid, { mode, aiEnabled, assignedTo, aiAgentId } = {}) {
+async function updateConversationFlags(pool, jid, {
+    mode, aiEnabled, assignedTo, ownerId, lastInboundAt, aiAgentId,
+} = {}) {
     const sets = [];
     const params = [];
-    if (mode !== undefined)       { sets.push('mode = ?');         params.push(mode); }
-    if (aiEnabled !== undefined)  { sets.push('ai_enabled = ?');   params.push(aiEnabled ? 1 : 0); }
-    if (assignedTo !== undefined) { sets.push('assigned_to = ?');  params.push(assignedTo); }
-    if (aiAgentId !== undefined)  { sets.push('ai_agent_id = ?');  params.push(aiAgentId); }
+    if (mode !== undefined)          { sets.push('mode = ?');            params.push(mode); }
+    if (aiEnabled !== undefined)     { sets.push('ai_enabled = ?');      params.push(aiEnabled ? 1 : 0); }
+    if (assignedTo !== undefined)    { sets.push('assigned_to = ?');     params.push(assignedTo); }
+    if (ownerId !== undefined)       { sets.push('owner_id = ?');        params.push(ownerId); }
+    if (lastInboundAt !== undefined) { sets.push('last_inbound_at = ?'); params.push(lastInboundAt); }
+    if (aiAgentId !== undefined)     { sets.push('ai_agent_id = ?');     params.push(aiAgentId); }
     if (!sets.length) return false;
     params.push(jid);
     const [r] = await pool.query(
         `UPDATE wa_conversations SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE jid = ?`,
         params
+    );
+    return r.affectedRows > 0;
+}
+
+/**
+ * Setea owner_id SOLO si era NULL. Permite implementar "primer vendedor humano
+ * que toma se queda con el cliente" sin pisar ownership existente cuando luego
+ * hay reasignaciones temporales. Idempotente.
+ *
+ * Devuelve true si efectivamente se asignó (i.e. pasó de NULL → userId).
+ */
+async function claimOwnerIfEmpty(pool, jid, userId) {
+    if (!jid || userId == null) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+            SET owner_id = ?
+          WHERE jid = ? AND owner_id IS NULL`,
+        [Number(userId), jid]
     );
     return r.affectedRows > 0;
 }
@@ -482,6 +543,7 @@ module.exports = {
     upsertChatNames,
     getConversationFlags,
     updateConversationFlags,
+    claimOwnerIfEmpty,
     tagSentByUser,
     getMediaByMessageId,
     // Soft delete / papelera
