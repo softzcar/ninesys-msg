@@ -46,6 +46,10 @@ const {
     setConversationMode,
     assignConversation,
     releaseConversation,
+    // Fase D.2 — Auto-asignación
+    getVendorState,
+    setVendorState,
+    listVendorStates,
     // Fase A — Agentes IA
     listAiAgents,
     getAiAgent,
@@ -264,6 +268,13 @@ router.post("/ai/agents/:companyId", authenticateToken, createAiAgent);
 router.put("/ai/agents/:companyId/:agentId", authenticateToken, updateAiAgent);
 router.delete("/ai/agents/:companyId/:agentId", authenticateToken, deleteAiAgent);
 router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAgentToConversation);
+
+/**
+ * Fase D.2 — Auto-asignación (disponibilidad de vendedores)
+ */
+router.get("/vendor-state/:companyId", authenticateToken, listVendorStates);
+router.get("/vendor-state/:companyId/:userId", authenticateToken, getVendorState);
+router.post("/vendor-state/:companyId/:userId", authenticateToken, setVendorState);
 
 /**
  * Fase B.1 — Media (servir archivos recibidos y enviar imágenes/documentos)

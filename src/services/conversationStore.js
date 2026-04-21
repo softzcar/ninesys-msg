@@ -389,6 +389,107 @@ async function claimOwnerIfEmpty(pool, jid, userId) {
 }
 
 /**
+ * Marca una conversación como asignada automáticamente a un vendedor
+ * (auto-handoff, sin respuesta humana todavía). Atomic: actualiza mode,
+ * ai_enabled, assigned_to, assigned_at y resetea last_vendor_reply_at en
+ * una sola query.
+ *
+ * Si userId es null, la conversación queda en cola (assigned_to NULL,
+ * assigned_at NULL).
+ *
+ * Parte del reloj de timeout (Fase D.3).
+ */
+async function recordAutoHandoff(pool, jid, userId) {
+    if (!jid) return false;
+    const isNull = userId == null;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET mode = 'human',
+             ai_enabled = 0,
+             assigned_to = ?,
+             assigned_at = ${isNull ? 'NULL' : 'CURRENT_TIMESTAMP'},
+             last_vendor_reply_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE jid = ?`,
+        [isNull ? null : Number(userId), jid]
+    );
+    return r.affectedRows > 0;
+}
+
+/**
+ * Registra que un humano envió un mensaje (takeover manual o respuesta
+ * continua). Atomic: mode='human', ai_enabled=0, assigned_to=userId,
+ * last_vendor_reply_at=NOW(), y assigned_at se reinicia SOLO si cambia el
+ * vendedor (se preserva si el mismo usuario re-responde).
+ *
+ * Parte del reloj de timeout (Fase D.3).
+ */
+async function recordHumanTakeover(pool, jid, userId) {
+    if (!jid || userId == null) return false;
+    const uid = Number(userId);
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET mode = 'human',
+             ai_enabled = 0,
+             assigned_at = CASE
+                WHEN assigned_to IS NULL OR assigned_to <> ? THEN CURRENT_TIMESTAMP
+                ELSE assigned_at
+             END,
+             assigned_to = ?,
+             last_vendor_reply_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE jid = ?`,
+        [uid, uid, jid]
+    );
+    return r.affectedRows > 0;
+}
+
+/**
+ * Lista conversaciones candidatas a liberación por timeout: aquellas con
+ * assigned_to != NULL, mode='human', no borradas, y con un reloj de
+ * respuesta (last_vendor_reply_at o assigned_at) poblado.
+ *
+ * Devuelve { jid, assigned_to, assigned_at, last_vendor_reply_at } para que
+ * el servicio de timeout calcule los minutos hábiles transcurridos.
+ */
+async function listAssignedForTimeout(pool, { limit = 500 } = {}) {
+    const [rows] = await pool.query(
+        `SELECT jid, assigned_to,
+                last_vendor_reply_at, assigned_at
+         FROM wa_conversations
+         WHERE assigned_to IS NOT NULL
+           AND mode = 'human'
+           AND deleted_at IS NULL
+           AND (last_vendor_reply_at IS NOT NULL OR assigned_at IS NOT NULL)
+         ORDER BY COALESCE(last_vendor_reply_at, assigned_at) ASC
+         LIMIT ?`,
+        [Number(limit)]
+    );
+    return rows;
+}
+
+/**
+ * Libera la asignación de una conversación (timeout). Deja mode='human'
+ * para que la IA NO retome — que otro vendedor la tome desde la cola o que
+ * el caller dispare una reasignación.
+ *
+ * NO toca owner_id (sticky persistente).
+ */
+async function releaseAssignment(pool, jid) {
+    if (!jid) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET assigned_to = NULL,
+             assigned_at = NULL,
+             last_vendor_reply_at = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE jid = ? AND assigned_to IS NOT NULL`,
+        [jid]
+    );
+    return r.affectedRows > 0;
+}
+
+/**
  * Persiste sent_by_user en el último mensaje saliente de una conversación
  * con un wa_message_id concreto. Best-effort: si no existe, no falla.
  */
@@ -545,6 +646,11 @@ module.exports = {
     updateConversationFlags,
     claimOwnerIfEmpty,
     tagSentByUser,
+    // Fase D.3: reloj de timeout
+    recordAutoHandoff,
+    recordHumanTakeover,
+    listAssignedForTimeout,
+    releaseAssignment,
     getMediaByMessageId,
     // Soft delete / papelera
     softDeleteConversation,

@@ -36,6 +36,7 @@ const conversationStore = require('./conversationStore');
 const mediaStore = require('./mediaStore');
 const audioTranscode = require('./audioTranscode');
 const aiService = require('./aiService');
+const assignmentPolicy = require('./assignmentPolicy');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -162,6 +163,43 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
         }
     } catch (e) {
         log.error({ err: e, tenantId: idEmpresa }, 'maybeAutoReply falló');
+    }
+}
+
+/**
+ * Escala una conversación a un humano automáticamente (handoff).
+ * Usa la política de asignación para elegir al mejor vendedor disponible.
+ * Si no hay nadie, la deja en cola (assigned_to = null).
+ */
+async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {}) {
+    try {
+        log.info({ tenantId: idEmpresa, jid, reason }, 'Iniciando handoff automático a humano');
+
+        // 1. Elegir vendedor
+        const vendorId = await assignmentPolicy.pickNextVendor({
+            pool,
+            jid,
+            excludeUserId: opts.excludeUserId || null,
+        });
+
+        // 2. Marcar en DB de forma atómica: mode/ai_enabled/assigned_to +
+        //    assigned_at=NOW (reloj de timeout D.3) + last_vendor_reply_at=NULL.
+        await conversationStore.recordAutoHandoff(pool, jid, vendorId);
+
+        // 3. Emitir evento para el panel
+        emit(idEmpresa, 'conversation:handoff', {
+            companyId: idEmpresa,
+            jid,
+            mode: 'human',
+            assignedTo: vendorId,
+            reason
+        });
+
+        log.info({ tenantId: idEmpresa, jid, assignedTo: vendorId }, 'Handoff automático completado');
+        return { ok: true, assignedTo: vendorId };
+    } catch (e) {
+        log.error({ err: e, tenantId: idEmpresa, jid }, 'handoffToHuman falló');
+        return { ok: false, error: e.message };
     }
 }
 
@@ -573,11 +611,15 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
         if (sentByUser) {
             try {
                 await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
-                await conversationStore.updateConversationFlags(pool, jid, {
-                    mode: 'human',
-                    aiEnabled: false,
-                    assignedTo: sentByUser,
-                });
+                // Fase D.2: Asegurar que el vendedor exista en wa_vendor_state
+                await pool.query(
+                    `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                    [sentByUser]
+                ).catch(() => {});
+
+                // Atomic: mode/ai_enabled/assigned_to + assigned_at (si cambió
+                // el vendedor) + last_vendor_reply_at=NOW. Reloj de timeout D.3.
+                await conversationStore.recordHumanTakeover(pool, jid, sentByUser);
                 emit(id, 'conversation:handoff', {
                     companyId: id, jid, mode: 'human', assignedTo: sentByUser,
                 });
@@ -734,11 +776,14 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
         if (sentByUser) {
             try {
                 await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
-                await conversationStore.updateConversationFlags(pool, jid, {
-                    mode: 'human',
-                    aiEnabled: false,
-                    assignedTo: sentByUser,
-                });
+                // Fase D.2: Asegurar que el vendedor exista en wa_vendor_state
+                await pool.query(
+                    `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                    [sentByUser]
+                ).catch(() => {});
+
+                // Atomic: reloj de timeout D.3 (ver sendText).
+                await conversationStore.recordHumanTakeover(pool, jid, sentByUser);
                 emit(id, 'conversation:handoff', {
                     companyId: id, jid, mode: 'human', assignedTo: sentByUser,
                 });
@@ -862,6 +907,7 @@ module.exports = {
     destroy,
     sendText,
     sendMedia,
+    handoffToHuman,
     deleteWaChat,
     emit,
     listSessions,

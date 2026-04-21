@@ -17,6 +17,7 @@ const tenantResolver = require('../src/db/tenantResolver');
 const conversationStore = require('../src/services/conversationStore');
 const mediaStore = require('../src/services/mediaStore');
 const aiService = require('../src/services/aiService');
+const assignmentPolicy = require('../src/services/assignmentPolicy');
 const log = require('../src/lib/logger').createLogger('whatsappController');
 
 let templates = {};
@@ -483,6 +484,14 @@ async function assignConversation(req, res) {
         // Ownership persistente: la primera vez que un humano toma el chat
         // se queda como "owner". Reasignaciones posteriores no lo pisan.
         const claimedOwner = await conversationStore.claimOwnerIfEmpty(pool, jid, uid);
+
+        // Fase D.2: Asegurar que el vendedor exista en la tabla de disponibilidad.
+        // Si no existe, lo creamos como disponible por defecto.
+        await pool.query(
+            `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+            [uid]
+        );
+
         res.status(200).json({
             jid,
             assignedTo: uid,
@@ -732,6 +741,40 @@ async function purgeAllDeleted(req, res) {
     }
 }
 
+async function getVendorState(req, res) {
+    const { companyId, userId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const state = await assignmentPolicy.getVendorState(pool, userId);
+        res.status(200).json(state);
+    } catch (e) {
+        res.status(500).json({ message: 'Error obteniendo estado del vendedor', error: e.message });
+    }
+}
+
+async function setVendorState(req, res) {
+    const { companyId, userId } = req.params;
+    const { isAvailable, maxActive } = req.body || {};
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const result = await assignmentPolicy.setVendorState(pool, userId, { isAvailable, maxActive });
+        res.status(200).json(result);
+    } catch (e) {
+        res.status(500).json({ message: 'Error actualizando estado del vendedor', error: e.message });
+    }
+}
+
+async function listVendorStates(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const rows = await assignmentPolicy.listVendorStates(pool);
+        res.status(200).json(rows);
+    } catch (e) {
+        res.status(500).json({ message: 'Error listando estados de vendedores', error: e.message });
+    }
+}
+
 module.exports = {
     // Bajo nivel
     getClientStatus,
@@ -779,4 +822,8 @@ module.exports = {
     listDeletedConversations,
     purgeConversation,
     purgeAllDeleted,
+    // Fase D.2 — Auto-asignación
+    getVendorState,
+    setVendorState,
+    listVendorStates,
 };

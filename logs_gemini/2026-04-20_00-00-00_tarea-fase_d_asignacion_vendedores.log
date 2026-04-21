@@ -1,308 +1,41 @@
-- **Solicitud del Usuario:** Asignar cada conversación de WhatsApp a un vendedor concreto (humano), soportar múltiples vendedores por tenant, mantener pegado al mismo vendedor cuando el cliente vuelve después de devolver a IA, repartir cola automáticamente entre vendedores disponibles y liberar por timeout si no responden en horario laboral. Se acordó trabajarlo en 4 subfases (D.1 → D.4) una a la vez.
-- **Fecha y Hora:** 2026-04-20
-- **Proyecto(s):** Backend (msg_ninesys), Frontend (app_multi), Plantilla de tenants (ninesys-api), futura API (ninesys-api Slim para horario laboral en Fase D.3)
-- **Estado actual:** ✅ Fase D.1 IMPLEMENTADA Y COMMITEABLE. Fases D.2/D.3/D.4 PENDIENTES — este log es la guía para retomarlas.
-
----
-
-## Decisiones acordadas con el usuario (válidas para todas las fases)
-
-1. **No existe rol "supervisor".** Solo hay "administrador" (id_rol=1) y "vendedor". Admin también puede vender. Los vendedores sólo ven sus propias conversaciones; admin tiene un switch (tabs) para ver "Mías / Cola / Todas".
-2. **Ownership persistente vs asignación actual → Opción B:**
-    - `assigned_to` (INT NULL) = vendedor que está atendiendo ahora. Cambia con reasignaciones/timeouts.
-    - `owner_id` (INT NULL) = dueño persistente. Se setea la **primera** vez que un humano toma el chat y **no se pisa** por defecto. Se usa para sticky en el próximo escalado.
-3. **Al ingresar un chat nuevo, NO se asigna owner_id.** Owner se "reclama" la primera vez que alguien toma la conversación (en `assignConversation`). Después, si el vendedor devuelve a IA y el cliente vuelve a escribir, el sticky debe intentar reasignarle a ese `owner_id`.
-4. **Timeout de 20 minutos** para liberar conversaciones sin responder, **solo en horario laboral** (Fase D.3). El horario laboral vive hoy en el login del frontend y hay que exponerlo vía endpoint nuevo en `ninesys-api` (Slim).
-5. **Regla de sincronización de schema:** cualquier cambio en `msg_ninesys/db/migrations/*.sql` debe replicarse en `ninesys-api/public/model/create_new_company_api_emp_N.sql` para que los tenants nuevos nazcan con el schema completo.
+- **Solicitud del Usuario:** Asignar cada conversación de WhatsApp a un vendedor concreto (humano), soportar múltiples vendedores por tenant, repartir cola automáticamente entre vendedores disponibles y liberar por timeout.
+- **Fecha y Hora:** 2026-04-20 / actualizado 2026-04-21
+- **Estado actual:** ✅ Fases D.1, D.2 y D.3 IMPLEMENTADAS. Fase D.4 PENDIENTE.
 
 ---
 
 ## ✅ Fase D.1 — Cimientos de datos + visibilidad (COMPLETADA)
-
-**Objetivo:** Que un vendedor vea solo sus conversaciones asignadas y la cola sin asignar; admin pueda ver todas. Sin todavía auto-asignar nada.
-
-**Archivos involucrados:**
-- `msg_ninesys/db/migrations/005_assignment_ownership.sql` (NUEVO — agrega `owner_id INT NULL`, `last_inbound_at DATETIME NULL` e `idx_owner` a `wa_conversations`. Idempotente con `ADD COLUMN IF NOT EXISTS`).
-- `ninesys-api/public/model/create_new_company_api_emp_N.sql` (MODIFIED — replicadas las dos columnas y el índice en el CREATE TABLE de `wa_conversations`).
-- `msg_ninesys/src/services/conversationStore.js` (MODIFIED):
-    - `listConversations({view, userId, limit, includeDeleted})` ahora filtra server-side:
-        - `view='mine'` → `c.assigned_to = userId` (si no hay userId, devuelve `[]` por seguridad).
-        - `view='queue'` → `c.assigned_to IS NULL AND c.mode = 'human'`.
-        - `view='all'` → sin filtro (admin).
-        - Default: si hay userId sin view → 'mine'; si no hay userId → 'all' (mantiene retrocompat).
-    - La SELECT ahora devuelve `c.owner_id`, `c.last_inbound_at`, `c.assigned_to`. El mapeo agrega `ownerId`, `lastInboundAt`, `assignedTo` al objeto que consume el frontend (aditivo).
-    - `getConversationFlags` y `updateConversationFlags` extendidos con `ownerId` y `lastInboundAt`.
-    - Nueva función exportada `claimOwnerIfEmpty(pool, jid, userId)` que setea `owner_id` **solo si era NULL** (idempotente).
-- `msg_ninesys/controllers/whatsappController.js` (MODIFIED):
-    - `getChatsByCompanyId` parsea `?view=mine|queue|all` y `?userId=<n>` de la query y los pasa a `listConversations`.
-    - `assignConversation` llama a `claimOwnerIfEmpty` después de `updateConversationFlags({assignedTo, mode:'human', aiEnabled:false})` y devuelve `ownerClaimed: boolean` en el response.
-- `app_multi/components/whatsapp/WaInbox.vue` (MODIFIED):
-    - Nuevo data `viewMode: 'mine'` (default).
-    - Computed `isAdmin = Number(dataUser?.id_rol) === 1` y `availableViews` (Mías/Cola + Todas si admin).
-    - `fetchConversations` arma URL con `?view=&userId=` (solo envía userId si view='mine' y hay currentUserId).
-    - Método `setViewMode(mode)` cambia vista, limpia chat seleccionado y refetch.
-    - Computed helper `isMyOwner(conv)` y nuevas badges en la lista y en el header:
-        - Badge azul **"Tuyo"** cuando `conv.ownerId === currentUserId`.
-        - Badge gris **"Asignada"** (o "Asignada a #X" en el header) cuando `conv.assignedTo && conv.assignedTo !== currentUserId`.
-    - `takeConversation`: si se tomó desde la cola, salta automáticamente a la vista "Mías" y refetch.
-    - Listener `conversation:handoff` refresca la lista cuando la visibilidad cambia (ej: queue→asignada, mine→reasignada a otro).
-
-**Notas técnicas:**
-- El shape de `/chats/:companyId` es aditivo: los campos nuevos `ownerId`/`assignedTo`/`lastInboundAt` no rompen clientes antiguos.
-- La seguridad de `view=mine` sin userId devolviendo `[]` es intencional para no exponer todo el inbox por error.
-- El frontend detecta admin por `dataUser.id_rol === 1` (valor confirmado desde `EmpleadoEditar.vue` del módulo de empleados).
-
-**Qué falta para dar D.1 por 100% productiva:**
-1. **Aplicar migración 005 a tenants existentes** — hay un script genérico en el repo que itera `api_emp_*`; ejecutarlo con `005_assignment_ownership.sql` (o correrlo manualmente por tenant).
-2. **Commit** (sugerido): `feat(chats): Fase D.1 - ownership + visibilidad por vendedor`.
-3. **Pruebas manuales:**
-    - Con usuario vendedor: la vista "Mías" muestra solo conversaciones con `assigned_to = su id`.
-    - Con usuario admin: aparece tab "Todas".
-    - Al tomar una conv desde "Cola", debe saltar a "Mías".
-    - La badge "Tuyo" debe aparecer en conversaciones propias donde `owner_id = currentUserId`.
+- `owner_id` y `assigned_to` añadidos a `wa_conversations`.
+- Vendedores ven solo "Sus chats" + "Cola". Admins ven "Todos".
+- El primer humano en tomar un chat se convierte en `owner_id` (sticky).
 
 ---
 
-## 🔜 Fase D.2 — Auto-asignación (sticky + least-loaded)
-
-**Objetivo:** Que cuando un chat escale a humano (por bloqueo IA, intención, o keyword), el backend elija automáticamente un vendedor disponible — priorizando el dueño histórico si existe, y si no, al vendedor con menos conversaciones activas.
-
-**Ficha técnica detallada:**
-
-### Archivos a crear/tocar
-
-- `msg_ninesys/db/migrations/006_vendor_availability.sql` (NUEVO):
-    - Tabla `wa_vendor_state` (por vendedor, por tenant):
-      ```sql
-      CREATE TABLE IF NOT EXISTS wa_vendor_state (
-        user_id       INT NOT NULL PRIMARY KEY,
-        is_available  TINYINT(1) NOT NULL DEFAULT 1,
-        max_active    INT NOT NULL DEFAULT 0,  -- 0 = sin tope
-        updated_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                      ON UPDATE CURRENT_TIMESTAMP
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-      ```
-    - Replicar en `ninesys-api/public/model/create_new_company_api_emp_N.sql` (regla de sync).
-- `msg_ninesys/src/services/assignmentPolicy.js` (NUEVO):
-    - `pickNextVendor({pool, jid, excludeUserId})`:
-        1. Leer `owner_id` de la conversación. Si existe y `wa_vendor_state.is_available = 1` y no excede `max_active`, **devolver ese owner** (sticky).
-        2. Si no hay sticky disponible: calcular carga activa por vendedor disponible con una query estilo:
-           ```sql
-           SELECT vs.user_id,
-                  COUNT(c.id) AS active_count
-             FROM wa_vendor_state vs
-             LEFT JOIN wa_conversations c
-                   ON c.assigned_to = vs.user_id
-                   AND c.mode = 'human'
-                   AND c.deleted_at IS NULL
-            WHERE vs.is_available = 1
-              AND (vs.max_active = 0 OR COUNT(c.id) < vs.max_active)
-            GROUP BY vs.user_id
-            ORDER BY active_count ASC, vs.updated_at ASC
-            LIMIT 1;
-           ```
-        3. Si nadie disponible: devolver `null` (el caller debe dejar el chat en `assigned_to=NULL` con `mode='human'` → queda en la cola).
-    - `getVendorState(pool, userId)` / `setVendorState(pool, userId, {isAvailable, maxActive})` — CRUD del switch.
-- `msg_ninesys/src/services/waManager.js` (MODIFIED):
-    - En el punto donde hoy se hace handoff a humano (buscar `mode = 'human'` en el waManager / `conversationStore.updateConversationFlags`), después de marcar modo humano llamar a `assignmentPolicy.pickNextVendor` y setear `assigned_to`.
-    - Si `pickNextVendor` devuelve null: dejar `assigned_to=NULL` (aparece en "Cola").
-    - Emitir `conversation:handoff` con `assignedTo` para que el frontend actualice las vistas.
-- `msg_ninesys/controllers/whatsappController.js` (MODIFIED):
-    - `GET /vendor-state/:companyId/:userId` → devuelve `{isAvailable, maxActive}`.
-    - `POST /vendor-state/:companyId/:userId` → actualiza.
-    - `GET /vendor-state/:companyId` → lista completa (para que admin vea todos en Configuración).
-- `msg_ninesys/routes/index.js` (MODIFIED): registrar los 3 endpoints anteriores.
-- `app_multi/components/whatsapp/WaConfiguracion.vue` (MODIFIED):
-    - Nueva sección "Disponibilidad de vendedores".
-    - Para el usuario actual: toggle "Estoy disponible para recibir conversaciones" + input numérico "Máx. conversaciones activas (0 = sin límite)".
-    - Solo admin: tabla con la lista de todos los vendedores y sus estados (editable).
-- `app_multi/components/whatsapp/WaInbox.vue` (MODIFIED, opcional):
-    - Indicador discreto en el header ("Disponible / No disponible") con acceso directo a Configuración.
-
-### Consideraciones técnicas
-
-- La query de least-loaded con `LEFT JOIN` es O(vendedores × activas), perfectamente aceptable para catálogos de 5–50 vendedores. Si crece a >200 considerar cachear el contador en `wa_vendor_state.active_count` actualizado por trigger o en aplicación.
-- Empates en `active_count`: romper por `updated_at ASC` da un round-robin suave (el que tocó hace más tiempo recibe primero).
-- Race conditions: `SELECT ... FOR UPDATE` dentro de una transacción si se observa doble asignación en pruebas concurrentes. Para v1 sin transacción basta (Baileys procesa mensajes en serie por tenant).
-- `wa_vendor_state` arranca vacío → los vendedores no están disponibles por default. **Alternativa:** incluir un UPSERT en login/onboarding del vendedor para crear el row con `is_available=1` la primera vez.
-
-### Criterios de "done" para D.2
-
-- Un vendedor puede marcarse no-disponible y deja de recibir auto-asignaciones.
-- Al escalarse un chat a humano por IA, el sistema lo asigna al `owner_id` si sigue disponible, o al vendedor con menos conversaciones activas, o lo deja en cola si no hay nadie.
-- El evento `conversation:handoff` lleva el `assignedTo` correcto y el frontend refresca las vistas.
+## ✅ Fase D.2 — Auto-asignación (COMPLETADA 2026-04-20)
+- **Tabla `wa_vendor_state`**: Controla quién está disponible (`is_available`) y cuántos chats máximo puede atender (`max_active`).
+- **Servicio `assignmentPolicy.js`**: Implementa lógica **Sticky** (dueño histórico) y **Least-Loaded** (reparto al que menos tiene).
+- **Integración `waManager.handoffToHuman`**: Función central para pasar chats a humanos automáticamente usando la política de asignación.
+- **Persistencia**: UPSERT perezoso del estado del vendedor al interactuar con el sistema por primera vez.
+- **Endpoints**: Gestión de disponibilidad vía `/vendor-state/:id/:userId`.
 
 ---
 
-## 🔜 Fase D.3 — Timeout en horario laboral
-
-**Objetivo:** Si un vendedor no responde en X minutos **dentro del horario laboral**, la conversación se libera (vuelve a `assigned_to=NULL`, sigue en `mode='human'` → queda en cola) o se devuelve a IA, según configuración.
-
-**Decisiones del usuario:**
-- Timeout = **20 minutos** por default.
-- Solo cuenta **tiempo en horario laboral** (si son las 19:00 y la jornada cerró a las 17:30, el reloj se pausa).
-- Al liberar, el cliente recibe un mensaje automático tipo "Un momento, lo atenderemos en breve."
-- Owner_id **no se pisa**; solo cambia `assigned_to`.
-
-### Paso clave previo: exponer horario laboral desde ninesys-api
-
-Hoy el frontend recibe el horario en el login y lo guarda en Vuex (`dataUser`) con este shape:
-```json
-{
-  "horaInicioManana": 8.5,
-  "horaFinManana": 12,
-  "horaInicioTarde": 13,
-  "horaFinTarde": 17.5,
-  "diasLaborales": [1, 2, 3, 4, 5]
-}
-```
-(Horas en decimal: 8.5 = 08:30. `diasLaborales` **1=lunes … 7=domingo** — confirmado por el usuario 2026-04-20.)
-
-`msg_ninesys` (workers/cron) **no tiene sesión de usuario**, así que necesita consultarlo por endpoint interno análogo al patrón `/internal/db-credentials` que ya usa:
-- **Nuevo endpoint en ninesys-api (Slim):** `GET /internal/business-hours?companyId=X` con token interno compartido.
-- Devuelve el mismo JSON anterior.
-- Cachear 5–10 min en memoria del lado `msg_ninesys` (rara vez cambia).
-
-### Archivos a crear/tocar
-
-- **ninesys-api (Slim, proyecto separado):** nueva ruta/controlador que consulte la tabla donde hoy se guarda el horario (la que alimenta el login) y lo devuelva protegido por el mismo token interno.
-- `msg_ninesys/src/services/apiCredentials.js` (o el servicio donde está la llamada a `/internal/db-credentials`) (MODIFIED): agregar `fetchBusinessHours(companyId)` con cache LRU 5-10 min.
-- `msg_ninesys/src/services/businessHours.js` (NUEVO):
-    - `isWithinBusinessHours(hours, at = new Date())`: parsea los decimales a HH:MM, compara contra `at`, respeta los dos bloques diarios (mañana + tarde) y `diasLaborales`.
-    - `minutesOfBusinessTimeSince(hours, fromDate)`: acumula minutos hábiles entre `fromDate` y ahora (para el timeout). **Este es el núcleo de la lógica**: iterar día a día hasta ahora, sumar intersección de bloques.
-    - Pure functions, sin side effects, testeables con fixtures.
-- `msg_ninesys/src/workers/assignmentTimeout.js` (NUEVO):
-    - Cron/setInterval cada 1–2 min.
-    - Para cada tenant activo: `SELECT jid, assigned_to, last_inbound_at FROM wa_conversations WHERE mode='human' AND assigned_to IS NOT NULL AND last_inbound_at IS NOT NULL`.
-    - Para cada fila: `minutesOfBusinessTimeSince(hours, last_inbound_at) >= 20` → liberar.
-    - Liberar = `UPDATE wa_conversations SET assigned_to=NULL WHERE jid=? AND assigned_to=?` (CAS para evitar pisar reasignaciones concurrentes).
-    - Enviar mensaje automático al cliente ("Un momento, lo atenderemos en breve.") y emitir `conversation:handoff`.
-    - **Importante:** la política de quién toma la conv liberada la decide el `pickNextVendor` de D.2 cuando llegue el próximo mensaje del cliente (o se puede llamar inmediatamente tras liberar). Decidirlo cuando se implemente.
-- `msg_ninesys/src/services/conversationStore.js` (MODIFIED):
-    - Actualizar `last_inbound_at` cuando entra un mensaje del cliente en `ingestMessage` (si `from_me=0` y conv está asignada).
-    - Limpiar `last_inbound_at = NULL` cuando el vendedor responde (en `sendText` / `sendMedia`).
-- `app_multi/components/whatsapp/WaConfiguracion.vue` (MODIFIED):
-    - Sección "Política de asignación" con input numérico "Timeout en minutos" (default 20) y checkbox "Solo en horario laboral" (default ON).
-    - Mostrar el horario laboral actual (solo lectura) para que el admin verifique.
-
-### Referencias internas
-
-- Memoria auto-guardada: `project_business_hours_format.md` en `~/.claude/projects/.../memory/` documenta el formato acordado.
-- Patrón existente de endpoint interno: buscar en `msg_ninesys` cómo se llama a `/internal/db-credentials` (si existe, sino patrón nuevo con `INTERNAL_API_TOKEN` en env).
-
-### Criterios de "done" para D.3
-
-- El endpoint `/internal/business-hours?companyId=X` existe en ninesys-api y devuelve el shape correcto.
-- `msg_ninesys` cachea y lee el horario sin sesión de usuario.
-- El worker libera conversaciones inactivas tras 20 min **hábiles**.
-- Se envía el mensaje automático al cliente cuando se libera.
-- Fuera de horario laboral el timeout NO se aplica.
+## 💡 Recomendación para mañana (2026-04-21)
+Retomar la **Fase de Mensajes de Voz / Whisper (STT)**. 
+**Razón:** Con la Fase D.2 terminada, ya tenemos el destino ideal (`handoffToHuman`) para los chats que no se puedan transcribir (audios largos, errores o falta de presupuesto). La infraestructura de "red de seguridad" (vendedores automáticos) ya es sólida.
 
 ---
 
-## 🔜 Fase D.4 — Reasignación manual + gestión
-
-**Objetivo:** Dar herramientas manuales a admins y vendedores para reasignar, devolver a cola, o devolver a IA.
-
-### Archivos a crear/tocar
-
-- `app_multi/components/whatsapp/WaInbox.vue` (MODIFIED):
-    - En el header del chat abierto:
-        - Dropdown **"Reasignar a…"** con la lista de vendedores disponibles (solo admin o el vendedor dueño).
-        - Botón **"Devolver a cola"** (libera `assigned_to` pero mantiene `mode='human'` y `owner_id`).
-        - El botón existente **"Devolver a IA"** mantiene `owner_id` (ya decidido) pero pone `mode='hybrid'/'bot'` y `assigned_to=NULL`.
-- `msg_ninesys/controllers/whatsappController.js` (MODIFIED):
-    - Endpoint `POST /conversations/:companyId/:jid/reassign` body `{userId}` (admin o owner pueden invocar).
-    - Endpoint `POST /conversations/:companyId/:jid/unassign` (libera sin salir de modo humano).
-    - Validación de permisos: consultar rol desde `req.user` (necesita que el JWT incluya `id_rol`).
-- `app_multi/components/whatsapp/WaConfiguracion.vue` (MODIFIED):
-    - Tabla "Vendedores" con columnas: nombre, disponible (toggle), max_active (editable), # conversaciones activas actuales, botón "Reasignar todas a otro" (utility para vacaciones).
-- (Opcional) `msg_ninesys/controllers/whatsappController.js`:
-    - Endpoint `POST /vendors/:companyId/:userId/bulk-reassign` body `{targetUserId}` → mueve todas las activas del vendedor origen al destino. Emite `conversation:handoff` por cada una.
-
-### Criterios de "done" para D.4
-
-- Un admin puede reasignar cualquier conversación a otro vendedor desde el header.
-- Un vendedor dueño puede devolverla a cola (sin perder ownership).
-- Un admin puede hacer bulk-reassign para salir de vacaciones de un vendedor.
+## ✅ Fase D.3 — Timeout en horario laboral (COMPLETADA 2026-04-21)
+- **Endpoint `GET /internal/business-hours`** en ninesys-api (usa header `Authorization: {id_empresa}`, devuelve horario en horas decimales + `diasLaborales`).
+- **`businessHoursClient.js`**: cliente HTTP con cache 15 min. Si la API cae y no hay cache → devuelve `null` (failsafe: el loop no libera conversaciones por error).
+- **`businessHours.js`**: helpers puros `isWithinBusinessHours()` y `minutesElapsedBusiness()` con soporte de cruce de días/fines de semana.
+- **Migración 007** (`wa_conversations`): añade `assigned_at` y `last_vendor_reply_at` con índices. `recordHumanTakeover` preserva `assigned_at` si el vendedor no cambia.
+- **`assignmentTimeout.js`**: loop cada 60s que, por tenant, libera conversaciones que superan `ASSIGNMENT_TIMEOUT_MINUTES` (20 por defecto) y reasigna con `handoffToHuman({ excludeUserId })`.
+- **Arranque/parada** integrados en `app.js` (start en boot, stop en graceful shutdown antes de cerrar pools).
+- **Template `create_new_company_api_emp_N.sql`** actualizado con columnas de 007 y tabla `wa_vendor_state` (que también faltaba de D.2).
 
 ---
 
-## Orden de implementación recomendado
-
-1. **D.1 está listo** → commit y aplicar migración 005 a tenants existentes.
-2. **D.2 siguiente** → es el que más valor aporta (automatización del reparto). Empezar por `assignmentPolicy.js` + UI del toggle de disponibilidad.
-3. **D.3** → requiere crear endpoint en ninesys-api (coordinar cambios cross-repo). Es la fase con más partes móviles.
-4. **D.4** → UX polish sobre todo lo anterior; requiere que el JWT lleve `id_rol` (validar si ya lo hace; si no, es un cambio extra en ninesys-api).
-
----
-
-## Notas para retomar después de cerrar la terminal
-
-- **Contexto completo:** este log + `logs_gemini/2026-04-20_00-00-01_plan-mensajes_voz_ia_whisper.log` (diseño STT pausado) + memoria auto-guardada en `~/.claude/projects/-home-developer-Escritorio-niesys-msg-ninesys/memory/`.
-- **Branch actual:** `feat/baileys-migration`.
-- **Último commit antes de D.1:** `a6291bb fix(deploy): excluir storage/ del rsync --delete`.
-- **Directorios clave:**
-    - Backend WhatsApp: `/home/developer/Escritorio/niesys/msg_ninesys`
-    - Frontend Nuxt: `/home/developer/Escritorio/niesys/app_multi`
-    - API Slim + template SQL de tenants: `/home/developer/Escritorio/niesys/ninesys-api/public/model/`
-- **Regla de oro:** cualquier cambio en `db/migrations/*.sql` se replica en `ninesys-api/public/model/create_new_company_api_emp_N.sql`. El usuario insiste en esto (si no se replica, los tenants nuevos nacen rotos).
-
----
-
-## Locadores rápidos (verificados con grep 2026-04-20)
-
-Puntos concretos del código que vas a tocar — anotados para no reexplorar al retomar. Si el código cambia, actualizar este bloque.
-
-### Socket.IO
-- **Helper `emit`:** `msg_ninesys/src/services/waManager.js:80-83` →
-    ```js
-    function emit(idEmpresa, event, payload) {
-        if (!ioRef) return;
-        ioRef.to(`company-${idEmpresa}`).emit(event, payload);
-    }
-    ```
-    Ya está exportado en `module.exports`, úsalo directo desde otros servicios.
-- **Sala por tenant:** siempre `company-${idEmpresa}`. Nunca improvisar otro nombre.
-
-### Evento `conversation:handoff` — shape actual
-Se emite hoy en dos sitios de `waManager.js` (buscar `emit(id, 'conversation:handoff',` — aparece ~línea 581 y ~línea 742, ambos dentro del flujo `sent-by-user` que dispara handoff manual):
-```js
-emit(id, 'conversation:handoff', {
-    companyId: id,
-    jid,
-    mode: 'human',
-    assignedTo: sentByUser,  // INT (user id del empleado que tomó)
-});
-```
-**Regla para no romper el frontend:** cualquier nueva emisión debe incluir como mínimo `{companyId, jid, mode, assignedTo}`. Campos adicionales (`reason`, `ownerId`, etc.) son aditivos. El frontend en `WaInbox.vue` ya lee `data.assignedTo` y `data.mode`.
-
-### aiService (donde vive la llamada a Gemini)
-- **Archivo único:** `msg_ninesys/src/services/aiService.js`.
-- **Nombre "aiOrchestrator" no existe** en el código — donde decíamos "aiOrchestrator" en los planes, es realmente `aiService`. Corrección: todas las referencias del log STT hay que leerlas como `aiService`.
-
-### Migraciones — estado actual
-- Existentes en `db/migrations/`: `001_wa_tables.sql`, `003_chat_soft_delete.sql`, `005_assignment_ownership.sql`. **Los números 002 y 004 no existen** (gap intencional de versiones).
-- **No hay script de apply-all a tenants existentes.** `scripts/` contiene: `cleanup-media.js`, `deploy_msg_ninesys.sh`, `test-baileys-poc.js`, `test-phase-8.js`, `test-tenant-resolver.js`, `update_kb_general.sql`, `update_kb_ventas.sql`. Si D.2/D.3 quieren aplicar migraciones automáticamente a todos los tenants, **hay que crear el script** (p.ej. `scripts/apply-migration.js` que itere `api_emp_*` y ejecute un .sql — decisión del usuario: él no tiene preferencia, lo diseñas tú).
-
-### Workers / scheduler — estado actual
-- **No hay scheduler existente** (grep de `setInterval|cron|worker|schedule` en `src/` no trae nada). Fase D.3 introduce el primer worker.
-- **Dónde arrancarlo:** el entry point del backend es `app.js`. Arranca `websocket.js` ahí. El worker de timeouts se engancharía al mismo ciclo de vida (start después de `listen`, stop con SIGTERM). No hay librería como `node-cron` instalada — `setInterval` simple es suficiente para v1.
-
-### mediaStore — layout de archivos (relevante para STT)
-- **Raíz:** `process.env.MEDIA_STORAGE_ROOT || <repo>/storage` → `STORAGE_ROOT`.
-- **Layout:** `<STORAGE_ROOT>/media/{companyId}/{YYYY-MM}/{waMessageId}.{ext}`.
-- **Helper:** `mediaStore.resolveRelative(relativePath)` (`src/services/mediaStore.js:131`) devuelve **path absoluto** a partir del `relativePath` que guarda la BD en `wa_messages.media_url`. Úsalo para darle a Whisper la ruta real.
-
----
-
-## Decisiones abiertas (investigar al retomar)
-
-Puntos donde el usuario no tenía información al momento del diseño. Se investigan cuando se empiece cada fase.
-
-1. **[D.3] Iteración de tenants activos desde un worker.** No hay API documentada hoy. Candidatos: `src/services/tenantResolver.js` (existe y resuelve pools), buscar si lista todos o solo resuelve bajo demanda. Si no, agregar función `listActiveCompanies()` que lea de la BD maestra (ninesys-api) la lista `api_emp_*` y el `id_empresa`. Preguntar al usuario qué prefiere: listar por convención de nombres de BD o por tabla de empresas.
-2. **[D.4] ¿El JWT incluye `id_rol`?** Verificar en el middleware `authenticateToken` (backend) y/o en la generación del token (ninesys-api Slim). Si no está, es un cambio extra: agregar `id_rol` al payload del login de ninesys-api. Sin eso, las validaciones de permisos de reasignación manual quedan en "cliente dice quién es" (inseguro).
-3. **[D.3] Texto del mensaje automático al liberar por timeout.** V1 hardcoded "Un momento, lo atenderemos en breve." Si el usuario pide configurable, agregar columna en `wa_tenant_config` (tabla que se introduce en el log STT).
-4. **[D.3] Dónde está registrada hoy la tabla con el horario laboral en ninesys-api.** Para el endpoint `/internal/business-hours?companyId=X` hay que leer de la misma fuente que alimenta el login. El usuario confirmó que se entrega en la respuesta de login con el shape documentado; ubicar el controller/modelo específico se hace cuando se arranque D.3.
-5. **[D.2/D.3] Script genérico para aplicar una migración a todos los tenants.** No existe. Opciones al retomar: (a) crear `scripts/apply-migration.js <path-to-sql>` que itere `api_emp_*` por convención de nombres, (b) crear una tabla de `schema_migrations` por tenant y un runner idempotente. **Acuerdo actual con el usuario: él no tiene preferencia; lo diseñas tú con lo que parezca más sólido.**
-6. **[D.2] UPSERT de vendedor en `wa_vendor_state` al primer uso vs. en onboarding/login.** V1 sugerida: UPSERT perezoso en el primer envío de mensaje humano del empleado (cuando llama `POST /conversations/.../assign` o envía con `sent_by_user`). Decisión final al retomar D.2.
+## 🔜 Fase D.4 — Reasignación manual
+- **Objetivo**: Botones en el panel para que admins reasignen chats o los devuelvan a la cola/IA.

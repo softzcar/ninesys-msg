@@ -49,6 +49,11 @@ const startApplication = async () => {
         .then(() => logger.info("Proceso de inicialización de sesiones completado"))
         .catch(error => logger.error({ err: error }, "Error durante la carga de sesiones al inicio"));
 
+    // Fase D.3: loop de timeout de asignación. No bloquea el arranque; si
+    // algún tenant no responde al fetchear horario, se skipea en ese tick.
+    const assignmentTimeout = require('./src/services/assignmentTimeout');
+    assignmentTimeout.start();
+
     // Iniciar el servidor HTTP (ahora con WebSocket)
     server.listen(PORT, () => {
         logger.info({ port: PORT }, "Servidor corriendo (HTTP + WebSocket)");
@@ -83,9 +88,18 @@ async function gracefulShutdown(signal) {
         logger.info('HTTP server cerrado');
         // 2. Cerrar Socket.IO
         try { io.close(); } catch (_) {}
-        // 3. Cerrar sesiones Baileys
+        // 3. Parar loop de timeout de asignación (Fase D.3) antes de cerrar
+        //    pools/sesiones para que ningún tick lance queries sobre recursos
+        //    en proceso de cierre.
+        try {
+            const assignmentTimeout = require('./src/services/assignmentTimeout');
+            await assignmentTimeout.stop();
+        } catch (e) {
+            logger.warn({ err: e }, 'error parando assignmentTimeout');
+        }
+        // 4. Cerrar sesiones Baileys
         await waManager.shutdown({ timeoutMs: 4000 });
-        // 4. Cerrar pools MySQL
+        // 5. Cerrar pools MySQL
         await tenantResolver.shutdown();
         logger.info('Graceful shutdown completado');
         process.exit(0);
