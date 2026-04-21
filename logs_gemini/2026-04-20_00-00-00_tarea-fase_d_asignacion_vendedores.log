@@ -1,6 +1,6 @@
 - **Solicitud del Usuario:** Asignar cada conversación de WhatsApp a un vendedor concreto (humano), soportar múltiples vendedores por tenant, repartir cola automáticamente entre vendedores disponibles y liberar por timeout.
 - **Fecha y Hora:** 2026-04-20 / actualizado 2026-04-21
-- **Estado actual:** ✅ Fases D.1, D.2 y D.3 IMPLEMENTADAS. Fase D.4 PENDIENTE.
+- **Estado actual:** ✅ Fases D.1, D.2, D.3 y D.4 IMPLEMENTADAS (Fase D completa).
 
 ---
 
@@ -20,22 +20,70 @@
 
 ---
 
-## 💡 Recomendación para mañana (2026-04-21)
-Retomar la **Fase de Mensajes de Voz / Whisper (STT)**. 
-**Razón:** Con la Fase D.2 terminada, ya tenemos el destino ideal (`handoffToHuman`) para los chats que no se puedan transcribir (audios largos, errores o falta de presupuesto). La infraestructura de "red de seguridad" (vendedores automáticos) ya es sólida.
-
----
-
 ## ✅ Fase D.3 — Timeout en horario laboral (COMPLETADA 2026-04-21)
-- **Endpoint `GET /internal/business-hours`** en ninesys-api (usa header `Authorization: {id_empresa}`, devuelve horario en horas decimales + `diasLaborales`).
-- **`businessHoursClient.js`**: cliente HTTP con cache 15 min. Si la API cae y no hay cache → devuelve `null` (failsafe: el loop no libera conversaciones por error).
-- **`businessHours.js`**: helpers puros `isWithinBusinessHours()` y `minutesElapsedBusiness()` con soporte de cruce de días/fines de semana.
-- **Migración 007** (`wa_conversations`): añade `assigned_at` y `last_vendor_reply_at` con índices. `recordHumanTakeover` preserva `assigned_at` si el vendedor no cambia.
-- **`assignmentTimeout.js`**: loop cada 60s que, por tenant, libera conversaciones que superan `ASSIGNMENT_TIMEOUT_MINUTES` (20 por defecto) y reasigna con `handoffToHuman({ excludeUserId })`.
-- **Arranque/parada** integrados en `app.js` (start en boot, stop en graceful shutdown antes de cerrar pools).
-- **Template `create_new_company_api_emp_N.sql`** actualizado con columnas de 007 y tabla `wa_vendor_state` (que también faltaba de D.2).
+
+### Componentes implementados
+- **Endpoint `GET /internal/business-hours`** en ninesys-api (header `Authorization: {id_empresa}`, horario en horas decimales + `diasLaborales`). 12 casos de error discriminados con campo `reason`. Commits: `755d917`, `e5ba125`.
+- **`src/lib/businessHoursClient.js`**: cliente HTTP con cache de 15 min. Si la API cae y no hay cache → devuelve `null` (failsafe: el loop NO libera conversaciones por error). No lanza excepciones.
+- **`src/lib/businessHours.js`**: helpers puros `isWithinBusinessHours()` y `minutesElapsedBusiness()`. Maneja horas decimales, días 1–7 (lun–dom), cruce de días y fines de semana (smoke-test: vie 17:25 → lun 09:05 = 40 min hábiles).
+- **Migración `007_assignment_timeout.sql`** (`wa_conversations`): añade `assigned_at` y `last_vendor_reply_at` con índices. `recordHumanTakeover` preserva `assigned_at` si el vendedor no cambia (SQL atómico con CASE).
+- **`src/services/assignmentTimeout.js`**: loop cada 60s que por tenant lista conversaciones asignadas, calcula min hábiles desde `last_vendor_reply_at || assigned_at`, libera si > umbral y reasigna con `handoffToHuman({ excludeUserId })` para que no vuelva a caerle al mismo. Reentrancy guard + `unref()`.
+- **Arranque/parada** integrados en `app.js`: `start()` en boot, `stop()` en graceful shutdown ANTES de cerrar pools/sesiones.
+- **Template `create_new_company_api_emp_N.sql`** actualizado con columnas de 007 y tabla `wa_vendor_state` (que también faltaba de D.2, detectado al revisar).
+
+### Commits
+- `msg_ninesys` rama `feat/baileys-migration` → `294a147` (D.2 + D.3 agrupados).
+- `ninesys-api` rama `refactor/modular-routes` → `f4ab008` (template SQL).
+- ⚠️ **Aún sin push / sin desplegar en VPS.**
+
+### Variables `.env` del servicio ws (todas opcionales)
+```
+API_URL=https://api.nineteengreen.com          # ya existe, usada también por auth/credentials
+ASSIGNMENT_TIMEOUT_MINUTES=20                  # default 20 min hábiles
+ASSIGNMENT_TIMEOUT_INTERVAL_MS=60000           # default 60s, mínimo 5s
+ASSIGNMENT_TIMEOUT_DISABLED=0                  # "1" para no arrancar el loop
+```
+
+### Pasos pendientes para activar en producción
+1. Push de ambas ramas y deploy.
+2. Correr migración **006** (si aún no) y **007** en cada tenant existente. Empresas nuevas ya las traen del template.
+3. Confirmar `API_URL` en `.env` del servicio ws.
+4. Reiniciar servicio (PM2 restart). Verificar en logs: `Loop de timeout arrancado { intervalMs: 60000, thresholdMin: 20 }`.
+5. Prueba en vivo: asignar un chat, esperar > 20 min hábiles sin responder, verificar que se libere y se reasigne a otro vendedor (o quede en cola si no hay más).
 
 ---
 
-## 🔜 Fase D.4 — Reasignación manual
-- **Objetivo**: Botones en el panel para que admins reasignen chats o los devuelvan a la cola/IA.
+## ✅ Fase D.4 — Reasignación manual (COMPLETADA 2026-04-21)
+
+### Backend (msg_ninesys)
+- **Nuevo endpoint `POST /conversations/:companyId/:jid/return-to-queue`** → `assigned_to=NULL`, `assigned_at=NULL`, `last_vendor_reply_at=NULL`, `mode='human'`, `ai_enabled=0`. No toca `owner_id` (sticky).
+- **`conversationStore.returnToQueue(pool, jid)`** idempotente (se puede llamar aunque ya esté en cola).
+- **`conversationStore.getConversationAssignment(pool, jid)`** para leer estado previo (`previousAssignee`) antes del cambio.
+- **`assignConversation`** ahora usa `recordAutoHandoff` (no `updateConversationFlags`) para resetear correctamente el reloj del timeout cuando cambia el vendedor.
+- **Eventos WS nuevos** (sala `company-${id}`, broadcast, frontend filtra por userId):
+  - `conversation:assigned` → `{ jid, assignedTo, previousAssignee, by, reason }`
+  - `conversation:returned-to-queue` → `{ jid, previousAssignee, by }`
+  - `conversation:returned-to-ai` → `{ jid, previousAssignee, by }`
+  - `conversation:mode-changed` → `{ jid, mode, by }`
+- Responses incluyen `previousAssignee` para updates optimistas en frontend.
+
+### Frontend (app_multi — `components/whatsapp/WaInbox.vue`)
+- **Fix bug admin flag**: `Number(dataUser?.id_rol) === 1` → `Number(dataUser?.acceso) === 1` (convención de toda la app).
+- **Tabs restrictivas**: vendedor solo ve "Mías"; admin ve "Mías" + "Cola" + "Todas".
+- **Cache de vendedores** vía `GET {API}/empleados` de ninesys-api. Solo se carga si `isAdmin`.
+- **Nombre del vendedor** visible para admin en tarjetas (lista) y en header del chat (en vez de `#userId`).
+- **Badge "En cola"** (warning) para admin cuando `mode='human'` y `assigned_to=NULL`.
+- **Dropdown "Reasignar"** en header (solo admin). Muestra todos los empleados con asterisco en admins; el actual vendedor asignado queda marcado como `active`.
+- **Botón "Devolver a cola"** (solo admin, solo si hay alguien asignado).
+- **Handler común `applyAssignmentChange`** para los 3 eventos WS nuevos:
+  - Si el vendedor que perdió el chat soy yo → toast "X reasignó este chat a Y" + quitar de mi lista.
+  - Si la vista actual deja de aplicar (cola que ya no es cola, mías que ya no es mía) → refetch.
+  - Si me acaban de asignar un chat que no tenía → refetch para cargarlo.
+
+### Pendiente (fuera de D)
+- No hay gating de rol en el backend. Un vendedor con token válido podría llamar directamente a `/return-to-queue` o asignarse chats ajenos vía `/assign`. No es crítico por ahora (todos los usuarios del panel son internos y confiables), pero habría que cerrarlo si se abre acceso externo.
+
+---
+
+## 🔜 Pendiente fuera de Fase D
+- **Mensajes de voz / Whisper (STT)**: planificado en `logs_gemini/2026-04-20_00-00-01_plan-mensajes_voz_ia_whisper.log`. Con D.3 terminada, `handoffToHuman` ya sirve como red de seguridad cuando la transcripción falle o no haya presupuesto.

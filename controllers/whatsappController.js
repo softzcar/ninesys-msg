@@ -460,6 +460,14 @@ async function setConversationMode(req, res) {
         const pool = await tenantResolver.getPool(companyId);
         const ok = await conversationStore.updateConversationFlags(pool, jid, { mode });
         if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+
+        waManager.emit(companyId, 'conversation:mode-changed', {
+            companyId: Number(companyId),
+            jid,
+            mode,
+            by: req.body?.by ?? null,
+        });
+
         res.status(200).json({ jid, mode });
     } catch (e) {
         res.status(500).json({ message: 'Error cambiando modo', error: e.message });
@@ -468,19 +476,25 @@ async function setConversationMode(req, res) {
 
 async function assignConversation(req, res) {
     const { companyId, jid } = req.params;
-    const { userId } = req.body || {};
+    const { userId, by } = req.body || {};
     if (!userId || isNaN(Number(userId))) {
         return res.status(400).json({ message: 'Body requiere { userId: number }' });
     }
     try {
         const pool = await tenantResolver.getPool(companyId);
         const uid = Number(userId);
-        const ok = await conversationStore.updateConversationFlags(pool, jid, {
-            assignedTo: uid,
-            mode: 'human',
-            aiEnabled: false,
-        });
-        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+
+        // Leer estado previo para emitir `previousAssignee` en el evento WS.
+        const prev = await conversationStore.getConversationAssignment(pool, jid);
+        if (!prev) return res.status(404).json({ message: 'Conversación no encontrada' });
+        const previousAssignee = prev.assignedTo;
+
+        // Atómico: mode='human' + ai_enabled=0 + assigned_to=uid +
+        // assigned_at=NOW() + last_vendor_reply_at=NULL. El vendedor nuevo
+        // aún no ha respondido, por eso NO usamos recordHumanTakeover (que
+        // adelantaría el reloj del timeout como si ya hubiera contestado).
+        await conversationStore.recordAutoHandoff(pool, jid, uid);
+
         // Ownership persistente: la primera vez que un humano toma el chat
         // se queda como "owner". Reasignaciones posteriores no lo pisan.
         const claimedOwner = await conversationStore.claimOwnerIfEmpty(pool, jid, uid);
@@ -492,9 +506,22 @@ async function assignConversation(req, res) {
             [uid]
         );
 
+        // D.4: notificar a toda la sala de la empresa. El frontend filtra
+        // por userId para saber si el evento le concierne (le quitaron /
+        // le asignaron un chat).
+        waManager.emit(companyId, 'conversation:assigned', {
+            companyId: Number(companyId),
+            jid,
+            assignedTo: uid,
+            previousAssignee,
+            by: by ?? null,
+            reason: previousAssignee && previousAssignee !== uid ? 'reassign' : 'manual',
+        });
+
         res.status(200).json({
             jid,
             assignedTo: uid,
+            previousAssignee,
             ownerClaimed: claimedOwner,
             mode: 'human',
             aiEnabled: false,
@@ -509,15 +536,59 @@ async function releaseConversation(req, res) {
     const { companyId, jid } = req.params;
     try {
         const pool = await tenantResolver.getPool(companyId);
+        const prev = await conversationStore.getConversationAssignment(pool, jid);
+        if (!prev) return res.status(404).json({ message: 'Conversación no encontrada' });
+        const previousAssignee = prev.assignedTo;
+
         const ok = await conversationStore.updateConversationFlags(pool, jid, {
             mode: 'hybrid',
             aiEnabled: true,
             assignedTo: null,
         });
         if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
-        res.status(200).json({ jid, mode: 'hybrid', aiEnabled: true, assignedTo: null });
+
+        waManager.emit(companyId, 'conversation:returned-to-ai', {
+            companyId: Number(companyId),
+            jid,
+            previousAssignee,
+            by: req.body?.by ?? null,
+        });
+
+        res.status(200).json({ jid, mode: 'hybrid', aiEnabled: true, assignedTo: null, previousAssignee });
     } catch (e) {
         res.status(500).json({ message: 'Error liberando conversación', error: e.message });
+    }
+}
+
+async function returnToQueueConversation(req, res) {
+    // D.4: Devuelve la conversación a la cola (sin asignar, mode='human',
+    // ai_enabled=0). Pensado para uso admin desde el panel.
+    const { companyId, jid } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const prev = await conversationStore.getConversationAssignment(pool, jid);
+        if (!prev) return res.status(404).json({ message: 'Conversación no encontrada' });
+        const previousAssignee = prev.assignedTo;
+
+        const ok = await conversationStore.returnToQueue(pool, jid);
+        if (!ok) return res.status(404).json({ message: 'Conversación no encontrada' });
+
+        waManager.emit(companyId, 'conversation:returned-to-queue', {
+            companyId: Number(companyId),
+            jid,
+            previousAssignee,
+            by: req.body?.by ?? null,
+        });
+
+        res.status(200).json({
+            jid,
+            previousAssignee,
+            assignedTo: null,
+            mode: 'human',
+            aiEnabled: false,
+        });
+    } catch (e) {
+        res.status(500).json({ message: 'Error devolviendo a cola', error: e.message });
     }
 }
 
@@ -806,6 +877,7 @@ module.exports = {
     setConversationMode,
     assignConversation,
     releaseConversation,
+    returnToQueueConversation,
     // Fase A — Agentes IA
     listAiAgents,
     getAiAgent,

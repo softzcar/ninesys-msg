@@ -490,6 +490,51 @@ async function releaseAssignment(pool, jid) {
 }
 
 /**
+ * Lee el estado actual de asignación/modo de una conversación.
+ * Usado por los controllers de D.4 para obtener `previousAssignee` antes
+ * de un cambio y poder emitirlo en el evento WS.
+ *
+ * Devuelve null si la conversación no existe.
+ */
+async function getConversationAssignment(pool, jid) {
+    if (!jid) return null;
+    const [rows] = await pool.query(
+        `SELECT assigned_to, owner_id, mode, ai_enabled
+         FROM wa_conversations WHERE jid = ? LIMIT 1`,
+        [jid]
+    );
+    if (!rows.length) return null;
+    const r = rows[0];
+    return {
+        assignedTo: r.assigned_to,
+        ownerId: r.owner_id,
+        mode: r.mode,
+        aiEnabled: !!r.ai_enabled,
+    };
+}
+
+/**
+ * D.4 — Devuelve la conversación a la cola (sin asignar, modo humano, IA
+ * desactivada). Idempotente: se puede llamar aunque ya esté en cola y
+ * sincroniza mode/ai_enabled igual. No toca owner_id (sticky).
+ */
+async function returnToQueue(pool, jid) {
+    if (!jid) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations
+         SET assigned_to = NULL,
+             assigned_at = NULL,
+             last_vendor_reply_at = NULL,
+             mode = 'human',
+             ai_enabled = 0,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE jid = ?`,
+        [jid]
+    );
+    return r.affectedRows > 0;
+}
+
+/**
  * Persiste sent_by_user en el último mensaje saliente de una conversación
  * con un wa_message_id concreto. Best-effort: si no existe, no falla.
  */
@@ -651,6 +696,9 @@ module.exports = {
     recordHumanTakeover,
     listAssignedForTimeout,
     releaseAssignment,
+    // Fase D.4: reasignación manual
+    getConversationAssignment,
+    returnToQueue,
     getMediaByMessageId,
     // Soft delete / papelera
     softDeleteConversation,

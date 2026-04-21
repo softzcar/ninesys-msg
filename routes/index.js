@@ -46,6 +46,7 @@ const {
     setConversationMode,
     assignConversation,
     releaseConversation,
+    returnToQueueConversation,
     // Fase D.2 — Auto-asignación
     getVendorState,
     setVendorState,
@@ -258,6 +259,7 @@ router.post("/conversations/:companyId/:jid/ai/toggle", authenticateToken, toggl
 router.post("/conversations/:companyId/:jid/mode", authenticateToken, setConversationMode);
 router.post("/conversations/:companyId/:jid/assign", authenticateToken, assignConversation);
 router.post("/conversations/:companyId/:jid/release", authenticateToken, releaseConversation);
+router.post("/conversations/:companyId/:jid/return-to-queue", authenticateToken, returnToQueueConversation);
 
 /**
  * Fase A — CRUD de Agentes IA
