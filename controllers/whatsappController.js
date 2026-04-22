@@ -18,6 +18,7 @@ const conversationStore = require('../src/services/conversationStore');
 const mediaStore = require('../src/services/mediaStore');
 const aiService = require('../src/services/aiService');
 const assignmentPolicy = require('../src/services/assignmentPolicy');
+const internalMessenger = require('../src/services/internalMessenger');
 const log = require('../src/lib/logger').createLogger('whatsappController');
 
 let templates = {};
@@ -509,14 +510,27 @@ async function assignConversation(req, res) {
         // D.4: notificar a toda la sala de la empresa. El frontend filtra
         // por userId para saber si el evento le concierne (le quitaron /
         // le asignaron un chat).
+        const wsReason = previousAssignee && previousAssignee !== uid ? 'reassign' : 'manual';
         waManager.emit(companyId, 'conversation:assigned', {
             companyId: Number(companyId),
             jid,
             assignedTo: uid,
             previousAssignee,
             by: by ?? null,
-            reason: previousAssignee && previousAssignee !== uid ? 'reassign' : 'manual',
+            reason: wsReason,
         });
+
+        // Aviso por la mensajería interna al vendedor asignado. Solo cuando
+        // cambió el asignado — si alguien se "re-asigna" a sí mismo o el
+        // usuario que hizo la acción es el mismo que recibe, no tiene
+        // sentido notificarlo.
+        if (previousAssignee !== uid && Number(by) !== uid) {
+            internalMessenger.notifyVendorOfAssignment(companyId, pool, {
+                vendorId: uid,
+                jid,
+                reason: wsReason,
+            }).catch(() => {});
+        }
 
         res.status(200).json({
             jid,

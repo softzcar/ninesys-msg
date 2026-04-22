@@ -37,6 +37,7 @@ const mediaStore = require('./mediaStore');
 const audioTranscode = require('./audioTranscode');
 const aiService = require('./aiService');
 const assignmentPolicy = require('./assignmentPolicy');
+const internalMessenger = require('./internalMessenger');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -269,6 +270,17 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
             assignedTo: vendorId,
             reason
         });
+
+        // 4. Avisar al vendedor por la mensajería interna (best-effort).
+        //    Si no hay vendorId (cola), por ahora no notificamos a nadie —
+        //    el fan-out a cola se decidirá en un paso posterior.
+        if (vendorId) {
+            internalMessenger.notifyVendorOfAssignment(idEmpresa, pool, {
+                vendorId,
+                jid,
+                reason,
+            }).catch(() => {});
+        }
 
         log.info({ tenantId: idEmpresa, jid, assignedTo: vendorId }, 'Handoff automático completado');
         return { ok: true, assignedTo: vendorId };
