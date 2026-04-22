@@ -43,6 +43,15 @@ const log = require('../lib/logger').createLogger('waManager');
 const AI_THROTTLE_MS = 4000;
 const _aiLastReply = new Map(); // jid → ts ms
 
+// Red de seguridad para notas de voz que la IA no puede procesar (pre-Whisper).
+// Si el cliente manda un ptt de más de AUDIO_HANDOFF_SECONDS, pasamos la
+// conversación a humano y avisamos al cliente. Cuando lleguemos a Whisper
+// esta misma lógica evita cobros innecesarios por audios muy largos.
+const AUDIO_HANDOFF_SECONDS = Number(process.env.AUDIO_HANDOFF_SECONDS) || 120;
+const AUDIO_HANDOFF_MESSAGE =
+    'Recibimos tu nota de voz, pero es demasiado larga para responderla automáticamente. '
+    + 'Te atenderá un miembro de nuestro equipo en un momento.';
+
 // ---------- Hardening Baileys (Fase 9.3) ----------
 // Backoff exponencial en reconexión: 1.5s → 3s → 6s → 12s → ... cap 60s.
 // Se resetea a 0 cuando la sesión llega a READY.
@@ -163,6 +172,72 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
         }
     } catch (e) {
         log.error({ err: e, tenantId: idEmpresa }, 'maybeAutoReply falló');
+    }
+}
+
+/**
+ * Red de seguridad pre-Whisper: si el cliente envía un audio más largo
+ * que AUDIO_HANDOFF_SECONDS, la IA no podrá procesarlo (no hay STT
+ * todavía). Escalamos la conversación a humano y le enviamos un aviso
+ * automático al cliente. Retorna true si se hizo el handoff — el caller
+ * debe saltarse la respuesta IA en ese caso.
+ *
+ * Aplica a cualquier audioMessage (ptt o adjunto). Solo cuando la
+ * conversación aún no está en modo humano (idempotencia: un segundo
+ * audio largo no re-reasigna al vendedor).
+ */
+async function maybeHandoffLongVoiceNote(idEmpresa, pool, ingestResult, rawMsg) {
+    try {
+        const incoming = ingestResult?.message;
+        const jid = ingestResult?.jid;
+        if (!incoming || !jid || incoming.from_me) return false;
+
+        const audioMessage = rawMsg?.message?.audioMessage;
+        if (!audioMessage) return false;
+
+        const seconds = Number(audioMessage.seconds) || 0;
+
+        // Log de diagnóstico: todo audio entrante aparece aquí con sus flags,
+        // útil para confirmar umbrales y ptt mientras depuramos en desarrollo.
+        log.info(
+            {
+                tenantId: idEmpresa,
+                jid,
+                ptt: !!audioMessage.ptt,
+                seconds,
+                mimetype: audioMessage.mimetype || null,
+                threshold: AUDIO_HANDOFF_SECONDS,
+            },
+            'Audio entrante recibido (evaluando handoff)'
+        );
+
+        if (seconds <= AUDIO_HANDOFF_SECONDS) return false;
+
+        const flags = await conversationStore.getConversationFlags(pool, jid);
+        if (!flags) return false;
+        if (flags.isGroup) return false;
+        if (flags.mode === 'human') return false;
+
+        log.info(
+            { tenantId: idEmpresa, jid, seconds, threshold: AUDIO_HANDOFF_SECONDS },
+            'Audio largo → handoff a humano'
+        );
+
+        const handoff = await handoffToHuman(idEmpresa, pool, jid, 'audio_too_long');
+
+        try {
+            await sendText(idEmpresa, jid, AUDIO_HANDOFF_MESSAGE, { via: 'api' });
+        } catch (sendErr) {
+            log.warn(
+                { err: sendErr, tenantId: idEmpresa, jid },
+                'No se pudo enviar aviso de handoff por audio largo'
+            );
+        }
+
+        return handoff?.ok !== false;
+    } catch (e) {
+        log.error({ err: e, tenantId: idEmpresa }, 'maybeHandoffLongVoiceNote falló');
+        return false;
     }
 }
 
@@ -303,7 +378,12 @@ async function init(idEmpresa) {
                     emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
                     // Fase 8: auto-respuesta IA (best-effort, no bloquea el ingest)
                     if (!result.message.from_me) {
-                        maybeAutoReply(id, pool, result);
+                        // Red de seguridad: notas de voz > AUDIO_HANDOFF_SECONDS
+                        // pasan a humano en vez de intentar IA (no hay STT aún).
+                        const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
+                        if (!handedOff) {
+                            maybeAutoReply(id, pool, result);
+                        }
                     }
                 }
             } catch (e) {

@@ -1,0 +1,286 @@
+- **Solicitud del Usuario:** Que el bot IA pueda "escuchar" notas de voz enviadas al número de WhatsApp de cada empresa. Transcribir con Whisper, responder **siempre en texto**, pasar a humano si el audio es demasiado largo, y exponer en el panel de configuración cuánto se consume en USD con un tope mensual por tenant.
+- **Fecha y Hora:** 2026-04-20
+- **Proyecto(s):** Backend (msg_ninesys), Frontend (app_multi), Plantilla de tenants (ninesys-api)
+- **Estado actual:** 🟡 PAUSADO — diseño completo acordado, NADA implementado todavía. Este log es el blueprint para retomar en cualquier momento.
+
+---
+
+## Decisiones del usuario (cerradas)
+
+1. **Proveedor:** OpenAI **Whisper API** (`whisper-1`).
+2. **Persistencia:** **columna nueva** `transcript` en `wa_messages` (no tabla aparte). Guardar también `transcript_lang` y `transcript_cost_usd` para auditoría y billing.
+3. **Scope:** **solo notas de voz** (`ptt = true` / tipo `audio`). No transcribir audios adjuntos "musicales" ni otros tipos.
+4. **Respuesta de la IA:** **siempre texto**. No se genera TTS de vuelta en esta iteración.
+5. **Audios largos:** audios de **más de 120 segundos** (2 min) se pasan directamente a humano **sin transcribir** (no se gasta Whisper en ellos). El sistema envía un mensaje automático al cliente tipo "Te atendemos por texto en un momento."
+6. **Costos visibles en el panel:**
+    - **Ambos costos** (Whisper **y** Gemini) — acordado mostrar los dos.
+    - **Por tenant** (no global).
+7. **Tope mensual por tenant:** `stt_monthly_usd_limit = 3` USD por defecto (configurable). Cuando se alcanza el tope: el audio NO se transcribe, se pasa a humano con aviso "Se alcanzó el límite mensual de transcripciones."
+8. **Roles:** admin/dueño ve los costos en la página de Configuración WhatsApp. No existe rol "supervisor" en este sistema.
+
+---
+
+## Arquitectura de alto nivel
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Cliente envía nota de voz (audioMessage ptt=true) a la línea    │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Baileys (msg_ninesys/src/services/waManager.js)                  │
+│   messages.upsert  → conversationStore.ingestMessage             │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ mediaStore.save → guarda .ogg/.opus en storage/media/...         │
+│ Retorna relativePath + seconds (de audioMessage.seconds)         │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ NUEVO: sttService.transcribeIfEligible(msg, ctx)                 │
+│   ├─ ¿type==='audio' && ptt? no → skip                           │
+│   ├─ ¿seconds > 120? sí → marcar handoff_reason='audio_long',    │
+│   │                        forzar mode='human', NO transcribir   │
+│   ├─ ¿tenant.stt_month_usd >= stt_monthly_usd_limit? sí →        │
+│   │    marcar handoff_reason='stt_cap', forzar mode='human'      │
+│   └─ else → POST Whisper API con el archivo .ogg                 │
+│              ← transcript + detected_language                    │
+│              Guardar en wa_messages.transcript/_lang/_cost_usd   │
+│              Sumar costo a wa_tenant_stt_usage                   │
+└───────────────────────────────┬─────────────────────────────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ aiOrchestrator (existente) recibe `msg.body = transcript`        │
+│   y responde texto normal vía Gemini                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Archivos a crear/tocar (detallado)
+
+### Backend — msg_ninesys
+
+#### 1) Migración DB
+
+`msg_ninesys/db/migrations/007_stt_transcripts_and_usage.sql` (NUEVO):
+```sql
+-- Columnas nuevas en wa_messages para transcripciones
+ALTER TABLE wa_messages
+  ADD COLUMN IF NOT EXISTS transcript           TEXT        NULL AFTER body,
+  ADD COLUMN IF NOT EXISTS transcript_lang      VARCHAR(8)  NULL AFTER transcript,
+  ADD COLUMN IF NOT EXISTS transcript_cost_usd  DECIMAL(10,6) NULL AFTER transcript_lang,
+  ADD COLUMN IF NOT EXISTS transcript_error     VARCHAR(255) NULL AFTER transcript_cost_usd;
+
+-- Acumulado mensual por tenant (Whisper + Gemini)
+CREATE TABLE IF NOT EXISTS wa_usage_monthly (
+  year_month   CHAR(7)       NOT NULL,    -- '2026-04'
+  provider     VARCHAR(16)   NOT NULL,    -- 'whisper' | 'gemini'
+  usd_cents    BIGINT        NOT NULL DEFAULT 0,
+  call_count   INT           NOT NULL DEFAULT 0,
+  updated_at   TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                     ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (year_month, provider)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Configuración por tenant de límites y flags
+CREATE TABLE IF NOT EXISTS wa_tenant_config (
+  id                       INT NOT NULL PRIMARY KEY DEFAULT 1,
+  stt_enabled              TINYINT(1) NOT NULL DEFAULT 1,
+  stt_monthly_usd_limit    DECIMAL(10,2) NOT NULL DEFAULT 3.00,
+  stt_long_audio_seconds   INT NOT NULL DEFAULT 120,
+  updated_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                             ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO wa_tenant_config (id) VALUES (1);
+```
+**Replicar en** `ninesys-api/public/model/create_new_company_api_emp_N.sql` (regla de sync).
+
+**Decisión clave sobre `usd_cents`:** se guarda en céntimos enteros (BIGINT) para evitar errores de redondeo con DECIMAL en sumas acumuladas. El servicio convierte a USD al leer (`usd_cents / 100`).
+
+Precio Whisper actual: **$0.006 USD por minuto** (prorrateado por segundo). El servicio calcula: `cost_usd = seconds * 0.006 / 60`. Si cambia el precio hay que actualizar la constante en `sttService.js` — dejar anotado en comentario.
+
+Precio Gemini: depende del modelo. **⚠️ Corrección confirmada con el usuario 2026-04-20:** NO existe hoy contabilidad de tokens Gemini en el código (grep de `usageMetadata|totalTokenCount|promptTokenCount` en `aiService.js` → 0 resultados). **Hay que implementarla de cero** como parte de esta fase:
+1. En `aiService.js`, capturar `response.usageMetadata.{promptTokenCount, candidatesTokenCount, totalTokenCount}` del SDK de Gemini en cada generación.
+2. Crear `msg_ninesys/src/services/geminiPricing.js` con una tabla de precios por modelo (ej. `gemini-1.5-flash`, `gemini-1.5-pro`) y función `costUsd(modelId, usage)`.
+3. Llamar `usageStore.addUsage(pool, 'gemini', cost, 1)` tras cada generación exitosa.
+Si el usuario cambia de modelo, actualizar la tabla de precios de `geminiPricing.js`.
+
+#### 2) Servicios
+
+`msg_ninesys/src/services/sttService.js` (NUEVO):
+- `async transcribe({filePath, mimeType, seconds})` → POST a Whisper API con `form-data`, `model=whisper-1`, opcional `language` si queremos hintear español. Retorna `{text, language}`.
+- `async transcribeIfEligible(pool, msg, {logger})`:
+    1. Si `msg.type !== 'audio'` o el mensaje original no era ptt → return `{ok:false, reason:'not_voice_note'}`.
+    2. Leer `wa_tenant_config`. Si `stt_enabled=0` → skip.
+    3. Leer `seconds` del audioMessage Baileys (se expone en el dispatcher; pasarlo por opts). Si `seconds > stt_long_audio_seconds` → `{ok:false, reason:'audio_too_long', handoff:true}`.
+    4. Leer `wa_usage_monthly` del mes actual, provider='whisper'. Si `usd_cents >= limit*100` → `{ok:false, reason:'stt_cap_reached', handoff:true}`.
+    5. Llamar `transcribe()`. Si falla → guardar `transcript_error`, `{ok:false, reason:'stt_error', handoff:false}` (opcional: handoff por errores repetidos).
+    6. Persistir `transcript`, `transcript_lang`, `transcript_cost_usd` en `wa_messages`.
+    7. Upsert `wa_usage_monthly` (sumar `usd_cents` y `call_count`).
+    8. Retornar `{ok:true, text, language, cost_usd}`.
+- Constante `WHISPER_USD_PER_MINUTE = 0.006` con comentario sobre actualización.
+- Manejo de errores de red con retry 1x (backoff corto); más no tiene sentido en un flujo conversacional.
+
+`msg_ninesys/src/services/usageStore.js` (NUEVO):
+- `addUsage(pool, provider, usd, callCount=1)` → upsert en `wa_usage_monthly` con `year_month = strftime('%Y-%m')`.
+- `getUsageByMonth(pool, yearMonth)` → devuelve `[{provider, usd, call_count}]`.
+- `getUsageByYear(pool, year)` → útil para gráfico anual en el panel.
+- `getTenantConfig(pool)` / `updateTenantConfig(pool, patch)`.
+
+#### 3) Integración con el pipeline existente
+
+`msg_ninesys/src/services/waManager.js` o el orchestrator IA (MODIFIED):
+- Tras `conversationStore.ingestMessage`, si el mensaje es audio ptt, invocar `sttService.transcribeIfEligible` ANTES de despachar al `aiOrchestrator`.
+- Si retorna `{handoff:true}`:
+    - `conversationStore.updateConversationFlags(pool, jid, {mode:'human', aiEnabled:false, assignedTo:null})` (o mantener asignación existente si la hay).
+    - Emitir `conversation:handoff` con `reason: 'audio_too_long' | 'stt_cap_reached'`.
+    - Enviar mensaje automático al cliente — texto configurable en `wa_tenant_config.long_audio_reply_text` (opcional) o hardcoded en v1.
+- Si retorna `{ok:true, text}`:
+    - Setear `msg.body = text` en memoria antes de despacharlo al aiOrchestrator, para que Gemini vea el texto transcrito.
+    - Opcional: re-emitir `message:new` por Socket.IO con el transcript para que el frontend lo muestre como sub-título del audio ("🎙️ Transcripción: …").
+- Si retorna `{ok:false, reason:'stt_error'}`:
+    - Log warn y continuar sin texto (el aiOrchestrator verá el audio como inentendible y probablemente escalará a humano por su lógica actual).
+
+#### 4) Controllers + rutas
+
+`msg_ninesys/controllers/whatsappController.js` (MODIFIED):
+- `GET /usage/:companyId?month=YYYY-MM` → `{month, providers:[{name,usd,calls}], total_usd}`.
+- `GET /usage/:companyId/year?year=YYYY` → serie mensual por proveedor (para gráfico).
+- `GET /tenant-config/:companyId` → config STT.
+- `PUT /tenant-config/:companyId` body `{stt_enabled, stt_monthly_usd_limit, stt_long_audio_seconds}`.
+
+`msg_ninesys/routes/index.js` (MODIFIED): registrar los 4 endpoints anteriores.
+
+#### 5) Variables de entorno
+
+`msg_ninesys/.env` (documentar en `.env.example`):
+- `OPENAI_API_KEY=sk-...` (si no existe).
+- `OPENAI_WHISPER_MODEL=whisper-1` (override opcional).
+
+### Frontend — app_multi
+
+#### 6) Panel de costos en Configuración WhatsApp
+
+`app_multi/components/whatsapp/WaConfiguracion.vue` (MODIFIED):
+- Nueva sección **"Consumo de IA y transcripciones"** colapsable:
+    - Resumen del mes actual: dos tarjetas (Whisper: $X.XX • N transcripciones) y (Gemini: $X.XX • N llamadas). Total del mes destacado.
+    - Barra de progreso "Whisper: $X.XX / $3.00 (límite mensual)" con color según porcentaje (verde <70%, amarillo 70-90%, rojo >90%).
+    - Selector de mes (dropdown con los últimos 12 meses) para ver históricos.
+    - (Opcional) gráfico de líneas con Chart.js o similar si ya hay librería.
+- Nueva sección **"Configuración de transcripciones (STT)"**:
+    - Toggle "Activar transcripción de notas de voz" (`stt_enabled`).
+    - Input numérico "Límite mensual en USD" (`stt_monthly_usd_limit`).
+    - Input numérico "Pasar a humano si el audio dura más de (segundos)" (`stt_long_audio_seconds`, default 120).
+    - Texto explicativo: "Las notas de voz que superen este tiempo o el límite de gasto mensual se enviarán a un agente humano."
+- Usar `$wsApi` para los 4 endpoints nuevos.
+
+#### 7) Mostrar transcripciones en el chat
+
+`app_multi/components/whatsapp/WaInbox.vue` (MODIFIED):
+- En el bloque de render de `msg.type === 'audio'`, debajo del `<audio>`:
+    ```html
+    <div v-if="msg.transcript" class="wa-transcript">
+      <small><b-icon icon="mic-fill" /> {{ msg.transcript }}</small>
+    </div>
+    ```
+    Con estilo tipo "nota al pie" (itálica, tamaño pequeño, color gris).
+- El backend debe incluir `transcript` en el mapping de `listMessages` (ya hay un SELECT, solo hay que agregar la columna al SELECT y al map).
+
+---
+
+## Orden de implementación recomendado
+
+1. **Migración 007** + replicar en template de tenants + aplicar a existentes.
+2. **`sttService.js`** con `transcribe()` aislado y testeable (escribir test unitario con audio fixture).
+3. **`usageStore.js`** + upsert de acumulado mensual.
+4. **Integración en waManager** (el cambio más delicado: afecta el flujo de mensajes entrantes).
+5. **Endpoints + rutas** de config y usage.
+6. **UI de Configuración** (el usuario quiere verlo funcionando en el panel).
+7. **Mostrar transcript en WaInbox** (último: es polish).
+
+---
+
+## Casos borde y consideraciones
+
+- **Idempotencia del billing:** el upsert de `wa_usage_monthly` suma. Si `transcribeIfEligible` se llama dos veces sobre el mismo mensaje (por algún retry externo), cobra dos veces. **Mitigación:** antes de llamar a Whisper, verificar que `wa_messages.transcript IS NULL` para ese `wa_message_id`; si ya tiene, no re-transcribir.
+- **Múltiples tenants simultáneos:** el `pool` viene del tenantResolver, así que `wa_tenant_config` y `wa_usage_monthly` son **por tenant**. No mezclar.
+- **Whisper language hint:** se puede pasar `language=es` por default; Whisper detecta bien pero el hint mejora precisión. Guardable en `wa_tenant_config.stt_language` si se quiere configurable.
+- **Privacidad:** las transcripciones se guardan en la BD del tenant. Si algún cliente pide "no guardar voz transcrita", agregar columna `wa_tenant_config.stt_store_transcript` (default 1) y condicionar el INSERT.
+- **Audios que no son ptt:** la regla dice "solo notas de voz". Chequear `m.message.audioMessage.ptt === true` en el dispatcher antes de invocar STT. Audios "musicales" (archivos adjuntos) no se transcriben.
+- **Costo Gemini:** requiere capturar el uso de tokens de cada llamada en el orchestrator actual y convertir a USD con el pricing del modelo usado. Si cambia de modelo o de pricing, hay que actualizar constantes. Aislarlo en una función `geminiPricing.costUsd(modelId, usage)`.
+
+---
+
+## Notas para retomar después de cerrar la terminal
+
+- **Contexto completo:** este log + `logs_gemini/2026-04-20_00-00-00_tarea-fase_d_asignacion_vendedores.log` (el otro track activo) + memoria auto-guardada en `~/.claude/projects/-home-developer-Escritorio-niesys-msg-ninesys/memory/`.
+- **Branch actual:** `feat/baileys-migration`.
+- **Razón de la pausa:** el usuario prefirió terminar primero la asignación de vendedores (Fase D) porque sin eso la transferencia a humano por audio largo no tiene a quién pasarle la conversación.
+- **Dependencia cruzada con Fase D:** los casos "pasar a humano" (audio largo, límite alcanzado, error STT) usan el mismo mecanismo de asignación que la Fase D define. Implementar STT **después de D.2** como mínimo, para que los handoffs auto-elijan vendedor disponible.
+- **Directorios clave:**
+    - Backend: `/home/developer/Escritorio/niesys/msg_ninesys`
+    - Frontend: `/home/developer/Escritorio/niesys/app_multi`
+    - Template de tenants: `/home/developer/Escritorio/niesys/ninesys-api/public/model/create_new_company_api_emp_N.sql`
+- **Secret pendiente:** coordinar con el usuario la carga de `OPENAI_API_KEY` en `.env` de producción antes de activar el feature.
+
+---
+
+## Locadores rápidos (verificados con grep 2026-04-20)
+
+### Entrada de Gemini
+- **Archivo:** `msg_ninesys/src/services/aiService.js`. Este es el verdadero "orchestrator" — en versiones previas del log se le llamaba `aiOrchestrator` pero ese nombre **no existe** en el repo. **Leer "aiOrchestrator" como `aiService` en todo este log.**
+- `aiService.js:387` lee los últimos N mensajes de la conversación en orden cronológico ASC (bloque relevante para inyectar la transcripción como `msg.body`).
+
+### mediaStore — pasarle el archivo a Whisper
+- **Layout físico:** `<STORAGE_ROOT>/media/{companyId}/{YYYY-MM}/{waMessageId}.{ext}`
+    - `STORAGE_ROOT = process.env.MEDIA_STORAGE_ROOT || <repo>/storage`
+    - `MEDIA_ROOT = <STORAGE_ROOT>/media`
+- **En BD** (`wa_messages.media_url`) se guarda solo la **relativePath** (`{companyId}/{YYYY-MM}/{waMessageId}.{ext}`).
+- **Para Whisper:** usar `mediaStore.resolveRelative(relativePath)` (`src/services/mediaStore.js:131`) que devuelve el path absoluto. Decisión del usuario: **guardar siempre la ruta completa** durante la llamada a Whisper "por si acaso", y deducir la relativa a partir de ella solo si el servicio necesita otra cosa. En práctica: usa `resolveRelative` una vez, pasa el string absoluto a `sttService.transcribe` y listo.
+
+### Propagación de `ptt` y `seconds` (método menos invasivo — decisión del usuario)
+- `conversationStore.ingestMessage(pool, m, opts)` hoy **no persiste** `ptt` ni `seconds`. Modificar el schema para agregar columnas sería invasivo y trae coste de migración.
+- **Método acordado (menos invasivo):** pasar ambos campos **in-memory** a través del parámetro `opts` del ingest y reenviarlos al `sttService`. `opts` ya se usa para el `mediaHandler`. Ejemplo:
+    ```js
+    const ptt = !!m.message?.audioMessage?.ptt;
+    const seconds = Number(m.message?.audioMessage?.seconds) || 0;
+    const ingested = await conversationStore.ingestMessage(pool, m, { ...opts, ptt, seconds });
+    // después en waManager, pasar { ptt, seconds } a sttService.transcribeIfEligible
+    ```
+- **Dónde extraerlos:** en el handler `messages.upsert` de Baileys dentro de `waManager.js`, ANTES de llamar a `ingestMessage`. Los tipos Baileys ya exponen `m.message.audioMessage.ptt` y `.seconds`.
+
+### Cliente HTTP para Whisper
+- **Decisión del usuario 2026-04-20:** `fetch` crudo (Node 18+ lo incluye nativo) es suficiente. No agregar SDK de OpenAI para no inflar dependencias.
+- Patrón:
+    ```js
+    const form = new FormData();
+    form.append('file', fs.createReadStream(absPath));
+    form.append('model', 'whisper-1');
+    // opcional: form.append('language', 'es');
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body: form,
+    });
+    ```
+    Nota: en Node el `FormData` nativo no acepta streams de `fs.createReadStream` — usar `undici` (ya es dep de Baileys) o `form-data` (lib clásica) para streams binarios; validar al implementar.
+
+### Tests / fixtures
+- Aclaración sobre un punto del log original: **un "fixture" de audio** es un archivo `.ogg` de muestra que acompaña al test unitario de `sttService.transcribe` para verificar el parseo de respuesta sin gastar USD reales (se mockea `fetch`). **No es obligatorio para v1.** Si hay tiempo al final, colocar en `test/fixtures/voice-note.ogg` junto con un test que mockea la respuesta de Whisper. Si no, saltarlo — el flujo se valida manualmente enviando una nota de voz real al número del tenant.
+
+### Migraciones existentes y gap numeración
+- Hoy: `001_wa_tables.sql`, `003_chat_soft_delete.sql`, `005_assignment_ownership.sql`. `002` y `004` no existen (convención del proyecto).
+- **No hay script de apply-all a tenants existentes.** Si STT se implementa después de D.2 (recomendado), probablemente el script genérico ya exista. Si no, hay que crearlo (ver log D, sección "Decisiones abiertas" #5).
+
+---
+
+## Decisiones abiertas
+
+1. **Tope mensual por default.** Cerrado: `stt_monthly_usd_limit = 3.00` USD. Editable por tenant vía UI.
+2. **Idioma por default para el hint de Whisper.** Sugerencia: `language='es'` en la primera versión (los tenants actuales son venezolanos). Hacerlo configurable en `wa_tenant_config.stt_language` en v2 si se pide.
+3. **¿Guardar siempre transcript o hacer opt-out por tenant?** V1: siempre guarda (para auditoría). Opt-out se introduce solo si algún cliente lo pide (`wa_tenant_config.stt_store_transcript`).
+4. **Texto automático cuando se pasa a humano por audio largo o cap alcanzado.** V1 hardcoded en español. Si se pide multi-idioma, migrar a `wa_tenant_config`.
+5. **Retry de Whisper ante 5xx.** V1: 1 retry con backoff 1s. Si falla, se loguea `transcript_error` y se deja que el aiService decida escalar a humano por su lógica normal.

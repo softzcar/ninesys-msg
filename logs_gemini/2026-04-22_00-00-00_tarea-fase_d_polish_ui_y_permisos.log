@@ -1,0 +1,73 @@
+- **Solicitud del Usuario:** Arreglar bugs detectados tras desplegar Fase D.4 — 404 del endpoint de "Devolver a cola", dropdown "Asignar vendedor" siempre disabled, ausencia de contexto sobre qué significa cada tab (Mías / Cola / Todas), y ausencia de control de acceso al módulo WhatsApp para vendedores.
+- **Fecha y Hora:** 2026-04-22
+- **Estado actual:** ✅ TODO IMPLEMENTADO Y VERIFICADO EN ENTORNO LOCAL. Cambios de frontend aún sin deploy.
+
+---
+
+## ✅ Bug 1 — 404 `POST /conversations/:companyId/:jid/return-to-queue`
+
+### Diagnóstico
+- El commit `bae9460` (backend de Fase D.4) estaba local en `feat/baileys-migration` sin pushear ni desplegar al VPS. La ruta no existía en producción → Express respondía `Cannot POST ...`.
+
+### Resolución
+- Push de `msg_ninesys` rama `feat/baileys-migration` y deploy al VPS (`ws.nineteengreen.com`) + PM2 restart.
+- Verificado: `/return-to-queue` responde y reasigna correctamente.
+
+---
+
+## ✅ Bug 2 — Dropdown "Asignar vendedor" siempre disabled
+
+### Raíz
+- `GET /empleados` (ninesys-api) devuelve `{ items, fields }`, **no** un array plano.
+- `fetchVendors` hacía `Array.isArray(data) ? data : []` → siempre caía al `[]` → `vendors.length === 0` → `<b-dropdown :disabled="!vendors.length">`.
+
+### Resolución (frontend `app_multi/components/whatsapp/WaInbox.vue`)
+- Aceptar ambos formatos: `Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : []`.
+- Filtrar por departamento: solo empleados que pertenezcan a **Administración (id 7)** o **Comercialización (id 8)**. Un empleado puede estar en varios departamentos; basta con que incluya uno de los dos. Constante `ALLOWED_DEPTS = new Set([7, 8])`.
+- Log de diagnóstico: `[WaInbox] fetchVendors OK — total recibidos: N | elegibles (dptos 7/8): M`.
+
+---
+
+## ✅ Bug 3 — Falta de contexto visual de las tabs de vista
+
+### Problema
+- Usuario confundido sobre qué mostraba "Cola" frente a "Mías"/"Todas" (por ejemplo: una sola conversación asignada → cola vacía, aunque había muchas conversaciones en la base de datos, gestionadas por IA).
+
+### Resolución (`WaInbox.vue`)
+- Computed `viewDescription` que varía según `viewMode`:
+  - **Mías:** "Conversaciones asignadas a ti."
+  - **Cola:** "Conversaciones en modo humano sin vendedor asignado. Tómalas o reasígnalas desde el chat."
+  - **Todas:** "Todas las conversaciones de la empresa (incluye las gestionadas por IA)."
+- `<p class="wa-view-desc">` entre los filtros secundarios y la lista de chats. Estilo discreto: `0.75rem`, color `#6c757d`, `line-height: 1.3`.
+
+---
+
+## ✅ Bug 4 — Control de acceso al módulo WhatsApp
+
+### Requerimiento
+- Vendedor (Comercialización) debe poder entrar a `/whatsapp` (Conversaciones), pero no a los demás sub-módulos.
+- Sidebar debe ocultar Agentes IA / Configuración IA / Estado de Conexión al vendedor.
+
+### Resolución
+- **`pages/whatsapp/index.vue`**: `v-if="id_modulo === 1 || id_modulo === 2"` (Administración **o** Comercialización). El resto de páginas (`agentes`, `configuracion`, `conexion`) mantiene `id_modulo === 1` → si el vendedor escribe la URL, recibe `<accessDenied>`. La seguridad no depende del sidebar.
+- **`components/layout/AppSidebar.vue`**:
+  - Nuevo computed `isAdmin()` → `Number(dataUser?.acceso) === 1`.
+  - `v-if="isAdmin"` sobre los 3 `<li>` de los sub-links admin. El vendedor solo ve el item padre "WhatsApp" con el subitem "Conversaciones".
+
+---
+
+## 📦 Pendiente para producción
+
+1. **Commit + push** de `app_multi` con estos 4 cambios.
+2. **Build + deploy** de `app_multi` al VPS.
+3. Verificar en producción:
+   - Login como admin → ve "Mías / Cola / Todas" + dropdown de vendedores poblado + sub-links admin en sidebar.
+   - Login como vendedor (Comercialización) → solo "Mías", solo link "Conversaciones" en sidebar, intentar entrar a `/whatsapp/agentes` muestra `<accessDenied>`.
+
+---
+
+## 🔜 Pendiente fuera de esta tarea
+- **Gating de rol en backend**: un vendedor con token válido aún podría llamar directamente a `/return-to-queue` o `/assign`. No crítico hoy (usuarios internos), pero cerrarlo si se abre acceso externo.
+- **Agente IA consumiendo `/internal/business-hours`**: siguiente tarea acordada.
+- **Más endpoints internos para IA** (p. ej. productos).
+- **STT Whisper**: plan en `2026-04-20_00-00-01_plan-mensajes_voz_ia_whisper.log`.
