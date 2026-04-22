@@ -374,11 +374,17 @@ async function init(idEmpresa) {
                 });
                 if (!result) continue;
                 if (type === 'notify') {
+                    // Si la conversación estaba en papelera y se restauró
+                    // automáticamente (ver conversationStore.ingestMessage),
+                    // avisamos al frontend para que la vuelva a mostrar.
+                    if (result.restored) {
+                        emit(id, 'conversation:restored', { companyId: id, jid: result.jid });
+                    }
                     emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
                     emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
                     // Fase 8: auto-respuesta IA (best-effort, no bloquea el ingest)
                     if (!result.message.from_me) {
-                        // Red de seguridad: notas de voz > AUDIO_HANDOFF_SECONDS
+                        // Red de seguridad: audios > AUDIO_HANDOFF_SECONDS
                         // pasan a humano en vez de intentar IA (no hay STT aún).
                         const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
                         if (!handedOff) {

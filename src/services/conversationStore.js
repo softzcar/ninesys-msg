@@ -120,7 +120,19 @@ async function ingestMessage(pool, m, opts = {}) {
     );
     if (ins.affectedRows === 0) return null;
 
-    // 2) Upsert conversación + bump last_*
+    // 2) Si la conversación estaba en papelera y llega nueva actividad,
+    //    la restauramos (affectedRows > 0 cuando realmente cambió). Los
+    //    mensajes antiguos quedan soft-deleted — solo vuelve a aparecer la
+    //    conversación con el mensaje nuevo en adelante.
+    const [restoreRes] = await pool.query(
+        `UPDATE wa_conversations
+         SET deleted_at = NULL, deleted_by = NULL
+         WHERE jid = ? AND deleted_at IS NOT NULL`,
+        [jid]
+    );
+    const restored = restoreRes.affectedRows > 0;
+
+    // 3) Upsert conversación + bump last_*
     const lastPreview = (body || `[${type}]`).slice(0, 500);
     await pool.query(
         `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
@@ -136,6 +148,7 @@ async function ingestMessage(pool, m, opts = {}) {
 
     return {
         jid,
+        restored,
         message: { wa_message_id, from_me: !!from_me, sender, type, body, media_url, media_mime, ts, status: 'delivered' },
         conversation: { jid, last_message: lastPreview, last_ts: ts, unread_delta: from_me ? 0 : 1 },
     };
