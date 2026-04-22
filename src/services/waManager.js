@@ -38,6 +38,7 @@ const audioTranscode = require('./audioTranscode');
 const aiService = require('./aiService');
 const assignmentPolicy = require('./assignmentPolicy');
 const internalMessenger = require('./internalMessenger');
+const customerLookup = require('./customerLookup');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -246,17 +247,35 @@ async function maybeHandoffLongVoiceNote(idEmpresa, pool, ingestResult, rawMsg) 
  * Escala una conversación a un humano automáticamente (handoff).
  * Usa la política de asignación para elegir al mejor vendedor disponible.
  * Si no hay nadie, la deja en cola (assigned_to = null).
+ *
+ * opts.forcedVendorId: salta pickNextVendor y asigna al vendedor indicado.
+ *   Se usa para la auto-asignación de clientes recurrentes (ver
+ *   customerLookup). El caller ya verificó que el vendedor está activo y
+ *   en dpto 7/8 antes de forzarlo.
  */
 async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {}) {
     try {
-        log.info({ tenantId: idEmpresa, jid, reason }, 'Iniciando handoff automático a humano');
+        log.info({ tenantId: idEmpresa, jid, reason, forcedVendorId: opts.forcedVendorId || null },
+            'Iniciando handoff automático a humano');
 
-        // 1. Elegir vendedor
-        const vendorId = await assignmentPolicy.pickNextVendor({
-            pool,
-            jid,
-            excludeUserId: opts.excludeUserId || null,
-        });
+        // 1. Elegir vendedor. Con forcedVendorId saltamos la política y
+        //    usamos al vendedor histórico. Igual aseguramos que exista una
+        //    fila en wa_vendor_state para no romper el seguimiento de carga.
+        let vendorId;
+        if (opts.forcedVendorId != null) {
+            vendorId = Number(opts.forcedVendorId);
+            await pool.query(
+                `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active)
+                 VALUES (?, 1, 0)`,
+                [vendorId]
+            ).catch(() => {});
+        } else {
+            vendorId = await assignmentPolicy.pickNextVendor({
+                pool,
+                jid,
+                excludeUserId: opts.excludeUserId || null,
+            });
+        }
 
         // 2. Marcar en DB de forma atómica: mode/ai_enabled/assigned_to +
         //    assigned_at=NOW (reloj de timeout D.3) + last_vendor_reply_at=NULL.
@@ -396,11 +415,38 @@ async function init(idEmpresa) {
                     emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
                     // Fase 8: auto-respuesta IA (best-effort, no bloquea el ingest)
                     if (!result.message.from_me) {
-                        // Red de seguridad: audios > AUDIO_HANDOFF_SECONDS
-                        // pasan a humano en vez de intentar IA (no hay STT aún).
-                        const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
-                        if (!handedOff) {
-                            maybeAutoReply(id, pool, result);
+                        // Auto-asignación a vendedor histórico: al crear la
+                        // conversación por primera vez, o al restaurarla
+                        // desde papelera. Nunca para grupos. Si el cliente
+                        // ya tuvo un vendedor activo + en dpto 7/8, se le
+                        // asigna a ese vendedor y salta la IA.
+                        let autoAssigned = false;
+                        if ((result.conversationCreated || result.restored) && !result.isGroup) {
+                            try {
+                                const resolved = await customerLookup.resolveVendorForJid(pool, result.jid);
+                                if (resolved?.vendorId) {
+                                    log.info({
+                                        tenantId: id, jid: result.jid,
+                                        customerId: resolved.customerId,
+                                        vendorId: resolved.vendorId,
+                                    }, 'Cliente recurrente detectado → asignando al vendedor histórico');
+                                    await handoffToHuman(id, pool, result.jid, 'customer_returning', {
+                                        forcedVendorId: resolved.vendorId,
+                                    });
+                                    autoAssigned = true;
+                                }
+                            } catch (e) {
+                                log.warn({ err: e, tenantId: id, jid: result.jid },
+                                    'auto-asignación por cliente recurrente falló (se sigue con flujo normal)');
+                            }
+                        }
+                        if (!autoAssigned) {
+                            // Red de seguridad: audios > AUDIO_HANDOFF_SECONDS
+                            // pasan a humano en vez de intentar IA (no hay STT aún).
+                            const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
+                            if (!handedOff) {
+                                maybeAutoReply(id, pool, result);
+                            }
                         }
                     }
                 }

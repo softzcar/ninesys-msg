@@ -132,9 +132,12 @@ async function ingestMessage(pool, m, opts = {}) {
     );
     const restored = restoreRes.affectedRows > 0;
 
-    // 3) Upsert conversación + bump last_*
+    // 3) Upsert conversación + bump last_*.
+    //    mysql2 affectedRows: 1 = insert nuevo, 2 = update, 0 = sin cambios.
+    //    Usamos conversationCreated para disparar auto-asignación a vendedor
+    //    histórico solo cuando se crea la conversación por primera vez.
     const lastPreview = (body || `[${type}]`).slice(0, 500);
-    await pool.query(
+    const [upsertRes] = await pool.query(
         `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
          VALUES (?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
@@ -145,10 +148,14 @@ async function ingestMessage(pool, m, opts = {}) {
             updated_at   = CURRENT_TIMESTAMP`,
         [jid, pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
     );
+    const conversationCreated = upsertRes.affectedRows === 1;
 
     return {
         jid,
         restored,
+        conversationCreated,
+        isGroup: !!isGroup,
+        fromMe: !!from_me,
         message: { wa_message_id, from_me: !!from_me, sender, type, body, media_url, media_mime, ts, status: 'delivered' },
         conversation: { jid, last_message: lastPreview, last_ts: ts, unread_delta: from_me ? 0 : 1 },
     };

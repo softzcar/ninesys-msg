@@ -94,6 +94,7 @@ function reasonToHuman(reason) {
         case 'audio_too_long':   return 'El cliente envió un audio mayor a 2 minutos';
         case 'timeout':          return 'Liberación automática por inactividad';
         case 'sticky':           return 'Cliente con historial contigo';
+        case 'customer_returning': return 'Cliente recurrente que ya atendiste antes';
         case 'queue':            return 'Chat tomado desde la cola';
         default:                 return reason ? `Motivo: ${reason}` : null;
     }

@@ -1,0 +1,127 @@
+- **Solicitud del Usuario:** Cuando llegue un mensaje de WhatsApp de un cliente ya registrado en la tabla `customers`, asignar automáticamente la conversación al último vendedor que atendió una orden de ese cliente (campo `ordenes.responsable`), siempre que el vendedor esté activo y pertenezca a los departamentos Administración (7) o Comercialización (8). Si no cumple, el chat sigue el flujo IA normal. Notificar al vendedor por la mensajería interna.
+- **Fecha y Hora:** 2026-04-22
+- **Estado actual:** ✅ IMPLEMENTADO EN LOCAL. Pendiente de deploy + prueba end-to-end desde un número real cuyo dueño sea cliente en `customers` con orden atendida por un vendedor activo de dpto 7/8.
+
+---
+
+## 🎯 Decisiones de diseño acordadas con el usuario
+
+1. **Efecto:** Option A — asignación directa (`mode='human'`, `ai_enabled=0`, `assigned_to=<vendedor histórico>`). No pasa por IA, no hace fan-out.
+2. **Match teléfono → cliente:** últimos 10 dígitos del JID comparados contra `REGEXP_REPLACE(customers.phone, '[^0-9]', '')`. MySQL 8 ya está en uso, así que `REGEXP_REPLACE` es soportado.
+3. **"Último vendedor":** `MAX(ordenes.moment)` por `responsable` para un `id_wp` dado (el `_id` del cliente).
+4. **Elegibilidad del vendedor:** `empresas_usuarios.activo = 1` **AND** pertenece a dpto 7 u 8 (`empresas_usuarios_departamentos`). Ambas condiciones obligatorias, resueltas en un único SELECT con JOIN a `api_empresas.*` desde el pool del tenant (mismo patrón que `/empleados`).
+5. **Cuándo dispara:** al **crear** la conversación (`wa_conversations` primera vez) o al **restaurarla desde papelera** (el chat vuelve a aparecer tras un soft-delete + nuevo mensaje inbound). No en mensajes subsecuentes de una conversación que ya tiene estado. Nunca para grupos.
+6. **Producción Interna (customer `_id = 1`):** ignorar. Un mensaje cuyo teléfono coincida con el cliente interno administrativo no debe disparar auto-asignación.
+7. **Cliente existe pero sin vendedor elegible:** se trata como cliente nuevo → flujo IA normal. No queda en cola automática; la IA ya responde.
+
+---
+
+## 🔧 Implementación
+
+### Nuevo servicio: `src/services/customerLookup.js`
+
+Tres funciones aisladas + una orquestadora, todas puras (reciben `pool`, no sessions):
+
+- **`last10DigitsFromJid(jid)`** — Extrae los últimos 10 dígitos normalizados del JID (`'584140326592@s.whatsapp.net' → '4140326592'`). Devuelve `null` si quedan menos de 7 dígitos (defensivo).
+- **`findCustomerByJid(pool, jid)`** — `SELECT _id, first_name, last_name, phone FROM customers WHERE _id <> 1 AND REGEXP_REPLACE(phone, '[^0-9]', '') LIKE CONCAT('%', ?) ORDER BY moment DESC LIMIT 1`. Constante `CUSTOMER_SYSTEM_ID = 1` para excluir "Producción Interna".
+- **`findLastEligibleVendor(pool, customerId)`** — Un solo SELECT con JOIN al catálogo central:
+  ```sql
+  SELECT o.responsable AS vendor_id, MAX(o.moment) AS last_order
+  FROM ordenes o
+  JOIN api_empresas.empresas_usuarios u
+       ON u.id_usuario = o.responsable
+  JOIN api_empresas.empresas_usuarios_departamentos d
+       ON d.id_empleado = u.id_usuario
+  WHERE o.id_wp = ? AND o.responsable IS NOT NULL
+    AND u.activo = 1
+    AND d.id_departamento IN (7, 8)
+  GROUP BY o.responsable
+  ORDER BY last_order DESC
+  LIMIT 1
+  ```
+  El JOIN resuelve "activo + dpto 7/8" en un round-trip; si ningún vendedor del histórico cumple devuelve `null`.
+- **`resolveVendorForJid(pool, jid)`** — orquesta ambas y devuelve `{ customerId, customerName, vendorId }` o `null`. Cualquier error → `log.warn` y `null` (nunca lanza — el caller debe seguir con flujo IA).
+
+### `src/services/conversationStore.js` — `ingestMessage`
+
+Necesitábamos un signal confiable de "conversación recién creada". MySQL `INSERT ... ON DUPLICATE KEY UPDATE` reporta `affectedRows = 1` cuando es un insert nuevo, `2` cuando actualiza. Capturé el resultado y expuse tres flags en el retorno:
+
+- `conversationCreated: boolean` — primera vez que se ve el JID.
+- `isGroup: boolean`  — útil para el filtro (no auto-asignamos grupos).
+- `fromMe: boolean` — no se usa aún aquí pero sirve para futuras decisiones.
+
+(La lógica de "restore automático al recibir un mensaje sobre una conversación en papelera" ya existía y ya devolvía `restored`.)
+
+### `src/services/waManager.js` — `handoffToHuman`
+
+Agregado `opts.forcedVendorId`:
+
+- Si viene definido, **salta** `assignmentPolicy.pickNextVendor` y usa ese vendedor directamente.
+- Asegura una fila en `wa_vendor_state` (patrón existente en otros puntos del código) para no romper el conteo de carga.
+- El resto del flujo es idéntico: `recordAutoHandoff`, emit `conversation:handoff`, `internalMessenger.notifyVendorOfAssignment`.
+
+### `src/services/waManager.js` — handler `messages.upsert`
+
+Nuevo bloque antes del audio-handoff y del `maybeAutoReply`, ejecutado solo para mensajes entrantes (`!from_me`) y sólo cuando la conversación es nueva o recién restaurada:
+
+```js
+if ((result.conversationCreated || result.restored) && !result.isGroup) {
+    const resolved = await customerLookup.resolveVendorForJid(pool, result.jid);
+    if (resolved?.vendorId) {
+        await handoffToHuman(id, pool, result.jid, 'customer_returning', {
+            forcedVendorId: resolved.vendorId,
+        });
+        autoAssigned = true;
+    }
+}
+if (!autoAssigned) {
+    const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
+    if (!handedOff) maybeAutoReply(id, pool, result);
+}
+```
+
+- Si `resolveVendorForJid` lanza, se loguea warn y **no** se rompe el ingest; cae al flujo normal (audio-handoff o IA).
+- `autoAssigned = true` evita que el mismo mensaje dispare IA además de la asignación (sería ruido).
+- Incluir `result.restored` cubre el caso: chat borrado desde el panel + cliente conocido vuelve a escribir → se restaura y se re-asigna al vendedor histórico en vez de quedar en papelera "zombi" con assigned_to del pasado.
+
+### `src/services/internalMessenger.js` — `reasonToHuman`
+
+Nuevo case: `'customer_returning' → 'Cliente recurrente que ya atendiste antes'`. Hace que el mensaje interno que recibe el vendedor sea descriptivo del motivo exacto.
+
+---
+
+## 🔍 Por qué fue seguro saltar `pickNextVendor`
+
+`assignmentPolicy.pickNextVendor` respeta disponibilidad (`is_available`) y carga (`max_active`). Con `forcedVendorId` ignoramos ambas cosas **a propósito**: la regla de negocio del usuario es "siempre al histórico", incluso si está ocupado o marcado no-disponible. Esto coincide con la semántica de *sticky ownership* que ya existía para reasignaciones manuales. Si en el futuro se quiere honrar `is_available`, lo natural sería filtrar en `findLastEligibleVendor` (un JOIN extra a `wa_vendor_state`), no en `handoffToHuman`.
+
+---
+
+## 🧪 Verificación previa al deploy
+
+- `node -c` sobre `customerLookup.js`, `internalMessenger.js`, `conversationStore.js`, `waManager.js` → sintaxis OK.
+- El JOIN cruzado `api_emp_{id}.ordenes ↔ api_empresas.empresas_usuarios` ya es usado por `/empleados` de ninesys-api; el pool del tenant tiene permisos de lectura sobre `api_empresas`.
+
+### Escenarios a validar en staging
+
+1. **Cliente recurrente + vendedor elegible:** mensaje entrante → chat creado con `mode='human'`, `ai_enabled=0`, `assigned_to=<histórico>`. Vendedor recibe "Cliente recurrente que ya atendiste antes" por mensajería interna.
+2. **Cliente recurrente + vendedor inactivo:** el JOIN descarta; se trata como cliente nuevo → IA responde. Sin notificación interna.
+3. **Cliente no existente en `customers`:** `findCustomerByJid` devuelve null → IA responde.
+4. **Producción Interna (`customer._id = 1`):** excluido por WHERE → se ignora aunque el teléfono matchee.
+5. **Mensaje en conversación ya existente:** `conversationCreated=false` y `restored=false` → no se re-resuelve (performance + evita pisar assigns manuales).
+6. **Chat en papelera + cliente vuelve a escribir:** `restored=true` → se re-resuelve → vendedor histórico recibe aviso.
+7. **Grupo:** `isGroup=true` → se salta.
+
+---
+
+## 📂 Archivos modificados
+
+- `src/services/customerLookup.js` — nuevo.
+- `src/services/conversationStore.js` — `ingestMessage` ahora retorna `conversationCreated`, `isGroup`, `fromMe`.
+- `src/services/waManager.js` — `handoffToHuman` acepta `opts.forcedVendorId`; handler `messages.upsert` incluye el nuevo bloque de auto-asignación.
+- `src/services/internalMessenger.js` — nuevo motivo `'customer_returning'`.
+
+## 📦 Pendiente para producción
+
+- Push de `feat/baileys-migration` + deploy al VPS + `pm2 restart`.
+- Validar en staging los 7 escenarios listados.
+- Observar `log.info "Cliente recurrente detectado → asignando al vendedor histórico"` en los logs del tenant de prueba.
