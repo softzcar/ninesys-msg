@@ -84,21 +84,35 @@ async function findLastEligibleVendor(pool, customerId) {
  */
 async function resolveVendorForJid(pool, jid) {
     try {
+        const last10 = last10DigitsFromJid(jid);
         const customer = await findCustomerByJid(pool, jid);
-        if (!customer) return null;
+        if (!customer) {
+            log.info({ jid, last10 }, '[customerLookup] no hay customer con ese teléfono');
+            return null;
+        }
         const vendorId = await findLastEligibleVendor(pool, customer._id);
-        if (!vendorId) return null;
+        if (!vendorId) {
+            log.info(
+                { jid, customerId: customer._id },
+                '[customerLookup] customer existe pero no tiene vendedor elegible (activo + dpto 7/8)'
+            );
+            return null;
+        }
         const name = [customer.first_name, customer.last_name]
             .filter(Boolean)
             .join(' ')
             .trim() || null;
+        log.info(
+            { jid, customerId: customer._id, vendorId, customerName: name },
+            '[customerLookup] match OK — vendedor histórico resuelto'
+        );
         return {
             customerId: customer._id,
             customerName: name,
             vendorId,
         };
     } catch (e) {
-        log.warn({ err: e, jid }, 'resolveVendorForJid falló');
+        log.warn({ err: e, jid }, '[customerLookup] resolveVendorForJid falló');
         return null;
     }
 }

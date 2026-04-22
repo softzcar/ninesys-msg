@@ -421,6 +421,12 @@ async function init(idEmpresa) {
                         // ya tuvo un vendedor activo + en dpto 7/8, se le
                         // asigna a ese vendedor y salta la IA.
                         let autoAssigned = false;
+                        log.info({
+                            tenantId: id, jid: result.jid,
+                            conversationCreated: !!result.conversationCreated,
+                            restored: !!result.restored,
+                            isGroup: !!result.isGroup,
+                        }, '[autoAssign] evaluando condiciones');
                         if ((result.conversationCreated || result.restored) && !result.isGroup) {
                             try {
                                 const resolved = await customerLookup.resolveVendorForJid(pool, result.jid);
