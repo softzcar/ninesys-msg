@@ -14,6 +14,7 @@
  */
 
 const log = require('../lib/logger').createLogger('internalMessenger');
+const lidMapping = require('./lidMapping');
 
 const INTERNAL_MSG_URL = process.env.INTERNAL_MSG_URL
     || 'https://api.nineteengreen.com/ws/build-message/interno';
@@ -116,8 +117,20 @@ async function notifyVendorOfAssignment(idEmpresa, pool, { vendorId, jid, reason
             [jid]
         );
         const contactName = convRows[0]?.name || null;
-        const phone = (jid.split('@')[0] || jid).replace(/^\+?/, '');
-        const who = contactName ? `${contactName} (+${phone})` : `+${phone}`;
+
+        // Si el jid es un LID (privacy de WhatsApp), el prefijo no es un
+        // teléfono real — hay que resolverlo contra wa_lid_phone_map. Baileys
+        // 6.7.21 pobla ese mapeo al primer mensaje vía senderPn, así que para
+        // cuando llegamos aquí ya suele estar disponible. Si aún no está,
+        // omitimos el teléfono en el mensaje (mostramos solo el nombre).
+        let phoneJid = jid;
+        if (lidMapping.isLidJid(jid)) {
+            phoneJid = (await lidMapping.resolvePhoneJid(pool, jid)) || null;
+        }
+        const phone = phoneJid ? (phoneJid.split('@')[0] || '').replace(/^\+?/, '') : null;
+        const who = contactName
+            ? (phone ? `${contactName} (+${phone})` : contactName)
+            : (phone ? `+${phone}` : 'Cliente sin identificar');
 
         const idDepartamento = await resolveDepartmentForEmployee(pool, vendorId);
         const humanReason = reasonToHuman(reason);
