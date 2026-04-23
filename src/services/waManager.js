@@ -39,6 +39,7 @@ const aiService = require('./aiService');
 const assignmentPolicy = require('./assignmentPolicy');
 const internalMessenger = require('./internalMessenger');
 const customerLookup = require('./customerLookup');
+const lidMapping = require('./lidMapping');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -485,6 +486,26 @@ async function init(idEmpresa) {
             await conversationStore.upsertChatNames(pool, chats);
         } catch (e) {
             log.error({ err: e, tenantId: id }, 'upsertChatNames falló');
+        }
+    });
+
+    // ---------- Mapeo LID ↔ JID-fono (Fase D — cliente recurrente) ----------
+    // Baileys expone el par por tres vías distintas; capturamos las tres y
+    // las persistimos en `wa_lid_phone_map`. Sin este mapeo no podemos
+    // resolver quién es el cliente cuando WhatsApp le asigna un LID al chat
+    // (privacy feature). Ver src/services/lidMapping.js.
+    sock.ev.on('contacts.upsert', async (contacts) => {
+        await lidMapping.upsertFromContacts(pool, contacts);
+    });
+    sock.ev.on('contacts.update', async (contacts) => {
+        await lidMapping.upsertFromContacts(pool, contacts);
+    });
+    sock.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
+        await lidMapping.upsertMapping(pool, { lid, phoneJid: jid });
+    });
+    sock.ev.on('messaging-history.set', async ({ contacts }) => {
+        if (Array.isArray(contacts) && contacts.length) {
+            await lidMapping.upsertFromContacts(pool, contacts);
         }
     });
 

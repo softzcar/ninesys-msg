@@ -1,0 +1,134 @@
+- **Solicitud del Usuario:** La auto-asignación al último vendedor no dispara para clientes recurrentes cuyo chat llega con JID en formato `@lid` (feature de privacidad de WhatsApp). Causa raíz: el LID no contiene el teléfono, por lo que `REGEXP_REPLACE(customers.phone, ...)` nunca matchea nada. Arreglar sin actualizar Baileys todavía — el upgrade se planificó como Etapa 2 separada.
+- **Fecha y Hora:** 2026-04-23
+- **Estado actual:** ✅ IMPLEMENTADO EN LOCAL. Listo para deploy + prueba end-to-end.
+
+---
+
+## 🎯 Diagnóstico (sesión anterior)
+
+- Test del usuario: tras purgar conversación + borrar chat desde el móvil del cliente, el nuevo mensaje llegó con `jid = 168255394209832@lid`. 15 dígitos, no es teléfono real.
+- `customerLookup.last10DigitsFromJid` extraía dígitos del LID → nunca matchea `customers.phone` → IA respondió como si fuera cliente nuevo.
+- El vendedor recibió un mensaje interno ajeno ("Liberación automática por inactividad") correspondiente al **otro** chat viejo que se liberó por timeout en paralelo — no al nuevo.
+- Confirmado en `node_modules/baileys/lib/WABinary/jid-utils.js`: Baileys 6.17.16 tiene `isLidUser(jid)` pero no convierte LID → PN automáticamente. La `MessageKey` del proto solo tiene 4 campos (sin `senderPn`).
+
+## 🧭 Decisión de arquitectura (plan en 2 etapas)
+
+El usuario preguntó si convenía actualizar Baileys a 7.x para resolver esto de raíz. Análisis:
+- No hay Baileys 7 estable — solo RCs (7.0.0-rc.9 del 2025-11-21).
+- La última 6.x estable es 6.7.21 (2025-11-06), pero **es ESM puro** (`"type": "module"`) y rompe nuestros `require('baileys')`.
+- Nuestra 6.17.16 es de marzo 2025 — ~13 meses atrás → empieza a ser riesgo de desincronización con el protocolo real de WhatsApp.
+- Verificación clave: tanto 6.17.16 como 6.7.21 **necesitan** el mismo trabajo del lado nuestro (tabla de mapeo + hooks a eventos). 6.7.21 agrega un campo `Contact.jid` explícito, pero no cambia fundamentalmente el enfoque.
+
+**Plan acordado:**
+- **Etapa 1 (esta tarea):** Construir el mapeo LID↔PN usando los eventos de 6.17.16. Bounded, reversible, sin tocar dependencias.
+- **Etapa 2 (rama aparte, pendiente):** Upgrade a Baileys 6.7.21. Implica port de `waManager.js` y `baileysAuthState.js` a `await import('baileys')` porque 6.7.21 es ESM.
+
+---
+
+## 🔧 Implementación — Etapa 1
+
+### Nueva migración: `db/migrations/008_lid_phone_mapping.sql`
+
+```sql
+CREATE TABLE IF NOT EXISTS wa_lid_phone_map (
+  lid_jid       VARCHAR(100) NOT NULL,
+  phone_jid     VARCHAR(100) NOT NULL,
+  pushname      VARCHAR(255) DEFAULT NULL,
+  first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (lid_jid),
+  KEY idx_phone_jid (phone_jid)
+) ENGINE=InnoDB;
+```
+
+PK en `lid_jid` → UPSERT idempotente, cada lote de contactos solo refresca `last_seen_at`. Vive en cada tenant (no en api_empresas).
+
+### Nuevo servicio: `src/services/lidMapping.js`
+
+API pública:
+- `isLidJid(jid)`, `isPhoneJid(jid)` — predicados.
+- `upsertMapping(pool, {lid, phoneJid, pushname})` — inserta o refresca. Valida los sufijos; si algún par no tiene el formato esperado lo descarta en silencio (no logea ruido).
+- `upsertFromContacts(pool, contacts[])` — extrae el par `(lid, phoneJid)` de cada `Contact` de Baileys y persiste. Devuelve conteo de mapeos nuevos para diagnóstico.
+- `resolvePhoneJid(pool, lidJid)` — dado un LID, devuelve el phone-JID o `null`.
+
+Todas las operaciones son best-effort (try/catch + log.warn) — jamás tiran el ingest de un mensaje.
+
+### Hooks en `src/services/waManager.js`
+
+Cuatro nuevos listeners sobre `sock.ev`, justo después de `chats.upsert`:
+
+```js
+sock.ev.on('contacts.upsert',  (contacts) => lidMapping.upsertFromContacts(pool, contacts));
+sock.ev.on('contacts.update',  (contacts) => lidMapping.upsertFromContacts(pool, contacts));
+sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => lidMapping.upsertMapping(pool, { lid, phoneJid: jid }));
+sock.ev.on('messaging-history.set', ({ contacts }) => {
+    if (Array.isArray(contacts) && contacts.length) lidMapping.upsertFromContacts(pool, contacts);
+});
+```
+
+Por qué las cuatro fuentes:
+- `contacts.upsert` / `contacts.update` — cuando cambia un contacto en tiempo real (agenda actualizada, cambio de nombre, etc.).
+- `chats.phoneNumberShare` — cuando el peer comparte explícitamente su número (evento raro, pero definitivo cuando ocurre).
+- `messaging-history.set` — **la fuente más importante al conectar**: Baileys hace dump de todos los contactos conocidos una vez tras el QR/reauth. Aquí es donde poblamos masivamente el mapeo para los clientes ya existentes.
+
+Esto implica: **al hacer pm2 restart después del deploy, el mapeo se popula para todos los contactos sincronizados históricamente**. No hace falta tocar nada manualmente.
+
+### `src/services/customerLookup.js` — resolveVendorForJid
+
+Agregado al inicio del flujo:
+
+```js
+let lookupJid = jid;
+if (lidMapping.isLidJid(jid)) {
+    const phoneJid = await lidMapping.resolvePhoneJid(pool, jid);
+    if (!phoneJid) {
+        log.info({ jid }, '[customerLookup] JID en @lid sin mapeo aún → no se puede identificar cliente');
+        return null;
+    }
+    lookupJid = phoneJid;
+}
+// ... el resto usa lookupJid en vez de jid
+```
+
+Semántica: si llega un LID y NO hay mapeo → tratamos como cliente desconocido (flujo IA). Sin asignación ruidosa ni falsos positivos.
+
+---
+
+## 🧪 Verificación pre-deploy
+
+- `node -c` sobre `lidMapping.js`, `customerLookup.js`, `waManager.js` → OK.
+- Revisado el proto de Baileys 6.17.16: `Contact` tiene `id` y `lid`; `chats.phoneNumberShare` emite `{lid, jid}`; `messaging-history.set` entrega `contacts[]`.
+
+### Escenarios a validar en staging
+
+1. **Deploy + pm2 restart:** en logs debería aparecer `[lidMapping] lote de contactos procesado {count: N}` una o varias veces al terminar el primer sync. Esto confirma que Baileys está pasándonos los contactos.
+2. **Consulta SQL:** `SELECT COUNT(*) FROM wa_lid_phone_map;` > 0 tras pm2 restart.
+3. **Mensaje nuevo de cliente recurrente vía LID:** logs muestran `[customerLookup] LID resuelto a JID-fono` seguido de `[customerLookup] match OK — vendedor histórico resuelto` y `[autoAssign] Cliente recurrente detectado → asignando al vendedor histórico`.
+4. **Mensaje de número sin mapeo:** logs muestran `JID en @lid sin mapeo aún` → IA responde normalmente.
+5. **Mensaje con JID clásico `@s.whatsapp.net`:** flujo intacto, salta `isLidJid` y va directo a `findCustomerByJid`.
+6. **Cliente desconocido por LID + mapeo eventualmente llega:** la próxima vez que llegue un mensaje de ese LID ya sí se identificará (primer encuentro perdido, ok).
+
+---
+
+## 📂 Archivos tocados
+
+- `db/migrations/008_lid_phone_mapping.sql` — nuevo.
+- `src/services/lidMapping.js` — nuevo.
+- `src/services/customerLookup.js` — `resolveVendorForJid` ahora resuelve LID primero.
+- `src/services/waManager.js` — 4 listeners nuevos + require de `lidMapping`.
+
+## 📦 Pendiente para producción
+
+- Aplicar migración 008 a cada tenant (api_emp_*).
+- Actualizar `ninesys-api/public/model/create_new_company_api_emp_N.sql` con la tabla nueva (para que tenants futuros la traigan).
+- Deploy de msg_ninesys + pm2 restart.
+- Validar los 6 escenarios del staging.
+
+## 🔜 Etapa 2 (rama aparte, NO en este deploy)
+
+- Upgrade de `baileys` de 6.17.16 a 6.7.21.
+- Port de `waManager.js` y `baileysAuthState.js`: `require('baileys')` → `await import('baileys')`.
+- Propagar async al `loadBaileys()` y a los dos call sites.
+- Smoke test: QR pairing, envío de texto/imagen/audio, listeners emitiendo, desconexión/reconexión.
+- Rollback plan: `npm install baileys@6.17.16` y revertir el port ESM.

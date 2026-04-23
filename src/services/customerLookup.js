@@ -15,6 +15,7 @@
  */
 
 const log = require('../lib/logger').createLogger('customerLookup');
+const lidMapping = require('./lidMapping');
 
 // Cliente "Producción Interna" del template de tenants — se usa para
 // órdenes administrativas internas y NO debe dispararse auto-asignación
@@ -84,10 +85,24 @@ async function findLastEligibleVendor(pool, customerId) {
  */
 async function resolveVendorForJid(pool, jid) {
     try {
-        const last10 = last10DigitsFromJid(jid);
-        const customer = await findCustomerByJid(pool, jid);
+        // Si el chat viene en formato LID (privacy de WhatsApp), el JID no
+        // contiene el teléfono. Intentamos resolverlo vía wa_lid_phone_map;
+        // si no hay mapeo aún (Baileys todavía no nos lo pasó por ningún
+        // evento), no podemos identificar al cliente — flujo IA normal.
+        let lookupJid = jid;
+        if (lidMapping.isLidJid(jid)) {
+            const phoneJid = await lidMapping.resolvePhoneJid(pool, jid);
+            if (!phoneJid) {
+                log.info({ jid }, '[customerLookup] JID en @lid sin mapeo aún → no se puede identificar cliente');
+                return null;
+            }
+            lookupJid = phoneJid;
+            log.info({ lidJid: jid, phoneJid }, '[customerLookup] LID resuelto a JID-fono');
+        }
+        const last10 = last10DigitsFromJid(lookupJid);
+        const customer = await findCustomerByJid(pool, lookupJid);
         if (!customer) {
-            log.info({ jid, last10 }, '[customerLookup] no hay customer con ese teléfono');
+            log.info({ jid: lookupJid, last10 }, '[customerLookup] no hay customer con ese teléfono');
             return null;
         }
         const vendorId = await findLastEligibleVendor(pool, customer._id);
