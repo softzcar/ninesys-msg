@@ -1,0 +1,132 @@
+- **Solicitud del Usuario:** Tras la Etapa 1 (mapeo LID↔teléfono reactivo), el escenario de cliente recurrente vía `@lid` seguía sin auto-asignarse al vendedor histórico cuando no había mapeo previo en `wa_lid_phone_map`. Root cause: en Baileys 6.17.16 no existe forma de obtener el teléfono desde un LID en tiempo de mensaje (ni en el proto del mensaje, ni vía API USync/onWhatsApp). Única solución de raíz: subir a Baileys 6.7.21 que expone `senderPn` en `WAMessageKey`. Se rechazó el fallback por pushName + nombre de customers (campo editable, poco fiable).
+- **Fecha y Hora:** 2026-04-23 15:00
+- **Estado actual:** ✅ IMPLEMENTADO EN LOCAL en rama `feat/baileys-7-upgrade`. Listo para deploy + smoke test en staging.
+
+---
+
+## 🎯 Diagnóstico previo
+
+- Verificado el proto de Baileys 6.17.16: `WAMessageKey` solo tiene `{remoteJid, fromMe, id, participant?}`. Ni `senderPn` ni `participantPn`.
+- `sock.onWhatsApp(phone)` → devuelve `{jid, exists}` pero NO el LID asociado.
+- `USyncContactProtocol` solo acepta phone → responde booleano; no hay `USyncLidProtocol`.
+- Store de Baileys en memoria (no montado en msg_ninesys) tampoco ayudaría — recibe los mismos 3 eventos que ya escuchamos (`contacts.upsert/update`, `chats.phoneNumberShare`, `messaging-history.set`).
+- Conclusión: sin upgrade no hay forma limpia de resolver el escenario.
+
+Verificado en `/tmp/baileys-check/package/` (6.7.21 descomprimido):
+- `lib/Types/Message.d.ts` expone `WAMessageKey.senderPn`, `senderLid`, `participantPn`, `participantLid`.
+- `lib/Utils/decode-wa-message.js` los lee de los atributos del stanza (`sender_pn`, `sender_lid`).
+- Engine requirement: Node 20+. Nuestra máquina: v20.20.1 ✅.
+- Package es ESM puro (`"type": "module"`) → requiere port CJS→dynamic import en nuestros wrappers.
+
+---
+
+## 🔧 Implementación
+
+### Dependencia
+- `npm install baileys@6.7.21` → `"baileys": "^6.7.21"` en package.json (antes `6.17.16`).
+
+### `src/services/waManager.js` — Port ESM
+
+Antes:
+```js
+let baileys;
+function loadBaileys() {
+    if (!baileys) baileys = require('baileys');
+    return baileys;
+}
+```
+
+Después:
+```js
+let baileys;
+async function loadBaileys() {
+    if (!baileys) {
+        const mod = await import('baileys');
+        baileys = mod;
+    }
+    return baileys;
+}
+```
+
+Call sites actualizados:
+- `init()`: `const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion } = await loadBaileys();`
+- mediaHandler (dentro de init): `const { downloadMediaMessage } = await loadBaileys();`
+
+### `src/services/baileysAuthState.js` — Port ESM
+
+`lib()` → async (dynamic import + cache del módulo resuelto).
+
+Callers awaitean:
+- `readKey`: `const { BufferJSON } = await lib();`
+- `writeKey`: `const { BufferJSON } = await lib();`
+- `useMySQLAuthState`: `const { initAuthCreds, proto } = await lib();`
+
+### `src/services/customerLookup.js` — uso de `senderPn`
+
+Nueva firma: `resolveVendorForJid(pool, jid, msgKey = null)`.
+
+Lógica cuando `jid` es `@lid`:
+1. **Preferente**: si `msgKey.senderPn` viene como `@s.whatsapp.net`, se usa directamente como `lookupJid`. Oportunísticamente se hace upsert a `wa_lid_phone_map` (`{lid, phoneJid}`) para cachear el par — así mensajes futuros del mismo LID se resuelven aun cuando `senderPn` no venga (p.ej. stanzas de history/status).
+2. **Fallback 1**: consulta a `wa_lid_phone_map` (red de seguridad, útil con mapeos poblados por eventos de contacts/history).
+3. **Fallback 2**: cliente no identificable → retorna null → flujo IA normal.
+
+Logs diagnósticos para distinguir cuál rama se tomó:
+- `[customerLookup] LID resuelto vía senderPn`
+- `[customerLookup] LID resuelto vía wa_lid_phone_map`
+- `[customerLookup] JID en @lid sin senderPn ni mapeo → cliente no identificable`
+
+### `src/services/waManager.js` — pasa `m.key` al lookup
+
+En el bloque de auto-asignación (después de `ingestMessage`):
+```js
+const resolved = await customerLookup.resolveVendorForJid(pool, result.jid, m.key);
+```
+
+---
+
+## 🧪 Verificación pre-deploy
+
+- `node -c` OK en los 4 archivos modificados.
+- `node -e "import('baileys')..."` desde contexto CJS: todos los symbols disponibles (`default`, `makeWASocket`, `fetchLatestBaileysVersion`, `DisconnectReason`, `downloadMediaMessage`, `initAuthCreds`, `BufferJSON`, `proto`).
+- `grep -r "require('baileys')" src/` → 0 matches. No queda código que cargue la dep en sincronía.
+- `require('baileys/package.json').version` → `6.7.21` confirmado.
+
+## 🧪 Smoke test en staging (pendiente)
+
+1. `pm2 restart ntmsg-app`. Arranque sin errores. Debe aparecer log `[waManager] Inicializando cliente` y luego `READY` en ~1s si las creds siguen válidas.
+2. Si WA rechaza las creds existentes (formato distinto entre 6.17 y 6.7.21 en algún edge case): `DELETE FROM wa_session_auth;` → reiniciar → QR nuevo. Hasta ahora el formato de `creds` + keys es compatible entre ambas versiones, pero queda como plan de recuperación.
+3. Envío de texto → OK (`message:new` + `conversation:updated` se emiten).
+4. Envío de imagen y audio → OK (mediaHandler usa `downloadMediaMessage` via el nuevo loader).
+5. **Test de cliente recurrente (Ozcar)**:
+   - Cliente registrado en `customers` con el teléfono real.
+   - Ozcar borra chat desde su móvil + escribe de nuevo.
+   - Expectativa: el mensaje llega con `key.remoteJid='<id>@lid'` y `key.senderPn='<tel>@s.whatsapp.net'`.
+   - Logs esperados, en orden:
+     - `[customerLookup] LID resuelto vía senderPn`
+     - `[customerLookup] match OK — vendedor histórico resuelto`
+     - `[autoAssign] Cliente recurrente detectado → asignando al vendedor histórico`
+   - DB: la conversación queda con `assigned_to=<id_vendedor>` y `wa_lid_phone_map` tiene una fila nueva para ese LID.
+6. Mensaje de número NO registrado → cae al flujo IA (no debe asignarse a nadie).
+
+## 📂 Archivos tocados
+
+- `package.json` — baileys: 6.17.16 → ^6.7.21.
+- `package-lock.json` — regenerado por npm install.
+- `src/services/waManager.js` — loadBaileys async + 2 call sites + pasa m.key al lookup.
+- `src/services/baileysAuthState.js` — lib() async + callers awaitean.
+- `src/services/customerLookup.js` — resolveVendorForJid acepta msgKey, senderPn como fuente primaria.
+
+## 🔙 Rollback
+
+```bash
+git checkout feat/baileys-migration
+npm install              # restaura 6.17.16 del lock anterior
+pm2 restart ntmsg-app
+```
+
+Si las creds en `wa_session_auth` se corrompieron por la prueba: borrarlas y re-escanear QR.
+
+## 🔜 Próximos pasos tras smoke test exitoso
+
+- Merge de `feat/baileys-7-upgrade` → `feat/baileys-migration` (o main, según flujo).
+- Opcional: a medida que pasen semanas con 6.7.21 estable, considerar monitoreo de logs `[customerLookup] LID resuelto vía wa_lid_phone_map` — si bajan a 0, el fallback ya no aporta y se puede simplificar (pero no urge).
