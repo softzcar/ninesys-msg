@@ -25,8 +25,12 @@
 const log = require('../lib/logger').createLogger('baileysAuthState');
 
 let _baileys;
-function lib() {
-    if (!_baileys) _baileys = require('baileys');
+async function lib() {
+    if (!_baileys) {
+        // baileys@6.7.21+ es ESM puro → dynamic import. Cache del módulo
+        // resuelto para no pagar el import en cada readKey/writeKey.
+        _baileys = await import('baileys');
+    }
     return _baileys;
 }
 
@@ -37,7 +41,8 @@ async function readKey(pool, key) {
     );
     if (!rows.length) return null;
     try {
-        return JSON.parse(rows[0].key_value.toString('utf8'), lib().BufferJSON.reviver);
+        const { BufferJSON } = await lib();
+        return JSON.parse(rows[0].key_value.toString('utf8'), BufferJSON.reviver);
     } catch (e) {
         log.warn({ err: e, key }, 'No pude parsear key');
         return null;
@@ -45,7 +50,8 @@ async function readKey(pool, key) {
 }
 
 async function writeKey(pool, key, value) {
-    const data = JSON.stringify(value, lib().BufferJSON.replacer);
+    const { BufferJSON } = await lib();
+    const data = JSON.stringify(value, BufferJSON.replacer);
     await pool.query(
         `INSERT INTO wa_session_auth (key_name, key_value)
          VALUES (?, ?)
@@ -63,7 +69,7 @@ async function removeKey(pool, key) {
  * @param {import('mysql2/promise').Pool} pool - pool del tenant
  */
 async function useMySQLAuthState(pool) {
-    const { initAuthCreds, proto } = lib();
+    const { initAuthCreds, proto } = await lib();
     let creds = await readKey(pool, 'creds');
     if (!creds) {
         creds = initAuthCreds();

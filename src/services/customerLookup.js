@@ -82,22 +82,37 @@ async function findLastEligibleVendor(pool, customerId) {
 /**
  * Combina las dos búsquedas. Retorna null si no aplica.
  * En éxito: { customerId, customerName, vendorId }.
+ *
+ * @param {Pool}   pool
+ * @param {string} jid     - jid del remitente (puede venir como @lid)
+ * @param {object} [msgKey] - WAMessageKey; si trae `senderPn` (Baileys 6.7.21+)
+ *                           lo usamos como fuente primaria del teléfono, sin
+ *                           depender de wa_lid_phone_map.
  */
-async function resolveVendorForJid(pool, jid) {
+async function resolveVendorForJid(pool, jid, msgKey = null) {
     try {
-        // Si el chat viene en formato LID (privacy de WhatsApp), el JID no
-        // contiene el teléfono. Intentamos resolverlo vía wa_lid_phone_map;
-        // si no hay mapeo aún (Baileys todavía no nos lo pasó por ningún
-        // evento), no podemos identificar al cliente — flujo IA normal.
         let lookupJid = jid;
         if (lidMapping.isLidJid(jid)) {
-            const phoneJid = await lidMapping.resolvePhoneJid(pool, jid);
-            if (!phoneJid) {
-                log.info({ jid }, '[customerLookup] JID en @lid sin mapeo aún → no se puede identificar cliente');
-                return null;
+            // Preferimos senderPn de la key (Baileys 6.7.21+). Viene como
+            // '<tel>@s.whatsapp.net' — lo validamos antes de confiar en él.
+            const senderPn = msgKey?.senderPn || null;
+            if (lidMapping.isPhoneJid(senderPn)) {
+                lookupJid = senderPn;
+                // Oportunístico: refrescamos el mapeo en BD para que los
+                // siguientes mensajes del mismo LID resuelvan aunque no
+                // venga senderPn (p.ej. mensajes de status/history).
+                lidMapping.upsertMapping(pool, { lid: jid, phoneJid: senderPn }).catch(() => {});
+                log.info({ lidJid: jid, phoneJid: senderPn }, '[customerLookup] LID resuelto vía senderPn');
+            } else {
+                // Fallback: tabla poblada por contacts.upsert/messaging-history.set.
+                const phoneJid = await lidMapping.resolvePhoneJid(pool, jid);
+                if (!phoneJid) {
+                    log.info({ jid }, '[customerLookup] JID en @lid sin senderPn ni mapeo → cliente no identificable');
+                    return null;
+                }
+                lookupJid = phoneJid;
+                log.info({ lidJid: jid, phoneJid }, '[customerLookup] LID resuelto vía wa_lid_phone_map');
             }
-            lookupJid = phoneJid;
-            log.info({ lidJid: jid, phoneJid }, '[customerLookup] LID resuelto a JID-fono');
         }
         const last10 = last10DigitsFromJid(lookupJid);
         const customer = await findCustomerByJid(pool, lookupJid);

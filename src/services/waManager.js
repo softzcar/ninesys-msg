@@ -73,10 +73,13 @@ function computeBackoff(attempt) {
 let _shuttingDown = false;
 
 let baileys;
-function loadBaileys() {
+async function loadBaileys() {
     if (!baileys) {
-        // require diferido para no romper el arranque si la dep no está aún
-        baileys = require('baileys');
+        // baileys@6.7.21+ es ESM puro → dynamic import desde CJS.
+        // Cacheamos el módulo resuelto (no la promise) para no duplicar
+        // resoluciones si hay inits concurrentes.
+        const mod = await import('baileys');
+        baileys = mod;
     }
     return baileys;
 }
@@ -326,7 +329,7 @@ async function init(idEmpresa) {
         default: makeWASocket,
         DisconnectReason,
         fetchLatestBaileysVersion,
-    } = loadBaileys();
+    } = await loadBaileys();
 
     const pool = await tenantResolver.getPool(id);
     const { state, saveCreds, clear } = await useMySQLAuthState(pool);
@@ -364,7 +367,7 @@ async function init(idEmpresa) {
     // Fase B.1: handler de descarga de media. Se inyecta a ingestMessage solo
     // para eventos 'notify' (mensajes nuevos) — evitamos descargar el histórico
     // en 'append'.
-    const { downloadMediaMessage } = loadBaileys();
+    const { downloadMediaMessage } = await loadBaileys();
     const mediaHandler = async ({ msg, type, waMessageId, ts }) => {
         try {
             const buffer = await downloadMediaMessage(
@@ -430,7 +433,7 @@ async function init(idEmpresa) {
                         }, '[autoAssign] evaluando condiciones');
                         if ((result.conversationCreated || result.restored) && !result.isGroup) {
                             try {
-                                const resolved = await customerLookup.resolveVendorForJid(pool, result.jid);
+                                const resolved = await customerLookup.resolveVendorForJid(pool, result.jid, m.key);
                                 if (resolved?.vendorId) {
                                     log.info({
                                         tenantId: id, jid: result.jid,
