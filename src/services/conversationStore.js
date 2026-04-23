@@ -22,18 +22,44 @@
  */
 
 /**
+ * Desanida envelopes de Baileys (ephemeralMessage, viewOnceMessage,
+ * documentWithCaptionMessage, editedMessage, viewOnceMessageV2[Extension]).
+ * Espejo simplificado de `normalizeMessageContent` de Baileys; duplicado aquí
+ * para no depender del módulo durante el upgrade ESM pendiente.
+ *
+ * Los chats recién creados con "mensajes temporales" activos llegan como
+ * `ephemeralMessage.message.extendedTextMessage`; sin unwrap caerían a 'system'.
+ */
+function unwrapContent(msg) {
+    let cur = msg;
+    for (let i = 0; i < 5 && cur; i++) {
+        const next =
+            cur.ephemeralMessage?.message ||
+            cur.viewOnceMessage?.message ||
+            cur.viewOnceMessageV2?.message ||
+            cur.viewOnceMessageV2Extension?.message ||
+            cur.documentWithCaptionMessage?.message ||
+            cur.editedMessage?.message;
+        if (!next) break;
+        cur = next;
+    }
+    return cur;
+}
+
+/**
  * Extrae el tipo principal del mensaje Baileys.
  */
 function extractType(msg) {
-    if (!msg) return 'system';
-    if (msg.conversation || msg.extendedTextMessage) return 'text';
-    if (msg.imageMessage) return 'image';
-    if (msg.audioMessage) return 'audio';
-    if (msg.videoMessage) return 'video';
-    if (msg.documentMessage) return 'document';
-    if (msg.stickerMessage) return 'sticker';
-    if (msg.locationMessage) return 'location';
-    if (msg.contactMessage || msg.contactsArrayMessage) return 'contact';
+    const m = unwrapContent(msg);
+    if (!m) return 'system';
+    if (m.conversation || m.extendedTextMessage) return 'text';
+    if (m.imageMessage) return 'image';
+    if (m.audioMessage) return 'audio';
+    if (m.videoMessage) return 'video';
+    if (m.documentMessage) return 'document';
+    if (m.stickerMessage) return 'sticker';
+    if (m.locationMessage) return 'location';
+    if (m.contactMessage || m.contactsArrayMessage) return 'contact';
     return 'system';
 }
 
@@ -41,16 +67,17 @@ function extractType(msg) {
  * Extrae el body textual visible de un mensaje Baileys.
  */
 function extractBody(msg) {
-    if (!msg) return null;
-    if (msg.conversation) return msg.conversation;
-    if (msg.extendedTextMessage?.text) return msg.extendedTextMessage.text;
-    if (msg.imageMessage?.caption) return msg.imageMessage.caption;
-    if (msg.videoMessage?.caption) return msg.videoMessage.caption;
-    if (msg.documentMessage?.fileName) return msg.documentMessage.fileName;
-    if (msg.audioMessage) return '[audio]';
-    if (msg.stickerMessage) return '[sticker]';
-    if (msg.locationMessage) return '[ubicación]';
-    if (msg.contactMessage) return `[contacto] ${msg.contactMessage.displayName || ''}`;
+    const m = unwrapContent(msg);
+    if (!m) return null;
+    if (m.conversation) return m.conversation;
+    if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+    if (m.imageMessage?.caption) return m.imageMessage.caption;
+    if (m.videoMessage?.caption) return m.videoMessage.caption;
+    if (m.documentMessage?.fileName) return m.documentMessage.fileName;
+    if (m.audioMessage) return '[audio]';
+    if (m.stickerMessage) return '[sticker]';
+    if (m.locationMessage) return '[ubicación]';
+    if (m.contactMessage) return `[contacto] ${m.contactMessage.displayName || ''}`;
     return null;
 }
 
@@ -58,12 +85,13 @@ function extractBody(msg) {
  * Extrae el MIME type nativo del mensaje Baileys para tipos con media.
  */
 function extractMime(msg) {
-    if (!msg) return null;
-    return msg.imageMessage?.mimetype
-        || msg.audioMessage?.mimetype
-        || msg.videoMessage?.mimetype
-        || msg.documentMessage?.mimetype
-        || msg.stickerMessage?.mimetype
+    const m = unwrapContent(msg);
+    if (!m) return null;
+    return m.imageMessage?.mimetype
+        || m.audioMessage?.mimetype
+        || m.videoMessage?.mimetype
+        || m.documentMessage?.mimetype
+        || m.stickerMessage?.mimetype
         || null;
 }
 
