@@ -118,6 +118,16 @@ async function ingestMessage(pool, m, opts = {}) {
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
     const pushname = m.pushName || null;
 
+    // Descartamos envelopes de protocolo/setup que no son mensajes visibles:
+    // protocolMessage (revoke, ephemeralSettings change), senderKeyDistributionMessage
+    // (setup de grupo/sesión E2E), messageContextInfo solo, etc. Se reconocen
+    // por caer al bucket 'system' sin body tras el unwrap. Si los persistiéramos,
+    // la UI los pintaría como "[system]" y crearían conversaciones fantasma al
+    // reconectar (Baileys hace un burst de estos por cada chat activo).
+    if (type === 'system' && !body) {
+        return null;
+    }
+
     // Fase B.1: descargar media si aplica. El caller (waManager) provee el
     // handler que sabe usar Baileys + mediaStore. Si la descarga falla, seguimos
     // ingestando el mensaje sin media para no perder el registro.
