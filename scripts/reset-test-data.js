@@ -20,12 +20,21 @@
  *   - wa_ai_settings
  *
  * Flags:
- *   --dry-run       Muestra cuentas actuales sin borrar nada.
- *   --yes           Omite la confirmación interactiva.
- *   --with-session  TRUNCATE wa_session_auth y resetea wa_session_state
- *                   a NOT_REGISTERED (la próxima vez pedirá QR).
- *   --with-vendors  Vacía wa_vendor_state (disponibilidad de vendedores).
- *   --with-media    Borra <STORAGE_ROOT>/media/<idEmpresa>/ del disco.
+ *   --dry-run         Muestra cuentas actuales sin borrar nada.
+ *   --yes             Omite la confirmación interactiva.
+ *   --with-session    Desvincula el dispositivo (llama a DELETE /disconnect
+ *                     del servicio → sock.logout() → WhatsApp remueve el
+ *                     dispositivo del móvil) y resetea wa_session_state.
+ *                     Si el servicio no responde, aborta — evita vaciar la
+ *                     DB dejando el móvil vinculado en silencio.
+ *   --skip-logout     Junto con --with-session: salta la llamada HTTP y
+ *                     borra solo la DB. El móvil SEGUIRÁ mostrando el
+ *                     dispositivo vinculado hasta que se quite a mano.
+ *                     Útil solo si el servicio está intencionalmente caído.
+ *   --with-vendors    Vacía wa_vendor_state (disponibilidad de vendedores).
+ *   --with-media      Borra <STORAGE_ROOT>/media/<idEmpresa>/ del disco.
+ *   --service-url=URL Base URL del servicio msg_ninesys.
+ *                     Default: http://127.0.0.1:${PORT:-3000}
  *
  * IMPORTANTE: tras correr este script hay que reiniciar msg_ninesys para
  * limpiar cachés en memoria (conversationStore, lidPhoneMap,
@@ -42,6 +51,8 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const axios = require('axios');
+const jwt = require('jsonwebtoken');
 const tenantResolver = require('../src/db/tenantResolver');
 
 const DEFAULT_ID_EMPRESA = 163;
@@ -62,6 +73,8 @@ function parseArgs(argv) {
         withSession: false,
         withVendors: false,
         withMedia: false,
+        skipLogout: false,
+        serviceUrl: null,
     };
     for (const a of argv.slice(2)) {
         if (a === '--dry-run') out.dryRun = true;
@@ -69,13 +82,63 @@ function parseArgs(argv) {
         else if (a === '--with-session') out.withSession = true;
         else if (a === '--with-vendors') out.withVendors = true;
         else if (a === '--with-media') out.withMedia = true;
+        else if (a === '--skip-logout') out.skipLogout = true;
+        else if (a.startsWith('--service-url=')) out.serviceUrl = a.slice('--service-url='.length);
         else if (/^\d+$/.test(a)) out.idEmpresa = parseInt(a, 10);
         else {
             console.error(`[reset-test-data] argumento desconocido: ${a}`);
             process.exit(2);
         }
     }
+    if (!out.serviceUrl) {
+        const port = process.env.PORT || 3000;
+        out.serviceUrl = `http://127.0.0.1:${port}`;
+    }
     return out;
+}
+
+/**
+ * Llama al endpoint DELETE /disconnect/:companyId del servicio para que
+ * éste ejecute sock.logout() y WhatsApp desvincule el dispositivo en el
+ * móvil. Firma un JWT de corta vida con JWT_SECRET del .env.
+ *
+ * Devuelve:
+ *   - { ok: true, message } si el servicio respondió 200.
+ *   - { ok: false, reason: 'UNREACHABLE', err } si no hay servicio.
+ *   - { ok: false, reason: 'HTTP_ERROR', status, err } si respondió no-2xx.
+ */
+async function serviceLogout(serviceUrl, idEmpresa) {
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+        return { ok: false, reason: 'NO_JWT_SECRET' };
+    }
+    const token = jwt.sign(
+        { sub: 'reset-test-data', scope: 'internal' },
+        secret,
+        { expiresIn: '60s' }
+    );
+    const url = `${serviceUrl.replace(/\/$/, '')}/disconnect/${idEmpresa}`;
+    try {
+        const res = await axios.delete(url, {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 20000, // logout de Baileys puede demorar por el IQ a WhatsApp
+            validateStatus: () => true,
+        });
+        if (res.status >= 200 && res.status < 300) {
+            return { ok: true, message: res.data?.message || 'OK' };
+        }
+        return {
+            ok: false,
+            reason: 'HTTP_ERROR',
+            status: res.status,
+            body: res.data,
+        };
+    } catch (err) {
+        const reason = err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET'
+            ? 'UNREACHABLE'
+            : 'NETWORK_ERROR';
+        return { ok: false, reason, err };
+    }
 }
 
 async function tableCount(pool, table) {
@@ -134,11 +197,23 @@ function humanBytes(n) {
 
 async function main() {
     const opts = parseArgs(process.argv);
-    const { idEmpresa, dryRun, yes, withSession, withVendors, withMedia } = opts;
+    const {
+        idEmpresa, dryRun, yes,
+        withSession, withVendors, withMedia,
+        skipLogout, serviceUrl,
+    } = opts;
 
     console.log(`\n=== reset-test-data (empresa ${idEmpresa}) ===`);
     console.log(`Modo:      ${dryRun ? 'DRY-RUN (solo lectura)' : 'BORRADO REAL'}`);
-    console.log(`Sesión:    ${withSession ? 'SE BORRA (pedirá QR)' : 'se conserva'}`);
+    if (withSession) {
+        console.log(
+            `Sesión:    SE BORRA — ${skipLogout
+                ? 'SOLO DB (móvil quedará con dispositivo vinculado)'
+                : `desvincula dispositivo vía ${serviceUrl}/disconnect/${idEmpresa}`}`
+        );
+    } else {
+        console.log('Sesión:    se conserva');
+    }
     console.log(`Vendedores:${withVendors ? ' SE VACÍA wa_vendor_state' : ' se conserva'}`);
     console.log(`Media:     ${withMedia ? 'SE BORRA del disco' : 'se conserva'}`);
     console.log('');
@@ -182,7 +257,39 @@ async function main() {
         }
     }
 
-    // 3) Borrado
+    // 3) Logout vía servicio (solo si --with-session y no --skip-logout).
+    //    Esto es lo que hace que WhatsApp remueva el dispositivo del móvil.
+    //    TIENE QUE IR ANTES de los TRUNCATE: si primero vaciamos
+    //    wa_session_auth, el socket del servicio pierde las credenciales y
+    //    logout() falla, dejando el móvil vinculado.
+    if (withSession && !skipLogout) {
+        console.log(`→ Llamando DELETE ${serviceUrl}/disconnect/${idEmpresa} ...`);
+        const r = await serviceLogout(serviceUrl, idEmpresa);
+        if (r.ok) {
+            console.log(`  ✅ Dispositivo desvinculado en WhatsApp (${r.message})`);
+        } else if (r.reason === 'UNREACHABLE') {
+            console.error(`  ❌ Servicio inalcanzable en ${serviceUrl}.`);
+            console.error('     Arrancalo (pm2 start ntmsg-app) y reintentá, o pasá --skip-logout');
+            console.error('     si asumís dejar el dispositivo vinculado en el móvil.');
+            await tenantResolver.refresh(idEmpresa);
+            process.exit(3);
+        } else if (r.reason === 'NO_JWT_SECRET') {
+            console.error('  ❌ JWT_SECRET no está en el entorno (.env) — no puedo autenticar.');
+            await tenantResolver.refresh(idEmpresa);
+            process.exit(4);
+        } else {
+            console.error(`  ❌ Logout HTTP falló (${r.reason}${r.status ? ' ' + r.status : ''}):`);
+            console.error(`     ${r.err?.message || JSON.stringify(r.body)}`);
+            console.error('     Abortando para no dejar el móvil vinculado sin querer.');
+            console.error('     Usá --skip-logout si entendés las consecuencias.');
+            await tenantResolver.refresh(idEmpresa);
+            process.exit(5);
+        }
+    } else if (withSession && skipLogout) {
+        console.log('⚠  --skip-logout activo: el móvil seguirá mostrando el dispositivo vinculado.');
+    }
+
+    // 4) Borrado
     const conn = await pool.getConnection();
     try {
         await conn.query('SET FOREIGN_KEY_CHECKS = 0');
@@ -218,7 +325,7 @@ async function main() {
         conn.release();
     }
 
-    // 4) Media
+    // 5) Media
     if (withMedia && mediaStats && fs.existsSync(mediaStats.dir)) {
         fs.rmSync(mediaStats.dir, { recursive: true, force: true });
         console.log(`  ✅ rm -rf ${mediaStats.dir} (${mediaStats.files} archivos, ${humanBytes(mediaStats.total)})`);
