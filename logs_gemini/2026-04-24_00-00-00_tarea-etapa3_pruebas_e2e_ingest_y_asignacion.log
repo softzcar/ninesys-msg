@@ -1,0 +1,151 @@
+- **Solicitud del Usuario:** Tras el deploy de la Etapa 2 (Baileys 6.7.21), ejecutar pruebas end-to-end del flujo completo de ingest con `@lid` → resolución vía `senderPn` → auto-asignación a vendedor histórico → aviso interno → reasignación por timeout. Durante las pruebas se detectaron dos bugs que se corrigieron sobre la marcha.
+- **Fecha y Hora:** 2026-04-24
+- **Estado actual:** ⏸ PRUEBAS PAUSADAS a mitad (por reinicio de PC). Pendiente: verificar visualmente el fix del badge "Asignada" tras el deploy de `app_multi` y seguir observando el ciclo de reasignación por timeout.
+- **Rama de trabajo:** `feat/baileys-7-upgrade` (msg_ninesys) · `main` (app_multi).
+
+---
+
+## ✅ Tareas terminadas en esta sesión
+
+### 1. Script `reset-test-data.js` — "mesa limpia" para pruebas
+
+**Commit:** `1d568b7 chore(scripts): agregar reset-test-data.js para mesa limpia en pruebas`
+
+Script standalone que vacía mensajes, conversaciones, log de envíos y mapeo LID↔fono de un tenant, sin tocar configuración permanente (plantillas, settings de IA). Flags: `--with-session`, `--with-vendors`, `--with-media`, `--dry-run`, `--yes`.
+
+Uso en VPS:
+```bash
+cd /home/ws.nineteengreen.com/public_html
+node scripts/reset-test-data.js --dry-run      # ver cuentas
+node scripts/reset-test-data.js --with-session --with-media --yes && pm2 restart ntmsg-app
+```
+
+### 2. Fix: `reset-test-data` ahora desvincula el dispositivo de verdad
+
+**Commit:** `51cc1da fix(scripts): reset-test-data ahora desvincula el dispositivo en WhatsApp`
+
+**Bug:** al pasar `--with-session`, el script vaciaba `wa_session_auth` sin avisarle a WhatsApp. Resultado: el móvil seguía mostrando el dispositivo como vinculado y había que removerlo a mano.
+
+**Fix:** cuando se pasa `--with-session`, el script ahora firma un JWT corto con `JWT_SECRET` del `.env` y llama `DELETE http://127.0.0.1:${PORT}/disconnect/${idEmpresa}` **ANTES** de los TRUNCATE. Ese endpoint (`routes/index.js:304` → `waManager.disconnect` → `sock.logout()`) envía el IQ a WhatsApp que saca el dispositivo del linked-devices. Solo después hace el borrado de DB (defensivo, idempotente).
+
+**Orden importa:** si primero vaciáramos `wa_session_auth`, el socket perdería credenciales y `sock.logout()` fallaría.
+
+**Flags nuevos:**
+- `--skip-logout` — bypass HTTP (compat con comportamiento anterior, para servicio caído intencional).
+- `--service-url=URL` — override del default `http://127.0.0.1:${PORT:-3000}`.
+
+Si el servicio está caído, el script aborta en vez de seguir silenciosamente.
+
+### 3. Fix UI: badge "Asignada" ahora visible cuando la conversación está asignada al admin logueado
+
+**Repo:** `app_multi` · **Commit:** `3350f21 fix(whatsapp): mostrar tag de asignación también cuando está asignada al admin logueado`
+
+**Bug reportado:** Sayerlyn (admin) ve la conversación de Ozcar en tab "Mías" pero al filtrar en "Todas" la misma conversación no muestra ningún tag de asignación.
+
+**Root cause** (`components/whatsapp/WaInbox.vue:69-98`):
+- `isMyOwner(conv)` → false (Ozcar tiene `owner_id=NULL` en DB).
+- `v-else-if="conv.assignedTo && conv.assignedTo !== currentUserId"` → false (está asignada a Sayerlyn, que ES el `currentUserId`).
+- `v-else-if="isAdmin && !conv.assignedTo ..."` → false (sí tiene asignado).
+- Resultado: ningún badge renderiza.
+
+**Fix:** cambio de condición en los dos lugares (lista + header):
+- Antes: `conv.assignedTo && conv.assignedTo !== currentUserId`
+- Después: `conv.assignedTo && (isAdmin || conv.assignedTo !== currentUserId)`
+
+Ahora admins ven siempre el nombre del asignado (incluido ellos mismos); vendedores no-admin mantienen el comportamiento previo (si es propia ya lo saben por "Mías"). Bonus: el `title` hardcodeado "Asignada a otro vendedor" del header se reemplazó por uno interpolado que refleja el texto visible.
+
+### 4. Deploys realizados
+
+- **msg_ninesys** a VPS Hostinger (`vps-ninesys:/home/ws.nineteengreen.com/public_html`) — vía `scripts/deploy_msg_ninesys.sh` opción 2. HEAD: `51cc1da`. `ntmsg-app` en PM2 recargado, online.
+- **app_multi** a VPS Hostinger (`vps-ninesys:/home/app.nineteengreen.com/public_html`) — vía `deploy.sh` opción 2 (Nuxt generate + rsync). 769 archivos sincronizados.
+
+---
+
+## 🧪 Prueba end-to-end ejecutada — flujo de ingest y auto-asignación
+
+### Setup
+- DB del tenant 163 reseteada (mesa limpia total, incluyendo sesión Baileys y media).
+- QR re-escaneado → sesión nueva.
+- Vendedores activos en `wa_vendor_state`: `user_id=10` (Sayerlyn, admin) y `user_id=22` (Sarahit), ambos `is_available=1`, sin tope.
+
+### Evento 1 — Ozcar envía mensaje
+- LID: `168255394209832@lid`
+- Baileys 6.7.21 entregó `senderPn: 584147307169@s.whatsapp.net` (hito clave del upgrade).
+- `customerLookup` matcheó `customerId=2` (Ozcar Atencio), `vendorId=22` (vendedor histórico).
+- `recordAutoHandoff` con `assigned_to=22`, `reason=customer_returning`.
+- `internalMessenger.notifyVendorOfAssignment` → 200 a `idDestino=22, idDepartamento=8`.
+- **Resultado:** ✅ flujo completo funcionó según expectativa.
+
+### Evento 2 — Reasignación por timeout (Fase D.3)
+- Threshold en env: `ASSIGNMENT_TIMEOUT_MINUTES=20` (min hábiles).
+- Tras ~20 min de inactividad de Sarahit, el tick de `assignmentTimeout.js:115` liberó y reasignó.
+- La conversación pasó a `assigned_to=10` (Sayerlyn) con `excludeUserId=22`.
+- **Resultado:** ✅ ciclo de reasignación funcionó.
+
+### 📌 Observación documentada (no corregida, decisión del usuario)
+
+El `excludeUserId` del reassignment solo excluye al vendedor **anterior**, no a toda la cadena previa. Con solo 2 vendedores disponibles, el ciclo puede oscilar A→B→A→B indefinidamente cada 20 min. El usuario decidió **no cortar el ping-pong por ahora** — lo deja como comportamiento actual. Posible mejora futura: "tras N reasignaciones sin respuesta, parkear en cola sin dueño" o "no volver a caer al mismo vendedor en X tiempo".
+
+---
+
+## ⏸ Estado al pausar
+
+### Lo que acaba de quedar pendiente de verificar
+1. **Fix del badge "Asignada"** — deployado pero aún no verificado visualmente en el navegador. Login con Sayerlyn en `https://app.nineteengreen.com` → WhatsApp → tab "Todas": la conversación de Ozcar debería mostrar ahora el badge gris con "Sayerlyn" (nombre). Requiere **Ctrl+F5** para saltar el cache de Nuxt.
+
+### Estado del entorno dev al pausar
+- `ntmsg-app` online con Baileys 6.7.21, HEAD `51cc1da`, sesión activa.
+- DB `api_emp_163`:
+  - `wa_conversations`:
+    - `168255394209832@lid` (Ozcar): `mode=human`, `assigned_to=10` (Sayerlyn), asignado tras timeout.
+    - `263341742239774@lid`: `mode=human`, `assigned_to=22` (Sarahit), desde ~19:53Z.
+    - `584140070423@s.whatsapp.net`: `mode=hybrid`, sin asignar.
+  - Ambos LIDs mapeados en `wa_lid_phone_map`.
+
+### Variables relevantes del `.env` en VPS
+```
+ASSIGNMENT_TIMEOUT_MINUTES=20          # default 20 — umbral min hábiles
+ASSIGNMENT_TIMEOUT_INTERVAL_MS=60000   # 1 min — frecuencia tick
+ASSIGNMENT_TIMEOUT_DISABLED=0          # 1 para debug
+PORT=3000
+INTERNAL_MSG_URL=https://api.nineteengreen.com/ws/build-message/interno
+```
+
+---
+
+## 🔜 Al retomar
+
+1. **Verificar fix del badge:** login Sayerlyn → tab "Todas" → conversación de Ozcar → debería ver badge "Sayerlyn". Si no aparece tras Ctrl+F5, revisar `dist/_nuxt/...WaInbox*.js` remoto.
+2. **Continuar flujo de pruebas.** Posibles escenarios siguientes:
+   - Simular que Sayerlyn responde al cliente — verificar que `last_vendor_reply_at` se actualiza y el reloj se resetea.
+   - Dejar pasar otros 20 min sin respuesta — verificar segundo salto del ping-pong (Sayerlyn → Sarahit nuevamente, ya que `excludeUserId=10`).
+   - Probar caso de cliente NUEVO (no registrado en `customers`) → debería caer a flujo IA, no asignarse a nadie.
+3. **Preferencia guardada en memoria** (`feedback_vps_logs_access.md`): para diagnósticos futuros, yo (Claude) entro por SSH y leo logs directamente en vez de pedirle al usuario que los pegue. Acceso: `ssh vps-ninesys` → `cd /home/ws.nineteengreen.com/public_html` → `pm2 logs ntmsg-app --lines N --nostream`.
+
+---
+
+## 📂 Archivos tocados en esta sesión
+
+### msg_ninesys (rama `feat/baileys-7-upgrade`)
+- `scripts/reset-test-data.js` — nuevo script, dos commits (`1d568b7`, `51cc1da`).
+
+### app_multi (rama `main`)
+- `components/whatsapp/WaInbox.vue` — commit `3350f21` (solo este archivo; hay otros cambios en working tree del usuario que **no** se incluyeron).
+
+---
+
+## 🔙 Rollback de los commits de hoy
+
+**msg_ninesys:**
+```bash
+git checkout feat/baileys-7-upgrade
+git revert 51cc1da 1d568b7    # revierte fix + script
+# o reset --hard si aún no se pushean
+```
+
+**app_multi:**
+```bash
+git checkout main
+git revert 3350f21            # revierte fix del badge
+./rollback.sh                 # restaura tar.gz del backup en VPS
+```
