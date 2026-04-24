@@ -349,8 +349,9 @@ async function listMessages(pool, jid, { before = null, limit = 50, includeDelet
     }
     params.push(Number(limit));
     const [rows] = await pool.query(
-        `SELECT id, wa_message_id, from_me, sender, type, body, media_url, media_mime,
-                via, status, ts, created_at
+        `SELECT id, wa_message_id, from_me, sender, type, body,
+                transcript, transcript_lang,
+                media_url, media_mime, via, status, ts, created_at
          FROM wa_messages
          WHERE ${where}
          ORDER BY ts DESC
@@ -364,6 +365,8 @@ async function listMessages(pool, jid, { before = null, limit = 50, includeDelet
         sender: r.sender,
         type: r.type,
         body: r.body,
+        transcript: r.transcript || null,
+        transcript_lang: r.transcript_lang || null,
         media_url: r.media_url,
         media_mime: r.media_mime,
         via: r.via,

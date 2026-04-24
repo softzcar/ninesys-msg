@@ -36,6 +36,7 @@ const conversationStore = require('./conversationStore');
 const mediaStore = require('./mediaStore');
 const audioTranscode = require('./audioTranscode');
 const aiService = require('./aiService');
+const sttService = require('./sttService');
 const assignmentPolicy = require('./assignmentPolicy');
 const internalMessenger = require('./internalMessenger');
 const customerLookup = require('./customerLookup');
@@ -46,14 +47,15 @@ const log = require('../lib/logger').createLogger('waManager');
 const AI_THROTTLE_MS = 4000;
 const _aiLastReply = new Map(); // jid → ts ms
 
-// Red de seguridad para notas de voz que la IA no puede procesar (pre-Whisper).
-// Si el cliente manda un ptt de más de AUDIO_HANDOFF_SECONDS, pasamos la
-// conversación a humano y avisamos al cliente. Cuando lleguemos a Whisper
-// esta misma lógica evita cobros innecesarios por audios muy largos.
-const AUDIO_HANDOFF_SECONDS = Number(process.env.AUDIO_HANDOFF_SECONDS) || 120;
+// Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
+// El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
+// y lo evalúa sttService; aquí solo guardamos los textos de aviso.
 const AUDIO_HANDOFF_MESSAGE =
     'Recibimos tu nota de voz, pero es demasiado larga para responderla automáticamente. '
     + 'Te atenderá un miembro de nuestro equipo en un momento.';
+const STT_CAP_MESSAGE =
+    'Recibimos tu nota de voz, pero hemos alcanzado el límite mensual de transcripciones '
+    + 'automáticas. Te atenderá un miembro de nuestro equipo en un momento.';
 
 // ---------- Hardening Baileys (Fase 9.3) ----------
 // Backoff exponencial en reconexión: 1.5s → 3s → 6s → 12s → ... cap 60s.
@@ -182,69 +184,64 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
 }
 
 /**
- * Red de seguridad pre-Whisper: si el cliente envía un audio más largo
- * que AUDIO_HANDOFF_SECONDS, la IA no podrá procesarlo (no hay STT
- * todavía). Escalamos la conversación a humano y le enviamos un aviso
- * automático al cliente. Retorna true si se hizo el handoff — el caller
- * debe saltarse la respuesta IA en ese caso.
+ * Orquesta el pipeline de una nota de voz ptt entrante:
+ *   1. Llama a sttService.transcribeIfEligible (maneja duración, tope mensual,
+ *      idempotencia y la llamada a Whisper).
+ *   2. Si requiere handoff (audio largo o cap alcanzado): escala la conversación
+ *      y avisa al cliente.
+ *   3. Si transcribió ok: inyecta el texto en result.message.body y emite
+ *      'message:transcript' para que el frontend pueda mostrar el subtítulo.
+ *   4. En cualquier caso donde no se haga handoff: invoca maybeAutoReply.
  *
- * Aplica a cualquier audioMessage (ptt o adjunto). Solo cuando la
- * conversación aún no está en modo humano (idempotencia: un segundo
- * audio largo no re-reasigna al vendedor).
+ * Retorna true si se hizo handoff (caller no debe hacer nada más), false si no.
  */
-async function maybeHandoffLongVoiceNote(idEmpresa, pool, ingestResult, rawMsg) {
-    try {
-        const incoming = ingestResult?.message;
-        const jid = ingestResult?.jid;
-        if (!incoming || !jid || incoming.from_me) return false;
+async function handleVoiceNote(idEmpresa, pool, result, rawAudioMessage) {
+    const jid = result.jid;
+    const ptt = !!rawAudioMessage.ptt;
+    const seconds = Number(rawAudioMessage.seconds) || 0;
+    const mimeType = rawAudioMessage.mimetype || null;
 
-        const audioMessage = rawMsg?.message?.audioMessage;
-        if (!audioMessage) return false;
+    log.info(
+        { tenantId: idEmpresa, jid, ptt, seconds, mimetype: mimeType },
+        'Nota de voz entrante — evaluando STT'
+    );
 
-        const seconds = Number(audioMessage.seconds) || 0;
+    const sttResult = await sttService.transcribeIfEligible(pool, result, {
+        ptt,
+        seconds,
+        mimeType,
+    });
 
-        // Log de diagnóstico: todo audio entrante aparece aquí con sus flags,
-        // útil para confirmar umbrales y ptt mientras depuramos en desarrollo.
-        log.info(
-            {
-                tenantId: idEmpresa,
-                jid,
-                ptt: !!audioMessage.ptt,
-                seconds,
-                mimetype: audioMessage.mimetype || null,
-                threshold: AUDIO_HANDOFF_SECONDS,
-            },
-            'Audio entrante recibido (evaluando handoff)'
-        );
-
-        if (seconds <= AUDIO_HANDOFF_SECONDS) return false;
-
+    if (sttResult.handoff) {
         const flags = await conversationStore.getConversationFlags(pool, jid);
-        if (!flags) return false;
-        if (flags.isGroup) return false;
-        if (flags.mode === 'human') return false;
-
-        log.info(
-            { tenantId: idEmpresa, jid, seconds, threshold: AUDIO_HANDOFF_SECONDS },
-            'Audio largo → handoff a humano'
-        );
-
-        const handoff = await handoffToHuman(idEmpresa, pool, jid, 'audio_too_long');
-
-        try {
-            await sendText(idEmpresa, jid, AUDIO_HANDOFF_MESSAGE, { via: 'api' });
-        } catch (sendErr) {
-            log.warn(
-                { err: sendErr, tenantId: idEmpresa, jid },
-                'No se pudo enviar aviso de handoff por audio largo'
+        if (!flags?.isGroup && flags?.mode !== 'human') {
+            await handoffToHuman(idEmpresa, pool, jid, sttResult.reason);
+            const replyText = sttResult.reason === 'stt_cap_reached'
+                ? STT_CAP_MESSAGE
+                : AUDIO_HANDOFF_MESSAGE;
+            sendText(idEmpresa, jid, replyText, { via: 'api' }).catch((sendErr) =>
+                log.warn(
+                    { err: sendErr, tenantId: idEmpresa, jid, reason: sttResult.reason },
+                    'aviso de handoff por STT no se pudo enviar'
+                )
             );
         }
-
-        return handoff?.ok !== false;
-    } catch (e) {
-        log.error({ err: e, tenantId: idEmpresa }, 'maybeHandoffLongVoiceNote falló');
-        return false;
+        return true;
     }
+
+    if (sttResult.ok) {
+        result.message.body = sttResult.text;
+        emit(idEmpresa, 'message:transcript', {
+            companyId: idEmpresa,
+            jid,
+            wa_message_id: result.message.wa_message_id,
+            transcript: sttResult.text,
+            transcript_lang: sttResult.language,
+        });
+    }
+
+    maybeAutoReply(idEmpresa, pool, result);
+    return false;
 }
 
 /**
@@ -451,10 +448,13 @@ async function init(idEmpresa) {
                             }
                         }
                         if (!autoAssigned) {
-                            // Red de seguridad: audios > AUDIO_HANDOFF_SECONDS
-                            // pasan a humano en vez de intentar IA (no hay STT aún).
-                            const handedOff = await maybeHandoffLongVoiceNote(id, pool, result, m);
-                            if (!handedOff) {
+                            const audioMsg = m.message?.audioMessage;
+                            if (audioMsg?.ptt) {
+                                // Nota de voz: pipeline STT → transcript → IA (o handoff).
+                                handleVoiceNote(id, pool, result, audioMsg).catch((e) =>
+                                    log.error({ err: e, tenantId: id, jid: result.jid }, 'handleVoiceNote falló')
+                                );
+                            } else {
                                 maybeAutoReply(id, pool, result);
                             }
                         }

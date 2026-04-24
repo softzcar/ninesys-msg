@@ -17,6 +17,7 @@ const tenantResolver = require('../src/db/tenantResolver');
 const conversationStore = require('../src/services/conversationStore');
 const mediaStore = require('../src/services/mediaStore');
 const aiService = require('../src/services/aiService');
+const usageStore = require('../src/services/usageStore');
 const assignmentPolicy = require('../src/services/assignmentPolicy');
 const internalMessenger = require('../src/services/internalMessenger');
 const log = require('../src/lib/logger').createLogger('whatsappController');
@@ -860,6 +861,65 @@ async function listVendorStates(req, res) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// STT — Configuración y consumo (migración 009)
+// ---------------------------------------------------------------------------
+
+async function getSttConfig(req, res) {
+    const { companyId } = req.params;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const config = await usageStore.getTenantConfig(pool);
+        res.status(200).json(config);
+    } catch (e) {
+        res.status(500).json({ message: 'Error leyendo config STT', error: e.message });
+    }
+}
+
+async function updateSttConfig(req, res) {
+    const { companyId } = req.params;
+    const patch = req.body || {};
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const updated = await usageStore.updateTenantConfig(pool, patch);
+        res.status(200).json(updated);
+    } catch (e) {
+        if (e.message?.includes('inválido')) {
+            return res.status(400).json({ message: e.message });
+        }
+        res.status(500).json({ message: 'Error actualizando config STT', error: e.message });
+    }
+}
+
+// GET /stt/usage/:companyId?month=YYYY-MM
+// Si no se pasa `month`, devuelve el mes en curso.
+async function getSttUsage(req, res) {
+    const { companyId } = req.params;
+    const { month } = req.query;
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const data = await usageStore.getUsageByMonth(pool, month || null);
+        // Calculamos el total del mes para que el frontend no tenga que sumarlo.
+        const total_usd = data.providers.reduce((acc, p) => acc + p.usd, 0);
+        res.status(200).json({ ...data, total_usd });
+    } catch (e) {
+        res.status(500).json({ message: 'Error leyendo consumo mensual', error: e.message });
+    }
+}
+
+// GET /stt/usage/:companyId/year?year=YYYY
+async function getSttUsageYear(req, res) {
+    const { companyId } = req.params;
+    const year = req.query.year || String(new Date().getUTCFullYear());
+    try {
+        const pool = await tenantResolver.getPool(companyId);
+        const rows = await usageStore.getUsageByYear(pool, year);
+        res.status(200).json({ year, rows });
+    } catch (e) {
+        res.status(500).json({ message: 'Error leyendo consumo anual', error: e.message });
+    }
+}
+
 module.exports = {
     // Bajo nivel
     getClientStatus,
@@ -912,4 +972,9 @@ module.exports = {
     getVendorState,
     setVendorState,
     listVendorStates,
+    // STT — Migración 009
+    getSttConfig,
+    updateSttConfig,
+    getSttUsage,
+    getSttUsageYear,
 };

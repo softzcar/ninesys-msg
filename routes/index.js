@@ -51,6 +51,11 @@ const {
     getVendorState,
     setVendorState,
     listVendorStates,
+    // STT — config y consumo (migración 009)
+    getSttConfig,
+    updateSttConfig,
+    getSttUsage,
+    getSttUsageYear,
     // Fase A — Agentes IA
     listAiAgents,
     getAiAgent,
@@ -270,6 +275,14 @@ router.post("/ai/agents/:companyId", authenticateToken, createAiAgent);
 router.put("/ai/agents/:companyId/:agentId", authenticateToken, updateAiAgent);
 router.delete("/ai/agents/:companyId/:agentId", authenticateToken, deleteAiAgent);
 router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAgentToConversation);
+
+/**
+ * STT — Configuración y consumo de transcripciones (migración 009)
+ */
+router.get("/stt/config/:companyId", authenticateToken, getSttConfig);
+router.put("/stt/config/:companyId", authenticateToken, updateSttConfig);
+router.get("/stt/usage/:companyId/year", authenticateToken, getSttUsageYear);
+router.get("/stt/usage/:companyId", authenticateToken, getSttUsage);
 
 /**
  * Fase D.2 — Auto-asignación (disponibilidad de vendedores)
