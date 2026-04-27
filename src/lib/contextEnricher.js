@@ -46,15 +46,15 @@ const INTENT_PATTERNS = {
     ],
     // Placeholders para próximas fases — no activos aún
     precio: [
-        /\bprecio\b/i,
+        /\bprecios?\b/i,
         /\bcu[aá]nto\s+(cuesta|vale|sale|cuestan|valen|salen)\b/i,
         /\bcat[aá]logo\b/i,
         /\bproductos?\b/i,
         /\bprendas?\b/i,
-        /\b(camisa|camiseta|franela|pantalon|uniforme|remera|camisas|camisetas|franelas|pantalones|uniformes|remeras)\b/i,
+        /\b(camisas?|camisetas?|franelas?|pantalones?|uniformes?|remeras?)\b/i,
         /\boferta\b/i,
-        /\bcosto\b/i,
-        /\bvalu\b/i,
+        /\bcostos?\b/i,
+        /\bvalor\b/i,
     ],
     pedido: [
         /\bpedido\b/i, /\borden\b/i, /\benv[ií]o\b/i,
