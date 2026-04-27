@@ -1,0 +1,195 @@
+================================================================================
+TAREA: Pipeline de voz (STT) + contabilidad de tokens IA
+FECHA: 2026-04-27
+ESTADO: COMPLETADO (partes 1-3). Parte 4 pendiente de desarrollo.
+================================================================================
+
+## LO QUE SE IMPLEMENTÓ (COMPLETO)
+
+### Parte 1 — Migración 009 + base de datos
+  - db/migrations/009_stt_transcripts_and_usage.sql
+      * 4 columnas nuevas en wa_messages: transcript, transcript_lang,
+        transcript_cost_usd, transcript_error.
+      * Tabla wa_usage_monthly (year_month CHAR(7), provider VARCHAR(16),
+        usd_micros BIGINT). PK compuesta (year_month, provider).
+        IMPORTANTE: `year_month` es keyword reservada en MariaDB → usar
+        backticks en todas las queries.
+      * Tabla wa_tenant_config singleton (id=1): stt_enabled,
+        stt_monthly_usd_limit (default $3.00), stt_long_audio_seconds (120),
+        stt_language ('es').
+  - ninesys-api/public/model/create_new_company_api_emp_N.sql actualizado
+    (sincronía obligatoria: todo cambio de schema va en los dos archivos).
+  - Migración aplicada manualmente solo en api_emp_163 (única empresa con
+    módulo WhatsApp activo al 2026-04-27).
+
+### Parte 2 — Servicios backend
+  - src/services/usageStore.js
+      * addUsage(pool, provider, usd, callCount)  → acumula en usd_micros
+      * getUsageByMonth / getUsageByYear
+      * getTenantConfig / updateTenantConfig
+  - src/services/sttService.js
+      * transcribeIfEligible(pool, ingested, opts): 5 guardas en orden:
+        1. ¿es ptt?  2. stt_enabled?  3. ≥umbral segundos → handoff
+        4. tope mensual alcanzado → handoff  5. ya existe transcript → cache
+      * Llama a OpenAI Whisper (whisper-1) vía native fetch + FormData + Blob
+        (sin librerías externas, Node 18+).
+      * Precio: $0.006 USD/minuto prorrateado por segundo.
+      * Guarda transcript / transcript_lang / transcript_cost_usd en DB.
+      * Llama a usageStore.addUsage(pool, 'whisper', cost, 1).
+  - src/services/geminiPricing.js
+      * Tabla de precios por modelo (USD/millón tokens): input, output,
+        thinking (para modelos 2.5).
+      * costUsd(modelId, usageMetadata): normaliza el modelo ID (recorta
+        prefijos 'models/', sufijos '-preview-NNNN', fechas '-YYYYMMDD').
+      * Contabiliza promptTokenCount + candidatesTokenCount + thoughtsTokenCount.
+  - src/services/aiService.js MODIFICADO:
+      * loadHistory: CASE WHEN type='audio' THEN transcript ELSE body END
+        para que Gemini lea el texto transcripto en lugar de '[audio]'.
+        (Bug crítico resuelto: body='[audio]' no es NULL, COALESCE no sirve.)
+      * generateReply: tras cada llamada exitosa a Gemini captura
+        response.usageMetadata y llama usageStore.addUsage(pool,'gemini',cost,1).
+  - src/services/waManager.js MODIFICADO:
+      * handleVoiceNote(): orquesta sttService → emit 'message:transcript'
+        vía Socket.IO → maybeAutoReply.
+      * Elimina AUDIO_HANDOFF_SECONDS y maybeHandoffLongVoiceNote (reemplazados
+        por sttService).
+
+### Parte 3 — API endpoints + frontend
+  - controllers/whatsappController.js: getSttConfig, updateSttConfig,
+    getSttUsage, getSttUsageYear.
+  - routes/index.js: GET/PUT /stt/config/:companyId, GET /stt/usage/:companyId,
+    GET /stt/usage/:companyId/year/:year.
+  - app_multi/components/whatsapp/WaConfiguracion.vue:
+      * Tarjeta "Consumo IA del mes" (Whisper + Gemini USD + llamadas).
+      * Tarjeta "Transcripción de voz" (toggle stt_enabled, tope mensual,
+        umbral audio largo, idioma Whisper).
+  - app_multi/components/whatsapp/WaInbox.vue:
+      * Muestra transcripción debajo de cada nota de voz.
+      * Socket 'message:transcript' → actualiza en tiempo real con $set.
+
+---
+
+## PENDIENTE INMEDIATO — Tope de consumo por empresa (CONFIGURACIÓN)
+
+  El campo `stt_monthly_usd_limit` en wa_tenant_config controla el tope de
+  Whisper por empresa, y el frontend ya lo expone. FALTA implementar un tope
+  equivalente para Gemini. Actualmente no hay límite por empresa en el consumo
+  de Gemini — solo un tope global (la cuenta de Google en sí).
+
+  TODO:
+    [ ] Agregar columna `gemini_monthly_usd_limit DECIMAL(10,2) DEFAULT 10.00`
+        a wa_tenant_config (migración 010).
+    [ ] En aiService.generateReply, antes de llamar a Gemini, consultar el
+        gasto acumulado del mes y compararlo contra el límite. Si se supera,
+        no generar respuesta y (opcionalmente) notificar al admin.
+    [ ] Exponer el nuevo campo en los endpoints /stt/config y en el frontend
+        (misma tarjeta de configuración, sección Gemini).
+
+---
+
+## PENDIENTE FUTURO — Panel global de gestión de empresas
+
+  Contexto: se usa una sola cuenta de Google (Gemini) y una sola cuenta de
+  OpenAI (Whisper) para TODOS los tenants. La factura real es la suma de todos.
+  Cada empresa solo ve su propio consumo en /whatsapp/configuracion.
+
+  Se necesita un programa/panel centralizado (separado de app_multi) que:
+    - Liste todas las empresas activas con módulo WhatsApp.
+    - Muestre el consumo individual de Whisper y Gemini por mes.
+    - Muestre el consumo total (suma de todas las empresas) vs. la factura real.
+    - Permita cambiar el tope mensual de cada empresa individualmente.
+    - Permita ejecutar acciones en masa (migrar BD, reiniciar sesión WA, etc.).
+
+  Decisión tomada: NO se desarrolla ahora. Se deja aquí como contexto para
+  cuando se retome.
+
+---
+
+## PRÓXIMA TAREA — Context Enrichment para agentes IA
+  (VER SECCIÓN SEPARADA AL FINAL DE ESTE LOG)
+
+================================================================================
+CONTEXT ENRICHMENT — Cómo funciona la base de conocimiento hoy y qué se va a
+                      construir para datos dinámicos (precios, pedidos, cuenta)
+================================================================================
+
+## CÓMO FUNCIONA HOY
+
+  La base de conocimiento del agente es un campo TEXT en la tabla wa_ai_agents
+  (y wa_ai_settings para el agente global). Se guarda como JSON string.
+
+  En aiService.buildSystemInstruction():
+    1. Se toma el system_prompt del agente.
+    2. Si existe knowledge_base (JSON), se parsea y se serializa de nuevo
+       (pretty-print) y se añade al system prompt como texto plano:
+         "Base de conocimiento de la empresa (usar como referencia):\n<JSON>"
+    3. El resultado es la instrucción de sistema que recibe Gemini.
+
+  Es decir: la knowledge_base ES parte del system_prompt. Gemini la lee como
+  contexto estático en cada llamada.
+
+  Ejemplo de knowledge_base estática válida:
+    {
+      "horario": "Lunes a viernes 8:00-17:00, sábados 8:00-12:00",
+      "productos": [
+        { "nombre": "Franela básica", "precio": 15.00, "moneda": "USD" }
+      ],
+      "politicas": "Cambios en 15 días con etiqueta original."
+    }
+
+## QUÉ SE VA A CONSTRUIR — Context Enrichment dinámico
+
+  Patrón a implementar: antes de cada llamada a Gemini, un módulo
+  `contextEnricher.js` consulta ninesys-api (o directamente el pool del
+  tenant) para obtener datos actualizados y los inyecta en el system prompt
+  junto con la knowledge_base estática. Gemini los recibe como "contexto de
+  esta sesión".
+
+  Datos candidatos por tipo de pregunta detectada (keyword matching simple):
+    - HORARIO: ya implementado via businessHoursClient.js. Solo hay que
+      conectarlo al generateReply.
+    - PRECIOS / CATÁLOGO: endpoint ninesys-api /internal/catalog/:idEmpresa
+      (pendiente de crear en PHP). Retorna productos con precio actual.
+    - ESTADO DE CUENTA: endpoint /internal/account-balance/:idCliente
+      (identidad del cliente se deduce del JID de WhatsApp).
+    - ESTADO DE PEDIDO: endpoint /internal/order-status/:idCliente
+      Retorna los últimos N pedidos con estado actual.
+
+  Arquitectura propuesta:
+    contextEnricher.js
+      ├── enrichContext(idEmpresa, pool, jid, lastUserMessage) → contextText
+      ├── detectIntent(text) → Set<'horario'|'precio'|'pedido'|'cuenta'>
+      ├── fetchSchedule(idEmpresa) → string     [usa businessHoursClient]
+      ├── fetchCatalog(idEmpresa)  → string     [llama ninesys-api]
+      ├── fetchOrders(idEmpresa, clientPhone) → string   [llama ninesys-api]
+      └── fetchBalance(idEmpresa, clientPhone) → string  [llama ninesys-api]
+
+    En aiService.generateReply, justo antes de buildSystemInstruction():
+      const dynamicContext = await contextEnricher.enrichContext(
+          idEmpresa, pool, jid, incomingText
+      );
+      // Se inyecta en effectiveSettings.knowledgeBase o como sección adicional
+      // en el system prompt ANTES de llamar a buildSystemInstruction.
+
+  Pregunta del usuario respondida:
+    ¿Se puede tener un JSON estático en knowledge_base Y también datos dinámicos?
+    → SÍ. El JSON estático queda en wa_ai_agents.knowledge_base (precios base,
+      políticas, info que cambia poco). El contexto dinámico (stock real,
+      pedidos, saldo) se inyecta en tiempo de ejecución como texto adicional
+      en el system prompt. Gemini los recibe juntos y puede usar ambos.
+
+  Pasos para implementar:
+    [ ] 1. Crear endpoint PHP GET /internal/catalog/:idEmpresa en ninesys-api
+           (msg_service.php). Retorna lista de productos activos con precio.
+    [ ] 2. Crear endpoint PHP GET /internal/orders/:clientPhone en ninesys-api.
+           Retorna últimos 5 pedidos del cliente (estado, monto, fecha entrega).
+    [ ] 3. Crear endpoint PHP GET /internal/balance/:clientPhone en ninesys-api.
+           Retorna saldo pendiente del cliente.
+    [ ] 4. Crear src/lib/contextEnricher.js en msg_ninesys con detección de
+           intención simple y fetch de cada fuente de datos.
+    [ ] 5. Modificar aiService.generateReply para llamar a contextEnricher
+           y adjuntar el resultado al system prompt.
+    [ ] 6. Probar con casos: "¿cuánto cuesta X?", "¿cómo va mi pedido?",
+           "¿cuánto le debo?", "¿están abiertos ahora?".
+
+================================================================================

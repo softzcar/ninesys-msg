@@ -160,6 +160,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
             jid,
             incomingText: incoming.body,
             agentId: flags.aiAgentId || null,
+            idEmpresa,
         });
         if (!reply) return;
 

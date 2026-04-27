@@ -451,4 +451,21 @@ router.get("/ws-info/:companyId", async (req, res) => {
         });
     }
 });
+
+/**
+ * POST /cache/invalidate-business-hours/:companyId
+ * Invalida el cache del horario laboral para una empresa.
+ * Útil cuando se cambia el horario en la BD y necesitamos verlo reflejado
+ * inmediatamente sin esperar a que expire el TTL (15 min).
+ */
+router.post("/cache/invalidate-business-hours/:companyId", (req, res) => {
+    const { companyId } = req.params;
+    const businessHoursClient = require("../src/lib/businessHoursClient");
+    businessHoursClient.invalidate(companyId);
+    return res.json({
+        ok: true,
+        message: `Cache invalidado para empresa ${companyId}`,
+    });
+});
+
 module.exports = router;

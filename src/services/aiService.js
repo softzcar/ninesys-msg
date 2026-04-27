@@ -26,6 +26,9 @@
 
 const { GoogleGenAI } = require('@google/genai');
 const log = require('../lib/logger').createLogger('aiService');
+const usageStore = require('./usageStore');
+const geminiPricing = require('./geminiPricing');
+const contextEnricher = require('../lib/contextEnricher');
 
 // Cuántos mensajes de historial inyectamos al prompt. Suficiente para
 // continuidad conversacional sin disparar tokens.
@@ -388,10 +391,20 @@ async function deleteAgent(pool, agentId) {
  * para inyectarlos como historial al modelo.
  */
 async function loadHistory(pool, jid, limit) {
+    // Para mensajes de audio usamos transcript (Whisper) como cuerpo del mensaje.
+    // Si no hay transcript (audio no transcrito), los excluimos del historial para
+    // que Gemini no vea la cadena literal '[audio]' y responda que no puede
+    // procesar audios. Para el resto de tipos usamos body normalmente.
     const [rows] = await pool.query(
-        `SELECT from_me, body, type, ts
+        `SELECT from_me,
+                CASE WHEN type = 'audio' THEN transcript ELSE body END AS body,
+                type, ts
          FROM wa_messages
-         WHERE jid = ? AND body IS NOT NULL
+         WHERE jid = ?
+           AND (
+             (type != 'audio' AND body IS NOT NULL)
+             OR (type = 'audio' AND transcript IS NOT NULL)
+           )
          ORDER BY ts DESC
          LIMIT ?`,
         [jid, limit]
@@ -412,9 +425,15 @@ function buildContents(history) {
 }
 
 /**
- * Construye la instrucción de sistema combinando system_prompt + knowledge_base.
+ * Construye la instrucción de sistema combinando:
+ *   1. system_prompt del agente/settings
+ *   2. knowledge_base estática (JSON → texto)
+ *   3. dynamicContext: contexto en tiempo real inyectado por contextEnricher
+ *
+ * @param {object} settings
+ * @param {string} [dynamicContext]  bloque de texto del enriquecedor (puede ser '')
  */
-function buildSystemInstruction(settings) {
+function buildSystemInstruction(settings, dynamicContext = '') {
     const parts = [];
     if (settings.systemPrompt) {
         parts.push(settings.systemPrompt.trim());
@@ -427,6 +446,9 @@ function buildSystemInstruction(settings) {
             parts.push('Base de conocimiento de la empresa (usar como referencia, no copiar literal):');
             parts.push(JSON.stringify(kb, null, 2));
         } catch (_) { /* kb mal formada → ignorar */ }
+    }
+    if (dynamicContext) {
+        parts.push(dynamicContext);
     }
     if (!parts.length) {
         parts.push('Eres un asistente de atención al cliente vía WhatsApp. Responde de forma breve, amable y útil.');
@@ -450,7 +472,7 @@ function buildSystemInstruction(settings) {
  *          null si IA está deshabilitada en el tenant o si el modelo no
  *          devolvió texto.
  */
-async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId }) {
+async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa }) {
     const settings = await loadSettings(pool);
     if (!settings || !settings.enabled) return null;
 
@@ -485,8 +507,23 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     const history = await loadHistory(pool, jid, historyLimit);
     if (!history.length && !incomingText) return null;
 
+    // Contexto dinámico (horario, y en fases futuras: precios, pedidos, saldo).
+    // Se añade al system prompt sólo si enriquece con datos reales; si falla
+    // la fuente externa simplemente devuelve '' y no afecta la respuesta.
+    let dynamicContext = '';
+    if (idEmpresa) {
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText || '')
+            .catch((err) => {
+                log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
+                return '';
+            });
+        if (dynamicContext) {
+            log.debug({ jid, idEmpresa, contextLength: dynamicContext.length }, 'aiService: contexto dinámico inyectado');
+        }
+    }
+
     const contents = buildContents(history);
-    const systemInstruction = buildSystemInstruction(effectiveSettings);
+    const systemInstruction = buildSystemInstruction(effectiveSettings, dynamicContext);
 
     let response;
     const startedAt = Date.now();
@@ -504,6 +541,14 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
         log.info(
             { jid, model: effectiveModel, agentId: agent?.id || null, durMs: Date.now() - startedAt },
             'Gemini ok'
+        );
+        const geminiCost = geminiPricing.costUsd(effectiveModel, response?.usageMetadata);
+        usageStore.addUsage(pool, 'gemini', geminiCost, 1).catch((err) =>
+            log.warn({ err }, 'usageStore.addUsage gemini falló (no crítico)')
+        );
+        log.debug(
+            { jid, model: effectiveModel, usage: response?.usageMetadata, cost_usd: geminiCost },
+            'Gemini usage contabilizado'
         );
     } catch (e) {
         log.error(
