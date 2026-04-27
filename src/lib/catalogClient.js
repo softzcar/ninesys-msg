@@ -79,8 +79,16 @@ async function fetchCatalog(idEmpresa, searchTerm) {
     } catch (err) {
         const status = err.response?.status;
         const reason = err.response?.data?.error || err.code || err.message;
-        log.warn(
-            { tenantId: id, searchTerm, status, reason },
+        log.error(
+            {
+                tenantId: id,
+                searchTerm,
+                status,
+                reason,
+                message: err.message,
+                code: err.code,
+                url: `${API_URL}/internal/catalog/${id}?search=${searchTerm}`
+            },
             'fetchCatalog falló'
         );
         return null;
