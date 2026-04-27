@@ -9,18 +9,15 @@
  *   const ctx = await enrichContext(idEmpresa, incomingText);
  *   // ctx es un string (puede ser vacío). Se concatena al system prompt.
  *
- * Diseño de capas:
- *   - detectIntent(text)        → Set de intenciones detectadas por keyword
- *   - fetchSchedule(idEmpresa)  → texto formateado del horario (siempre se
- *                                  inyecta: es pequeño y muy útil)
- *   - [futuro] fetchCatalog     → precios/catálogo bajo demanda
- *   - [futuro] fetchOrders      → estado de pedidos bajo demanda
- *   - [futuro] fetchBalance     → saldo del cliente bajo demanda
+ * Estrategia:
+ *   - fetchSchedule(idEmpresa)  → horario (siempre se inyecta)
+ *   - fetchProducts(idEmpresa, incomingText) → catálogo/precios (siempre se
+ *                                  intenta, pero solo se inyecta si hay resultados)
  *
  * Regla de inyección:
  *   El horario se inyecta siempre (≈30 tokens, alto impacto).
- *   Los demás se inyectan solo si detectIntent() lo indica, para no inflar
- *   el prompt con datos irrelevantes en cada conversación.
+ *   Los productos se buscan siempre y se inyectan si hay resultados.
+ *   Si no hay resultados, simplemente no contamina el contexto.
  */
 
 const businessHoursClient = require('./businessHoursClient');
@@ -28,68 +25,6 @@ const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
 const log = require('./logger').createLogger('contextEnricher');
 
-// ---------------------------------------------------------------------------
-// Detección de intención por keywords
-// ---------------------------------------------------------------------------
-
-const INTENT_PATTERNS = {
-    horario: [
-        /\bhorario\b/i,
-        /\babierto\b/i,
-        /\babiertos?\b/i,
-        /\batienden?\b/i,
-        /\bcierran?\b/i,
-        /\bhoras?\s+de\s+(atenci[oó]n|trabajo|oficina)\b/i,
-        /\bestan?\s+(abierto|disponible)\b/i,
-        /\bcuando\s+(abren?|atienden?|trabajan?)\b/i,
-        /\bdisponible\b/i,
-    ],
-    // Placeholders para próximas fases — no activos aún
-    precio: [
-        /\bprecios?\b/i,
-        /\bcu[aá]nto\s+(cuesta|vale|sale|cuestan|valen|salen)\b/i,
-        /\bcat[aá]logo\b/i,
-        /\bproductos?\b/i,
-        /\bprendas?\b/i,
-        /\b(camisas?|camisetas?|franelas?|pantalones?|uniformes?|remeras?)\b/i,
-        /\boferta\b/i,
-        /\bcostos?\b/i,
-        /\bvalor\b/i,
-    ],
-    pedido: [
-        /\bpedido\b/i, /\borden\b/i, /\benv[ií]o\b/i,
-        /\bcu[aá]ndo\s+(llega|viene|estar[aá])\b/i,
-        /\bestado\s+de\b/i, /\bdónde\s+est[aá]\b/i,
-    ],
-    cuenta: [
-        /\bdeuda\b/i, /\bsaldo\b/i, /\bcuenta\b/i,
-        /\bcuánto\s+(debo|me\s+falta|queda)\b/i,
-        /\bpagar?\b/i, /\bfactura\b/i,
-    ],
-};
-
-/**
- * Detecta intenciones presentes en el texto del usuario.
- * @param {string} text
- * @returns {Set<string>}
- */
-function detectIntent(text) {
-    const found = new Set();
-    if (!text) {
-        log.debug('detectIntent: texto vacío');
-        return found;
-    }
-    for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
-        for (const re of patterns) {
-            if (re.test(text)) {
-                log.debug({ intent, pattern: re.toString(), text }, 'detectIntent: coincidencia encontrada');
-                found.add(intent);
-                break;
-            }
-        }
-    }
-    return found;
-}
 
 // ---------------------------------------------------------------------------
 // Formateadores de contexto
@@ -250,11 +185,11 @@ async function fetchProducts(idEmpresa, searchTerm) {
 /**
  * Genera el bloque de contexto dinámico para inyectar en el system prompt.
  *
- * IMPORTANTE: Timeout de 3 segundos. Si ninesys-api tarda más,
- * retorna contexto vacío en lugar de bloquear la respuesta del agente.
+ * Estrategia: inyectar siempre horario + intentar buscar productos sin detectIntent().
+ * Si no hay resultados, simplemente no se inyecta nada (no contamina contexto).
  *
  * @param {number}  idEmpresa
- * @param {string}  [lastUserMessage]  - último mensaje del cliente (para detectIntent)
+ * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
 async function enrichContext(idEmpresa, lastUserMessage = '') {
@@ -278,38 +213,27 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
     const schedule = await schedulePromise;
     if (schedule) {
         sections.push(schedule);
-        log.debug({ idEmpresa, schedule }, 'contextEnricher: horario inyectado');
+        log.debug({ idEmpresa }, 'contextEnricher: horario inyectado');
     } else {
         log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo horario');
     }
 
-    // Detectar intenciones y cargar contexto bajo demanda (con timeout)
-    const intents = detectIntent(lastUserMessage);
-    log.info({ idEmpresa, intents: Array.from(intents), message: lastUserMessage }, 'contextEnricher: detectIntent resultado');
-
-    if (intents.has('precio')) {
-        log.debug({ idEmpresa, message: lastUserMessage }, 'contextEnricher: intent precio detectada, obteniendo catálogo');
-        const productsPromise = Promise.race([
-            fetchProducts(idEmpresa, lastUserMessage),
-            new Promise((resolve) =>
-                setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
-                    resolve(null);
-                }, 15000)
-            ),
-        ]);
-        const products = await productsPromise;
-        if (products) {
-            sections.push(products);
-            log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
-        } else {
-            log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo catálogo (null o timeout)');
-        }
+    // Siempre intentar buscar productos (sin detectIntent). Si no hay resultados,
+    // fetchProducts devuelve null y simplemente no se inyecta nada.
+    const productsPromise = Promise.race([
+        fetchProducts(idEmpresa, lastUserMessage),
+        new Promise((resolve) =>
+            setTimeout(() => {
+                log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
+                resolve(null);
+            }, 15000)
+        ),
+    ]);
+    const products = await productsPromise;
+    if (products) {
+        sections.push(products);
+        log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
     }
-
-    // Intenciones futuras (no activas aún)
-    // if (intents.has('pedido')) sections.push(await fetchOrders(idEmpresa, clientPhone));
-    // if (intents.has('cuenta')) sections.push(await fetchBalance(idEmpresa, clientPhone));
 
     const elapsed = Date.now() - startTime;
     log.info({ idEmpresa, sections: sections.length, elapsed }, 'enrichContext: COMPLETADO');
@@ -332,7 +256,6 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
 module.exports = {
     enrichContext,
     // Expuestos para tests
-    detectIntent,
     _fetchSchedule: fetchSchedule,
     _fetchProducts: fetchProducts,
     _decimalToHHMM: decimalToHHMM,
