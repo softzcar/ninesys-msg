@@ -190,10 +190,11 @@ async function fetchProducts(idEmpresa, searchTerm) {
         'dame', 'deme', 'quiero', 'necesito', 'tengo', 'busco',
         'cuesta', 'cuestan', 'vale', 'valen', 'sale', 'salen',
         'es', 'son', 'soy', 'eres', 'somos', 'sois',
-        // Palabras clave de búsqueda
-        'precio', 'precio', 'catalogo', 'producto',
-        'cual', 'cuanto', 'cuantos', 'cuales', 'cuanta', 'cuantas',
-        'como', 'donde', 'cuando', 'pues', 'porque', 'bien',
+        // Palabras clave de búsqueda (con y sin acentos)
+        'precio', 'catalogo', 'producto',
+        'cual', 'cuál', 'cuanto', 'cuánto', 'cuantos', 'cuántos',
+        'cuales', 'cuáles', 'cuanta', 'cuánta', 'cuantas', 'cuántas',
+        'como', 'cómo', 'donde', 'dónde', 'cuando', 'cuándo', 'pues', 'porque', 'porqué', 'bien',
     ]);
     const keywords = searchTerm
         .toLowerCase()
