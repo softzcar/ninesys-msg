@@ -59,10 +59,15 @@ async function fetchCatalog(idEmpresa, searchTerm) {
 
     // Miss o stale → pedir a la API
     try {
+        const url = `${API_URL}/internal/catalog/${id}?search=${encodeURIComponent(searchTerm)}`;
+        log.info({ id, searchTerm, url }, 'catalogClient: solicitando');
+
         const res = await http.get(`/internal/catalog/${id}`, {
             params: { search: searchTerm },
             headers: { Authorization: String(id) },
         });
+
+        log.info({ id, searchTerm, status: res.status }, 'catalogClient: respuesta recibida');
 
         const payload = res.data;
         if (!payload || typeof payload !== 'object') {
