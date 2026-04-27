@@ -182,10 +182,18 @@ async function fetchProducts(idEmpresa, searchTerm) {
 
     // Extrae palabras clave del mensaje (palabras con 3+ caracteres, excluyendo preposiciones)
     const stopwords = new Set([
-        'el', 'la', 'de', 'para', 'por', 'con', 'sin', 'que', 'pero', 'este',
-        'este', 'esa', 'ese', 'este', 'dame', 'deme', 'quiero', 'necesito',
-        'tengo', 'busco', 'precio', 'cual', 'cuanto', 'cuantos', 'cuales',
-        'como', 'donde', 'cuando', 'pues', 'porque', 'es',
+        // Artículos y preposiciones
+        'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas',
+        'de', 'para', 'por', 'con', 'sin', 'que', 'pero', 'este',
+        'esa', 'ese', 'aquel', 'aquella', 'aquello',
+        // Verbos conjugados (muy comunes)
+        'dame', 'deme', 'quiero', 'necesito', 'tengo', 'busco',
+        'cuesta', 'cuestan', 'vale', 'valen', 'sale', 'salen',
+        'es', 'son', 'soy', 'eres', 'somos', 'sois',
+        // Palabras clave de búsqueda
+        'precio', 'precio', 'catalogo', 'producto',
+        'cual', 'cuanto', 'cuantos', 'cuales', 'cuanta', 'cuantas',
+        'como', 'donde', 'cuando', 'pues', 'porque', 'bien',
     ]);
     const keywords = searchTerm
         .toLowerCase()
