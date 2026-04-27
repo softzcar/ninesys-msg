@@ -215,14 +215,14 @@ async function fetchProducts(idEmpresa, searchTerm) {
 async function enrichContext(idEmpresa, lastUserMessage = '') {
     const sections = [];
 
-    // Wrapper con timeout para schedule (8s para llamadas HTTP remotas)
+    // Wrapper con timeout para schedule (15s para llamadas HTTP remotas)
     const schedulePromise = Promise.race([
         fetchSchedule(idEmpresa),
         new Promise((resolve) =>
             setTimeout(() => {
                 log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
                 resolve(null);
-            }, 8000)
+            }, 15000)
         ),
     ]);
 
@@ -237,20 +237,25 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
 
     // Detectar intenciones y cargar contexto bajo demanda (con timeout)
     const intents = detectIntent(lastUserMessage);
+    log.debug({ idEmpresa, intents: Array.from(intents), message: lastUserMessage }, 'contextEnricher: detectIntent resultado');
+
     if (intents.has('precio')) {
+        log.debug({ idEmpresa, message: lastUserMessage }, 'contextEnricher: intent precio detectada, obteniendo catálogo');
         const productsPromise = Promise.race([
             fetchProducts(idEmpresa, lastUserMessage),
             new Promise((resolve) =>
                 setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
                     resolve(null);
-                }, 8000)
+                }, 15000)
             ),
         ]);
         const products = await productsPromise;
         if (products) {
             sections.push(products);
-            log.debug({ idEmpresa }, 'contextEnricher: catálogo inyectado');
+            log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
+        } else {
+            log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo catálogo (null o timeout)');
         }
     }
 
