@@ -185,15 +185,16 @@ async function fetchProducts(idEmpresa, searchTerm) {
         'el', 'la', 'de', 'para', 'por', 'con', 'sin', 'que', 'pero', 'este',
         'este', 'esa', 'ese', 'este', 'dame', 'deme', 'quiero', 'necesito',
         'tengo', 'busco', 'precio', 'cual', 'cuanto', 'cuantos', 'cuales',
-        'cual', 'como', 'donde', 'cuando', 'por', 'pues', 'porque',
+        'como', 'donde', 'cuando', 'pues', 'porque', 'es',
     ]);
     const keywords = searchTerm
         .toLowerCase()
+        .replace(/[¿?¡!.,;:—-]/g, ' ')  // Limpia puntuación
         .split(/\s+/)
         .filter(w => w.length >= 3 && !stopwords.has(w))
         .join(' ');
 
-    const finalSearch = keywords || searchTerm;
+    const finalSearch = keywords.trim() || searchTerm;
 
     try {
         log.debug({ idEmpresa, originalTerm: searchTerm, finalSearch }, 'fetchProducts: buscando');
