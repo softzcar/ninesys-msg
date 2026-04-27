@@ -155,6 +155,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
         if (now - last < AI_THROTTLE_MS) return;
         _aiLastReply.set(jid, now);
 
+        log.debug({ jid, incomingText: incoming.body, aiEnabled: flags.aiEnabled }, 'maybeAutoReply: llamando generateReply');
         const reply = await aiService.generateReply({
             pool,
             jid,
@@ -232,6 +233,7 @@ async function handleVoiceNote(idEmpresa, pool, result, rawAudioMessage) {
 
     if (sttResult.ok) {
         result.message.body = sttResult.text;
+        log.info({ jid, transcript: sttResult.text }, 'handleVoiceNote: transcript OK — body actualizado');
         emit(idEmpresa, 'message:transcript', {
             companyId: idEmpresa,
             jid,
@@ -239,8 +241,11 @@ async function handleVoiceNote(idEmpresa, pool, result, rawAudioMessage) {
             transcript: sttResult.text,
             transcript_lang: sttResult.language,
         });
+    } else {
+        log.warn({ jid, reason: sttResult.reason }, 'handleVoiceNote: STT no OK — no se transcribió');
     }
 
+    log.debug({ jid, body: result.message.body }, 'handleVoiceNote: llamando maybeAutoReply con body');
     maybeAutoReply(idEmpresa, pool, result);
     return false;
 }
