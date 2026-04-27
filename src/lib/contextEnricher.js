@@ -219,12 +219,12 @@ async function fetchProducts(idEmpresa, searchTerm) {
             let line = `• ${p.name}`;
             if (p.is_design) {
                 line += ' (diseño personalizado — solicita cotización)';
-            } else if (p.price_min !== null) {
-                if (p.price_max && p.price_max > p.price_min) {
-                    line += ` — desde $${p.price_min.toFixed(2)} hasta $${p.price_max.toFixed(2)}`;
-                } else {
-                    line += ` — $${p.price_min.toFixed(2)}`;
-                }
+            } else if (p.prices && p.prices.length > 0) {
+                // Formatear todos los precios con sus descripciones
+                const priceStrings = p.prices.map(
+                    pr => `$${pr.price.toFixed(2)} (${pr.descripcion})`
+                );
+                line += ` — ${priceStrings.join(', ')}`;
             }
             if (p.description) {
                 line += ` (${p.description})`;
