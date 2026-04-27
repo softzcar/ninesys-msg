@@ -117,7 +117,12 @@ async function fetchSchedule(idEmpresa) {
         hours = await businessHoursClient.fetchBusinessHours(idEmpresa);
         log.debug({ idEmpresa, hours }, 'fetchSchedule: respuesta recibida');
     } catch (err) {
-        log.warn({ err, idEmpresa }, 'fetchSchedule: error al obtener horario');
+        log.error({
+            err: err.message,
+            code: err.code,
+            errno: err.errno,
+            idEmpresa
+        }, 'fetchSchedule: error al obtener horario');
         return null;
     }
     if (!hours) {
@@ -197,7 +202,13 @@ async function fetchProducts(idEmpresa, searchTerm) {
         }
         return lines.join('\n');
     } catch (err) {
-        log.warn({ err, idEmpresa, searchTerm }, 'fetchProducts falló');
+        log.error({
+            err: err.message,
+            code: err.code,
+            errno: err.errno,
+            idEmpresa,
+            searchTerm
+        }, 'fetchProducts falló');
         return null;
     }
 }
