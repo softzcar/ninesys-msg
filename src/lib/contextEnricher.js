@@ -215,14 +215,14 @@ async function fetchProducts(idEmpresa, searchTerm) {
 async function enrichContext(idEmpresa, lastUserMessage = '') {
     const sections = [];
 
-    // Wrapper con timeout para schedule
+    // Wrapper con timeout para schedule (8s para llamadas HTTP remotas)
     const schedulePromise = Promise.race([
         fetchSchedule(idEmpresa),
         new Promise((resolve) =>
             setTimeout(() => {
                 log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
                 resolve(null);
-            }, 3000)
+            }, 8000)
         ),
     ]);
 
@@ -244,7 +244,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
                 setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
                     resolve(null);
-                }, 3000)
+                }, 8000)
             ),
         ]);
         const products = await productsPromise;
