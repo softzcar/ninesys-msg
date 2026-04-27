@@ -75,10 +75,14 @@ const INTENT_PATTERNS = {
  */
 function detectIntent(text) {
     const found = new Set();
-    if (!text) return found;
+    if (!text) {
+        log.debug('detectIntent: texto vacío');
+        return found;
+    }
     for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
         for (const re of patterns) {
             if (re.test(text)) {
+                log.debug({ intent, pattern: re.toString(), text }, 'detectIntent: coincidencia encontrada');
                 found.add(intent);
                 break;
             }
@@ -224,7 +228,10 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
 async function enrichContext(idEmpresa, lastUserMessage = '') {
+    const startTime = Date.now();
     const sections = [];
+
+    log.info({ idEmpresa, message: lastUserMessage }, 'enrichContext: INICIANDO');
 
     // Wrapper con timeout para schedule (15s para llamadas HTTP remotas)
     const schedulePromise = Promise.race([
@@ -248,7 +255,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
 
     // Detectar intenciones y cargar contexto bajo demanda (con timeout)
     const intents = detectIntent(lastUserMessage);
-    log.debug({ idEmpresa, intents: Array.from(intents), message: lastUserMessage }, 'contextEnricher: detectIntent resultado');
+    log.info({ idEmpresa, intents: Array.from(intents), message: lastUserMessage }, 'contextEnricher: detectIntent resultado');
 
     if (intents.has('precio')) {
         log.debug({ idEmpresa, message: lastUserMessage }, 'contextEnricher: intent precio detectada, obteniendo catálogo');
@@ -274,13 +281,22 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
     // if (intents.has('pedido')) sections.push(await fetchOrders(idEmpresa, clientPhone));
     // if (intents.has('cuenta')) sections.push(await fetchBalance(idEmpresa, clientPhone));
 
-    if (!sections.length) return '';
+    const elapsed = Date.now() - startTime;
+    log.info({ idEmpresa, sections: sections.length, elapsed }, 'enrichContext: COMPLETADO');
 
-    return [
+    if (!sections.length) {
+        log.warn({ idEmpresa, elapsed }, 'enrichContext: retornando contexto vacío');
+        return '';
+    }
+
+    const context = [
         '--- Contexto en tiempo real (usar para responder con precisión) ---',
         ...sections,
         '--- Fin del contexto en tiempo real ---',
     ].join('\n');
+
+    log.info({ idEmpresa, length: context.length, elapsed }, 'enrichContext: contexto inyectado');
+    return context;
 }
 
 module.exports = {
