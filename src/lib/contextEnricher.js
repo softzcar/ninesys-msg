@@ -180,9 +180,29 @@ async function fetchSchedule(idEmpresa) {
 async function fetchProducts(idEmpresa, searchTerm) {
     if (!searchTerm || searchTerm.length < 2) return null;
 
+    // Extrae palabras clave del mensaje (palabras con 3+ caracteres, excluyendo preposiciones)
+    const stopwords = new Set([
+        'el', 'la', 'de', 'para', 'por', 'con', 'sin', 'que', 'pero', 'este',
+        'este', 'esa', 'ese', 'este', 'dame', 'deme', 'quiero', 'necesito',
+        'tengo', 'busco', 'precio', 'cual', 'cuanto', 'cuantos', 'cuales',
+        'cual', 'como', 'donde', 'cuando', 'por', 'pues', 'porque',
+    ]);
+    const keywords = searchTerm
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(w => w.length >= 3 && !stopwords.has(w))
+        .join(' ');
+
+    const finalSearch = keywords || searchTerm;
+
     try {
-        const catalog = await catalogClient.fetchCatalog(idEmpresa, searchTerm);
-        if (!catalog || !catalog.products || !catalog.products.length) return null;
+        log.debug({ idEmpresa, originalTerm: searchTerm, finalSearch }, 'fetchProducts: buscando');
+        const catalog = await catalogClient.fetchCatalog(idEmpresa, finalSearch);
+        if (!catalog || !catalog.products || !catalog.products.length) {
+            log.debug({ idEmpresa, finalSearch, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
+            return null;
+        }
+        log.info({ idEmpresa, finalSearch, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
         const lines = ['Productos disponibles:'];
         for (const p of catalog.products.slice(0, 10)) { // Limitar a 10 para no inflar el prompt
