@@ -58,7 +58,7 @@ async function resolveItemIds(idEmpresa, items) {
  * Devuelve { customerId, vendorId|null }.
  * vendorId viene del historial del cliente (último vendedor activo).
  */
-async function resolveCustomer(pool, jid, clienteData) {
+async function resolveCustomer(pool, jid, clienteData, clientPhone = '') {
     // Buscar cliente existente
     const existing = await customerLookup.findCustomerByJid(pool, jid);
     if (existing) {
@@ -71,7 +71,7 @@ async function resolveCustomer(pool, jid, clienteData) {
     const nombre    = (clienteData.nombre    || '').trim();
     const apellido  = (clienteData.apellido  || '').trim();
     const cedula    = (clienteData.cedula    || '').trim();
-    const telefono  = (clienteData.telefono  || '').trim();
+    const telefono  = clientPhone || (clienteData.telefono || '').trim();
     const email     = (clienteData.email     || '').trim().toLowerCase();
     const direccion = (clienteData.direccion || '').trim();
 
@@ -92,11 +92,11 @@ async function resolveCustomer(pool, jid, clienteData) {
  * Inserta el presupuesto y sus líneas de producto.
  * Devuelve el id del presupuesto creado.
  */
-async function createPresupuesto(pool, { cliente, customerId, items, fechaEntrega, obs, total }) {
+async function createPresupuesto(pool, { cliente, customerId, items, obs, total }) {
     const now = formatDatetime();
     const todayStr = today();
     const clienteNombre = [cliente.nombre, cliente.apellido].filter(Boolean).join(' ').trim();
-    const fechaEntregaFinal = fechaEntrega || todayStr;
+    const fechaEntregaFinal = todayStr;
 
     const [presResult] = await pool.query(
         `INSERT INTO presupuestos
@@ -164,7 +164,7 @@ async function createPresupuesto(pool, { cliente, customerId, items, fechaEntreg
  * @param {Function} opts.handoffFn    - waManager.handoffToHuman(idEmpresa, pool, jid, reason, opts)
  * @returns {Promise<{ok: boolean, id_presupuesto: number|null, vendorId: number|null}>}
  */
-async function submit({ idEmpresa, pool, jid, data, handoffFn }) {
+async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn }) {
     try {
         log.info({ idEmpresa, jid, itemCount: data.items?.length }, 'presupuestoService: iniciando submit');
 
@@ -172,7 +172,7 @@ async function submit({ idEmpresa, pool, jid, data, handoffFn }) {
         const resolvedItems = await resolveItemIds(idEmpresa, data.items || []);
 
         // 2. Cliente
-        const { customerId, vendorId: historicVendorId } = await resolveCustomer(pool, jid, data.cliente || {});
+        const { customerId, vendorId: historicVendorId } = await resolveCustomer(pool, jid, data.cliente || {}, clientPhone);
 
         // 3. Calcular total
         const total = resolvedItems.reduce(
@@ -185,7 +185,6 @@ async function submit({ idEmpresa, pool, jid, data, handoffFn }) {
             cliente: data.cliente || {},
             customerId,
             items: resolvedItems,
-            fechaEntrega: data.fechaEntrega,
             obs: data.obs,
             total,
         });

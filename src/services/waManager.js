@@ -485,11 +485,27 @@ async function init(idEmpresa) {
                                 if (PRESUPUESTO_CONFIRM_RE.test(msgNorm)) {
                                     _pendingPresupuestos.delete(result.jid);
                                     handledByPresupuesto = true;
+
+                                    // Resolver teléfono del cliente desde el JID
+                                    let clientPhone = '';
+                                    if (result.jid.includes('@s.whatsapp.net')) {
+                                        clientPhone = result.jid.replace('@s.whatsapp.net', '');
+                                    } else {
+                                        const senderPn = m.key?.senderPn;
+                                        if (senderPn?.includes('@s.whatsapp.net')) {
+                                            clientPhone = senderPn.replace('@s.whatsapp.net', '');
+                                        } else {
+                                            const phoneJid = await lidMapping.resolvePhoneJid(pool, result.jid).catch(() => null);
+                                            if (phoneJid) clientPhone = phoneJid.replace('@s.whatsapp.net', '');
+                                        }
+                                    }
+
                                     presupuestoService.submit({
                                         idEmpresa: id,
                                         pool,
                                         jid: result.jid,
                                         data: pendingPres,
+                                        clientPhone,
                                         handoffFn: handoffToHuman,
                                     }).then(({ ok, id_presupuesto }) => {
                                         const msg = ok
