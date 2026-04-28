@@ -51,7 +51,7 @@ const _aiLastReply = new Map(); // jid → ts ms
 // Presupuestos pendientes de confirmación del cliente: jid → data parseada
 const _pendingPresupuestos = new Map();
 
-const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESUPUESTO_DATA\]/;
+const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESUPUEST\w*_DATA\]/i;
 const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
 
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
