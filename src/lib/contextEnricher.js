@@ -20,10 +20,72 @@
  *   Si no hay resultados, simplemente no contamina el contexto.
  */
 
+const { GoogleGenAI } = require('@google/genai');
 const businessHoursClient = require('./businessHoursClient');
 const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
 const log = require('./logger').createLogger('contextEnricher');
+
+const INTENT_TIMEOUT_MS = 3000;
+
+const INTENT_PROMPT = `Eres un asistente de una tienda de ropa personalizada.
+
+Del siguiente mensaje de un cliente extrae el nombre del producto de ropa o tela que se menciona. Responde SOLO con el nombre del producto en singular y minúsculas, sin ningún texto adicional. Si no hay producto, responde solo la palabra: null
+
+Ejemplos:
+"franela" → franela
+"joggers" → jogger
+"vender joggers" → jogger
+"tienen remeras?" → remera
+"cuanto salen las camisetas" → camiseta
+"me interesan los buzos con logo" → buzo
+"kiero vr los poleras" → polera
+"bermuda" → bermuda
+"hola buenas" → null
+"gracias" → null
+"q tal les quedo el pedido" → null
+"cuando me entregan" → null
+
+Mensaje del cliente: `;
+
+/**
+ * Usa Gemini para detectar si el mensaje es una búsqueda de productos
+ * y extrae el término de búsqueda óptimo.
+ * Retorna el término de búsqueda (string) o null si no es una búsqueda.
+ */
+async function extractProductSearch(message) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+
+    let timer;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => {
+            log.warn({ message }, 'extractProductSearch: timeout');
+            resolve(null);
+        }, INTENT_TIMEOUT_MS);
+    });
+
+    const call = (async () => {
+        try {
+            const client = new GoogleGenAI({ apiKey });
+            const res = await client.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: [{ role: 'user', parts: [{ text: INTENT_PROMPT + `"${message}"` }] }],
+                config: { temperature: 0, maxOutputTokens: 128 },
+            });
+            const raw = (res?.text || '').trim().toLowerCase();
+            if (!raw || raw === 'null') return null;
+            return raw;
+        } catch (err) {
+            log.warn({ err: err.message, message }, 'extractProductSearch: falló (no crítico)');
+            return null;
+        }
+    })();
+
+    const result = await Promise.race([call, timeout]);
+    clearTimeout(timer);
+    return result;
+}
 
 
 // ---------------------------------------------------------------------------
@@ -115,41 +177,22 @@ async function fetchSchedule(idEmpresa) {
 async function fetchProducts(idEmpresa, searchTerm) {
     if (!searchTerm || searchTerm.length < 2) return null;
 
-    // Extrae palabras clave del mensaje (palabras con 3+ caracteres, excluyendo preposiciones)
-    const stopwords = new Set([
-        // Artículos y preposiciones
-        'el', 'la', 'los', 'las', 'un', 'una', 'unos', 'unas',
-        'de', 'para', 'por', 'con', 'sin', 'que', 'pero', 'este',
-        'esa', 'ese', 'aquel', 'aquella', 'aquello',
-        // Verbos conjugados (muy comunes)
-        'dame', 'deme', 'quiero', 'necesito', 'tengo', 'busco',
-        'cuesta', 'cuestan', 'vale', 'valen', 'sale', 'salen',
-        'es', 'son', 'soy', 'eres', 'somos', 'sois',
-        // Palabras clave de búsqueda (con y sin acentos)
-        'precio', 'catalogo', 'producto',
-        'cual', 'cuál', 'cuanto', 'cuánto', 'cuantos', 'cuántos',
-        'cuales', 'cuáles', 'cuanta', 'cuánta', 'cuantas', 'cuántas',
-        'como', 'cómo', 'donde', 'dónde', 'cuando', 'cuándo', 'pues', 'porque', 'porqué', 'bien',
-    ]);
-    const keywords = searchTerm
-        .toLowerCase()
-        .replace(/[¿?¡!.,;:—-]/g, ' ')  // Limpia puntuación
-        .split(/\s+/)
-        .filter(w => w.length >= 3 && !stopwords.has(w))
-        .join(' ');
-
-    const finalSearch = keywords.trim() || searchTerm;
+    const finalSearch = await extractProductSearch(searchTerm);
+    if (!finalSearch) {
+        log.info({ idEmpresa, searchTerm }, 'fetchProducts: Gemini no detectó búsqueda de productos');
+        return null;
+    }
 
     try {
-        log.debug({ idEmpresa, originalTerm: searchTerm, finalSearch }, 'fetchProducts: buscando');
+        log.info({ idEmpresa, originalTerm: searchTerm, finalSearch }, 'fetchProducts: buscando');
         const catalog = await catalogClient.fetchCatalog(idEmpresa, finalSearch);
         if (!catalog || !catalog.products || !catalog.products.length) {
-            log.debug({ idEmpresa, finalSearch, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
+            log.info({ idEmpresa, finalSearch, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
             return null;
         }
         log.info({ idEmpresa, finalSearch, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
-        const lines = ['Productos disponibles:'];
+        const lines = ['Productos encontrados para la consulta del cliente (DEBES listar cada uno con su nombre y precios en tu respuesta):'];
         for (const p of catalog.products.slice(0, 10)) { // Limitar a 10 para no inflar el prompt
             let line = `• ${p.name}`;
             if (p.is_design) {
