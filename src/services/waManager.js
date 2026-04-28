@@ -41,11 +41,18 @@ const assignmentPolicy = require('./assignmentPolicy');
 const internalMessenger = require('./internalMessenger');
 const customerLookup = require('./customerLookup');
 const lidMapping = require('./lidMapping');
+const presupuestoService = require('./presupuestoService');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
 const AI_THROTTLE_MS = 4000;
 const _aiLastReply = new Map(); // jid → ts ms
+
+// Presupuestos pendientes de confirmación del cliente: jid → data parseada
+const _pendingPresupuestos = new Map();
+
+const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESUPUESTO_DATA\]/;
+const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
 
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
 // El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
@@ -165,8 +172,22 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
         });
         if (!reply) return;
 
+        // Extraer marker de presupuesto si la IA lo incluyó
+        let textToSend = reply.text;
+        const markerMatch = PRESUPUESTO_MARKER_RE.exec(reply.text);
+        if (markerMatch) {
+            textToSend = reply.text.replace(markerMatch[0], '').trim();
+            try {
+                const presupuestoData = JSON.parse(markerMatch[1]);
+                _pendingPresupuestos.set(jid, presupuestoData);
+                log.info({ jid }, 'maybeAutoReply: presupuesto pendiente registrado');
+            } catch (parseErr) {
+                log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
+            }
+        }
+
         try {
-            await sendText(idEmpresa, jid, reply.text, { via: 'ai' });
+            await sendText(idEmpresa, jid, textToSend || reply.text, { via: 'ai' });
             await pool.query(
                 `INSERT INTO wa_send_log (endpoint, phone, status, requested_by)
                  VALUES (?, ?, 'ok', ?)`,
@@ -455,13 +476,47 @@ async function init(idEmpresa) {
                         }
                         if (!autoAssigned) {
                             const audioMsg = m.message?.audioMessage;
-                            if (audioMsg?.ptt) {
-                                // Nota de voz: pipeline STT → transcript → IA (o handoff).
-                                handleVoiceNote(id, pool, result, audioMsg).catch((e) =>
-                                    log.error({ err: e, tenantId: id, jid: result.jid }, 'handleVoiceNote falló')
-                                );
-                            } else {
-                                maybeAutoReply(id, pool, result);
+
+                            // Verificar si hay presupuesto pendiente de confirmación
+                            let handledByPresupuesto = false;
+                            const pendingPres = _pendingPresupuestos.get(result.jid);
+                            if (pendingPres) {
+                                const msgNorm = (result.message.body || '').trim();
+                                if (PRESUPUESTO_CONFIRM_RE.test(msgNorm)) {
+                                    _pendingPresupuestos.delete(result.jid);
+                                    handledByPresupuesto = true;
+                                    presupuestoService.submit({
+                                        idEmpresa: id,
+                                        pool,
+                                        jid: result.jid,
+                                        data: pendingPres,
+                                        handoffFn: handoffToHuman,
+                                    }).then(({ ok, id_presupuesto }) => {
+                                        const msg = ok
+                                            ? `Tu presupuesto #${id_presupuesto} ha sido generado. Un asesor revisará tu pedido y te contactará en breve.`
+                                            : 'Hubo un problema al generar tu presupuesto. Te atenderemos personalmente.';
+                                        sendText(id, result.jid, msg, { via: 'api' }).catch(() => {});
+                                        if (!ok) {
+                                            handoffToHuman(id, pool, result.jid, 'presupuesto_error').catch(() => {});
+                                        }
+                                    }).catch((e) => {
+                                        log.error({ err: e, tenantId: id, jid: result.jid }, 'presupuesto submit falló');
+                                    });
+                                } else {
+                                    // Cliente no confirmó — cancelar y seguir flujo normal
+                                    _pendingPresupuestos.delete(result.jid);
+                                }
+                            }
+
+                            if (!handledByPresupuesto) {
+                                if (audioMsg?.ptt) {
+                                    // Nota de voz: pipeline STT → transcript → IA (o handoff).
+                                    handleVoiceNote(id, pool, result, audioMsg).catch((e) =>
+                                        log.error({ err: e, tenantId: id, jid: result.jid }, 'handleVoiceNote falló')
+                                    );
+                                } else {
+                                    maybeAutoReply(id, pool, result);
+                                }
                             }
                         }
                     }
