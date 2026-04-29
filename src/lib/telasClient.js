@@ -86,13 +86,31 @@ async function fetchTelas(idEmpresa) {
             }
         }
 
-        cache.set(id, { map, fetchedAt: Date.now() });
+        // Guardar también el array raw para exponer a contextEnricher
+        const raw = data
+            .filter((item) => item.tela && item._id)
+            .map((item) => ({ _id: Number(item._id), nombre: String(item.tela).trim() }));
+
+        cache.set(id, { map, raw, fetchedAt: Date.now() });
         log.info({ id, count: map.size }, 'telasClient: telas cargadas');
         return map;
     } catch (err) {
         log.error({ id, err: err.message }, 'telasClient: falló la carga');
         return cached?.map ?? new Map();
     }
+}
+
+/**
+ * Devuelve el array de telas con su _id y nombre, útil para inyectar en el
+ * prompt de la IA. Reutiliza la caché de fetchTelas.
+ *
+ * @param {number} idEmpresa
+ * @returns {Promise<Array<{_id: number, nombre: string}>>}
+ */
+async function fetchTelasArray(idEmpresa) {
+    await fetchTelas(idEmpresa); // asegura que la caché esté caliente
+    const id = parseInt(idEmpresa, 10);
+    return cache.get(id)?.raw ?? [];
 }
 
 /**
@@ -115,4 +133,4 @@ async function resolveTela(idEmpresa, telaName) {
     return map.get(firstWord) ?? null;
 }
 
-module.exports = { fetchTelas, resolveTela };
+module.exports = { fetchTelas, fetchTelasArray, resolveTela };

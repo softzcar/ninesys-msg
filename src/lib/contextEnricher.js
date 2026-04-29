@@ -24,6 +24,7 @@ const { GoogleGenAI } = require('@google/genai');
 const businessHoursClient = require('./businessHoursClient');
 const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
+const telasClient = require('./telasClient');
 const log = require('./logger').createLogger('contextEnricher');
 
 const INTENT_TIMEOUT_MS = 3000;
@@ -163,6 +164,32 @@ async function fetchSchedule(idEmpresa) {
 }
 
 // ---------------------------------------------------------------------------
+// Telas disponibles
+// ---------------------------------------------------------------------------
+
+/**
+ * Obtiene el catálogo de telas con su _id y lo formatea como texto para
+ * que la IA use el _id (no el nombre) al completar el marker PRESUPUESTO_DATA.
+ *
+ * @param {number} idEmpresa
+ * @returns {Promise<string|null>}
+ */
+async function fetchTelasContext(idEmpresa) {
+    try {
+        const telas = await telasClient.fetchTelasArray(idEmpresa);
+        if (!telas.length) return null;
+        const lines = ['Telas disponibles (usar el _id numérico en el campo "tela" del bloque PRESUPUESTO_DATA, nunca el nombre):'];
+        for (const t of telas) {
+            lines.push(`• _id:${t._id} — ${t.nombre}`);
+        }
+        return lines.join('\n');
+    } catch (err) {
+        log.warn({ err: err.message, idEmpresa }, 'fetchTelasContext: falló (no crítico)');
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Punto de entrada público
 // ---------------------------------------------------------------------------
 
@@ -272,10 +299,27 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
             }, 15000)
         ),
     ]);
-    const products = await productsPromise;
+
+    // Catálogo de telas con _id para que la IA los use directamente en el marker.
+    const telasPromise = Promise.race([
+        fetchTelasContext(idEmpresa),
+        new Promise((resolve) =>
+            setTimeout(() => {
+                log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
+                resolve(null);
+            }, 10000)
+        ),
+    ]);
+
+    const [products, telas] = await Promise.all([productsPromise, telasPromise]);
+
     if (products) {
         sections.push(products);
         log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
+    }
+    if (telas) {
+        sections.push(telas);
+        log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
     }
 
     const elapsed = Date.now() - startTime;

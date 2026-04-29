@@ -36,9 +36,18 @@ function today() {
 async function resolveItemIds(idEmpresa, items) {
     return Promise.all(
         items.map(async (item) => {
+            // La IA envía item.tela como el _id numérico de catalogo_telas (viene del
+            // contexto inyectado). Si por alguna razón llega un nombre de texto, se hace
+            // fallback a resolveTela para mantener compatibilidad.
+            const telaRaw = item.tela;
+            const telaAsId = telaRaw !== null && telaRaw !== undefined && telaRaw !== ''
+                && !Number.isNaN(Number(telaRaw));
+
             const [sizeId, telaId] = await Promise.all([
                 item.talla ? sizesClient.resolveSize(idEmpresa, item.talla) : Promise.resolve(null),
-                item.tela  ? telasClient.resolveTela(idEmpresa, item.tela)   : Promise.resolve(null),
+                telaAsId
+                    ? Promise.resolve(Number(telaRaw))
+                    : (telaRaw ? telasClient.resolveTela(idEmpresa, telaRaw) : Promise.resolve(null)),
             ]);
 
             if (!sizeId) {
