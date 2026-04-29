@@ -50,9 +50,14 @@ const _aiLastReply = new Map(); // jid → ts ms
 
 // Presupuestos pendientes de confirmación del cliente: jid → data parseada
 const _pendingPresupuestos = new Map();
+// Conversaciones donde la IA envió el resumen de confirmación pero olvidó el marker:
+// jid → true. Al recibir "sí" en este estado se fuerza regeneración con marker.
+const _pendingConfirmacionSinMarker = new Map();
 
 const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESUPUEST\w*_DATA\]/i;
 const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
+// Detecta si el texto visible es un resumen listo para confirmar (la IA lo envió sin marker)
+const PRESUPUESTO_RESUMEN_RE = /confirmas\s+este\s+presupuesto/i;
 
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
 // El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
@@ -144,7 +149,7 @@ async function persistState(pool, patch) {
  * El paso 1 lo evalúa aiService.generateReply leyendo wa_ai_settings, así
  * que aquí sólo aplicamos los pasos 2-5 antes de invocarlo.
  */
-async function maybeAutoReply(idEmpresa, pool, ingestResult) {
+async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContext = '' } = {}) {
     try {
         const incoming = ingestResult?.message;
         const jid = ingestResult?.jid;
@@ -169,6 +174,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
             incomingText: incoming.body,
             agentId: flags.aiAgentId || null,
             idEmpresa,
+            extraSystemContext,
         });
         if (!reply) return;
 
@@ -190,6 +196,12 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
                 textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
                 log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
             }
+            _pendingConfirmacionSinMarker.delete(jid); // marker presente: limpiar flag anterior
+        } else if (PRESUPUESTO_RESUMEN_RE.test(reply.text)) {
+            // La IA envió el resumen de confirmación visible pero olvidó el marker.
+            // Marcamos la conversación para que el próximo "sí" fuerce regeneración.
+            _pendingConfirmacionSinMarker.set(jid, true);
+            log.warn({ jid }, 'maybeAutoReply: resumen enviado sin marker PRESUPUESTO_DATA — esperando "sí" para regenerar');
         }
 
         try {
@@ -537,7 +549,18 @@ async function init(idEmpresa) {
                                         log.error({ err: e, tenantId: id, jid: result.jid }, 'handleVoiceNote falló')
                                     );
                                 } else {
-                                    maybeAutoReply(id, pool, result);
+                                    // Si la IA envió el resumen sin marker y el cliente confirma,
+                                    // inyectar recordatorio para que la IA incluya el bloque esta vez.
+                                    const msgNorm = (result.message?.body || '').trim();
+                                    const isRetryConfirm = _pendingConfirmacionSinMarker.get(result.jid)
+                                        && PRESUPUESTO_CONFIRM_RE.test(msgNorm);
+                                    const extraCtx = isRetryConfirm
+                                        ? '⚠️ INSTRUCCIÓN OBLIGATORIA: El cliente acaba de confirmar el presupuesto. Debes responder con el resumen completo del pedido e incluir OBLIGATORIAMENTE el bloque [PRESUPUESTO_DATA]{...}[/PRESUPUESTO_DATA] al final del mensaje. Sin ese bloque el sistema no puede registrar el pedido.'
+                                        : '';
+                                    if (isRetryConfirm) {
+                                        log.info({ jid: result.jid }, 'maybeAutoReply: retry con extraSystemContext para forzar marker');
+                                    }
+                                    maybeAutoReply(id, pool, result, { extraSystemContext: extraCtx });
                                 }
                             }
                         }

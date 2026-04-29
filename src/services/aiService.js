@@ -429,11 +429,13 @@ function buildContents(history) {
  *   1. system_prompt del agente/settings
  *   2. knowledge_base estática (JSON → texto)
  *   3. dynamicContext: contexto en tiempo real inyectado por contextEnricher
+ *   4. extraSystemContext: contexto adicional inyectado por el caller (ej. instrucción de retry)
  *
  * @param {object} settings
- * @param {string} [dynamicContext]  bloque de texto del enriquecedor (puede ser '')
+ * @param {string} [dynamicContext]      bloque de texto del enriquecedor (puede ser '')
+ * @param {string} [extraSystemContext]  texto adicional a anexar al final del system prompt
  */
-function buildSystemInstruction(settings, dynamicContext = '') {
+function buildSystemInstruction(settings, dynamicContext = '', extraSystemContext = '') {
     const parts = [];
     if (settings.systemPrompt) {
         parts.push(settings.systemPrompt.trim());
@@ -450,6 +452,9 @@ function buildSystemInstruction(settings, dynamicContext = '') {
     if (dynamicContext) {
         parts.push(dynamicContext);
     }
+    if (extraSystemContext) {
+        parts.push(extraSystemContext);
+    }
     if (!parts.length) {
         parts.push('Eres un asistente de atención al cliente vía WhatsApp. Responde de forma breve, amable y útil.');
     }
@@ -465,14 +470,16 @@ function buildSystemInstruction(settings, dynamicContext = '') {
  * @param {string}  [params.incomingText] - texto entrante (ya está persistido,
  *                                          se incluye sólo por trazabilidad/log)
  * @param {number}  [params.historyLimit]
- * @param {number}  [params.agentId]    - ID del agente IA asignado a la
- *                                        conversación. Si se pasa, usa el prompt
- *                                        y config del agente en lugar de wa_ai_settings.
+ * @param {number}  [params.agentId]          - ID del agente IA asignado a la
+ *                                              conversación. Si se pasa, usa el prompt
+ *                                              y config del agente en lugar de wa_ai_settings.
+ * @param {string}  [params.extraSystemContext] - texto extra que se añade al final del
+ *                                              system prompt (útil para instrucciones de retry)
  * @returns {Promise<{text:string, model:string, agentId:number|null}|null>}
  *          null si IA está deshabilitada en el tenant o si el modelo no
  *          devolvió texto.
  */
-async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa }) {
+async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa, extraSystemContext = '' }) {
     const settings = await loadSettings(pool);
     if (!settings || !settings.enabled) return null;
 
@@ -523,7 +530,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     }
 
     const contents = buildContents(history);
-    const systemInstruction = buildSystemInstruction(effectiveSettings, dynamicContext);
+    const systemInstruction = buildSystemInstruction(effectiveSettings, dynamicContext, extraSystemContext);
 
     let response;
     const startedAt = Date.now();
