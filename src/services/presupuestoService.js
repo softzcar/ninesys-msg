@@ -79,10 +79,10 @@ async function resolveCustomer(pool, jid, clienteData, clientPhone = '') {
     // Cliente nuevo: insertar en customers
     const nombre    = (clienteData.nombre    || '').trim();
     const apellido  = (clienteData.apellido  || '').trim();
-    const cedula    = (clienteData.cedula    || '').trim();
+    const cedula    = (clienteData.cedula    || '').trim() || null;  // null evita UNIQUE '' duplicado
     const telefono  = clientPhone || (clienteData.telefono || '').trim();
     const email     = (clienteData.email     || '').trim().toLowerCase();
-    const direccion = (clienteData.direccion || '').trim();
+    const direccion = (clienteData.direccion || '').trim() || null;
 
     const emailFinal = email || `${(nombre[0] || 'x').toLowerCase()}${Math.random().toString(36).substring(2, 10)}@email.com`;
 
@@ -174,13 +174,16 @@ async function createPresupuesto(pool, { cliente, customerId, items, obs, total 
  * @returns {Promise<{ok: boolean, id_presupuesto: number|null, vendorId: number|null}>}
  */
 async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn }) {
+    let _step = 'init';
     try {
         log.info({ idEmpresa, jid, itemCount: data.items?.length }, 'presupuestoService: iniciando submit');
 
         // 1. Resolver IDs
+        _step = 'resolveItemIds';
         const resolvedItems = await resolveItemIds(idEmpresa, data.items || []);
 
         // 2. Cliente
+        _step = 'resolveCustomer';
         const { customerId, vendorId: historicVendorId } = await resolveCustomer(pool, jid, data.cliente || {}, clientPhone);
 
         // 3. Calcular total
@@ -190,6 +193,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
         );
 
         // 4. Crear presupuesto
+        _step = 'createPresupuesto';
         const presupuestoId = await createPresupuesto(pool, {
             cliente: data.cliente || {},
             customerId,
@@ -199,6 +203,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
         });
 
         // 5. Elegir vendedor
+        _step = 'pickNextVendor';
         let vendorId = historicVendorId;
         if (!vendorId) {
             vendorId = await assignmentPolicy.pickNextVendor({ pool, jid });
@@ -206,6 +211,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
         }
 
         // 6. Asignar vendedor al presupuesto
+        _step = 'assignVendor';
         if (vendorId) {
             await pool.query(
                 'UPDATE presupuestos SET responsable = ? WHERE _id = ?',
@@ -214,6 +220,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
         }
 
         // 7. Handoff: asigna conversación al vendedor + notifica
+        _step = 'handoff';
         await handoffFn(idEmpresa, pool, jid, 'presupuesto_generado', {
             forcedVendorId: vendorId,
         });
@@ -221,7 +228,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
         log.info({ idEmpresa, jid, presupuestoId, vendorId }, 'presupuestoService: submit completado');
         return { ok: true, id_presupuesto: presupuestoId, vendorId };
     } catch (err) {
-        log.error({ err: err.message, idEmpresa, jid }, 'presupuestoService: submit falló');
+        log.error({ err: err.message, stack: err.stack, step: _step, idEmpresa, jid }, 'presupuestoService: submit falló');
         return { ok: false, id_presupuesto: null, vendorId: null };
     }
 }
