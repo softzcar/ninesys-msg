@@ -147,7 +147,7 @@ async function createPresupuesto(pool, { cliente, customerId, items, obs, total 
                 item.cantidad,
                 item.idCategory || null,
                 item.categoryName || 'Sin categoría',
-                item.sizeId ? String(item.sizeId) : (item.talla || ''),
+                item.sizeId ? String(item.sizeId) : String(item.talla || '').substring(0, 32),
                 item.corte || '',
                 item.telaId ? String(item.telaId) : (item.tela || ''),
                 item.sizeId || null,
