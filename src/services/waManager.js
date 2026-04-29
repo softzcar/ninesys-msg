@@ -184,10 +184,16 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult) {
             } catch (parseErr) {
                 log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
             }
+            // Si la IA incluyó solo el marker sin texto visible, garantizar que el
+            // cliente recibe el mensaje de confirmación. Sin esto, se enviaría el JSON crudo.
+            if (!textToSend) {
+                textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
+                log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
+            }
         }
 
         try {
-            await sendText(idEmpresa, jid, textToSend || reply.text, { via: 'ai' });
+            await sendText(idEmpresa, jid, textToSend, { via: 'ai' });
             await pool.query(
                 `INSERT INTO wa_send_log (endpoint, phone, status, requested_by)
                  VALUES (?, ?, 'ok', ?)`,
