@@ -562,7 +562,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
             { err: e, jid, durMs: Date.now() - startedAt, code: e.code || null },
             'Gemini falló (tras retries/breaker)'
         );
-        return null;
+        return { text: null, error: 'gemini_failed', model: effectiveModel, agentId: agent?.id || null };
     }
 
     const text = (response?.text || '').trim();

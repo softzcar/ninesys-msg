@@ -178,6 +178,16 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         });
         if (!reply) return;
 
+        // Gemini falló todos los reintentos — avisar al cliente y salir
+        if (reply.error === 'gemini_failed') {
+            log.warn({ jid }, 'maybeAutoReply: enviando mensaje de fallback por fallo de Gemini');
+            sendText(idEmpresa, jid,
+                'Lo siento, tuve un problema técnico momentáneo. Por favor repite tu último mensaje. 🙏',
+                { via: 'ai' }
+            ).catch(() => {});
+            return;
+        }
+
         // Extraer marker de presupuesto si la IA lo incluyó
         let textToSend = reply.text;
         const markerMatch = PRESUPUESTO_MARKER_RE.exec(reply.text);
