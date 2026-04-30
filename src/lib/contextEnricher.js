@@ -219,42 +219,26 @@ async function fetchProducts(idEmpresa, searchTerm) {
         }
         log.info({ idEmpresa, finalSearch, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
-        const products = catalog.products.slice(0, 10);
-
-        // Sección 1: resumen compacto (rango min-max) — para mostrar al cliente
-        const summaryLines = [
-            'Productos encontrados — al mostrarlos al cliente usa SOLO el nombre y el rango de precio (ej: "entre $9 y $20"). NO listes todos los precios por cantidad al cliente:',
-        ];
-        // Sección 2: tabla completa — solo para calcular precios específicos y el bloque PRESUPUESTO_DATA
-        const detailLines = [
-            'Tabla de precios completa (uso INTERNO: responder "¿cuánto salen X unidades?" y calcular PRESUPUESTO_DATA — no mostrar esta tabla al cliente):',
-        ];
-
-        for (const p of products) {
+        const lines = ['Productos encontrados para la consulta del cliente (DEBES listar cada uno con su nombre y precios en tu respuesta):'];
+        for (const p of catalog.products.slice(0, 10)) {
+            let line = `• ${p.name}`;
             if (p.is_design) {
-                summaryLines.push(`• ${p.name} (diseño personalizado — solicita cotización)`);
-                continue;
+                line += ' (diseño personalizado — solicita cotización)';
+            } else if (p.prices && p.prices.length > 0) {
+                const priceStrings = p.prices.map(
+                    pr => `$${pr.price.toFixed(2)} (${pr.descripcion})`
+                );
+                line += ` — ${priceStrings.join(', ')}`;
             }
-
-            let suffix = '';
-            if (p.description) suffix += ` (${p.description})`;
-            if (p.categories && p.categories.length) suffix += ` [cat_id:${p.categories.join(', ')}]`;
-
-            if (p.prices && p.prices.length > 0) {
-                const prices = p.prices.map((pr) => pr.price).filter(Number.isFinite);
-                const minPrice = Math.min(...prices);
-                const maxPrice = Math.max(...prices);
-                const fmt = (n) => (n % 1 === 0 ? `$${n}` : `$${n.toFixed(2)}`);
-                summaryLines.push(`• ${p.name} — entre ${fmt(minPrice)} y ${fmt(maxPrice)}${suffix}`);
-
-                const detail = p.prices.map((pr) => `$${pr.price.toFixed(2)} (${pr.descripcion})`).join(', ');
-                detailLines.push(`• ${p.name}: ${detail}`);
-            } else {
-                summaryLines.push(`• ${p.name}${suffix}`);
+            if (p.description) {
+                line += ` (${p.description})`;
             }
+            if (p.categories && p.categories.length) {
+                line += ` [${p.categories.join(', ')}]`;
+            }
+            lines.push(line);
         }
-
-        return [...summaryLines, '', ...detailLines].join('\n');
+        return lines.join('\n');
     } catch (err) {
         log.error({
             err: err.message,
