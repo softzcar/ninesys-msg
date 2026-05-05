@@ -58,7 +58,9 @@ const _pendingPresupuestoCustomerIds = new Map();
 // jid → true. Al recibir "sí" en este estado se fuerza regeneración con marker.
 const _pendingConfirmacionSinMarker = new Map();
 
-const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESU\w*_DATA\]/i;
+// Apertura flexible: la IA a veces abrevia el tag (ej: [PRESUPUEDATA], [PRESUPUESTO_DATA]).
+// Captura cualquier [PRESUP...] y su cierre correspondiente [/PRESUP...].
+const PRESUPUESTO_MARKER_RE = /\[PRESUP[A-Z_]*\]([\s\S]*?)\[\/PRESUP[A-Z_]*\]/i;
 const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
 // Detecta si el texto visible es un resumen listo para confirmar (la IA lo envió sin marker)
 const PRESUPUESTO_RESUMEN_RE = /confirmas\s+este\s+presupuesto/i;
