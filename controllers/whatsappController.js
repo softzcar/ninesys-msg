@@ -84,8 +84,8 @@ async function initializeAllClientsFromSessions() {
 // ---------------------------------------------------------------------------
 
 async function getSessionInfo(companyId) {
-    // Mismo contrato que el legacy: retorna objeto, NO usa res
-    return waManager.getSessionInfo(companyId);
+    const pool = await tenantResolver.getPool(companyId);
+    return waManager.getSessionInfo(companyId, pool);
 }
 
 async function showQRCode(req, res) {

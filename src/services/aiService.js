@@ -209,7 +209,7 @@ function getClient() {
 async function loadSettings(pool) {
     const [rows] = await pool.query(
         `SELECT provider, enabled, model, system_prompt, temperature,
-                max_tokens, respond_in_groups, knowledge_base
+                max_tokens, respond_in_groups, knowledge_base, always_ai
          FROM wa_ai_settings WHERE id = 1`
     );
     const s = rows[0];
@@ -223,6 +223,7 @@ async function loadSettings(pool) {
         maxTokens: Number(s.max_tokens ?? 1024),
         respondInGroups: !!s.respond_in_groups,
         knowledgeBase: s.knowledge_base || null,
+        alwaysAi: !!s.always_ai,
     };
 }
 
@@ -519,7 +520,15 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     // la fuente externa simplemente devuelve '' y no afecta la respuesta.
     let dynamicContext = '';
     if (idEmpresa) {
-        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText || '')
+        // Combinar el mensaje actual con los últimos mensajes del cliente del historial.
+        // Así el enriquecedor encuentra el producto incluso cuando el mensaje actual
+        // es un dato personal ("El Vigía", "Tomas Castellano") durante el flujo de cotización.
+        const recentUserTexts = history
+            .filter((m) => !m.from_me && m.body)
+            .slice(-4)
+            .map((m) => m.body);
+        const searchQuery = [incomingText, ...recentUserTexts].filter(Boolean).join(' ');
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, searchQuery)
             .catch((err) => {
                 log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
                 return '';
@@ -578,6 +587,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
 const SETTINGS_WHITELIST = new Set([
     'provider', 'enabled', 'model', 'system_prompt', 'temperature',
     'max_tokens', 'respond_in_groups', 'handoff_rules', 'knowledge_base',
+    'always_ai',
 ]);
 
 async function updateSettings(pool, patch = {}) {
@@ -589,7 +599,7 @@ async function updateSettings(pool, patch = {}) {
         // JSON columns aceptan string o se serializan
         if ((k === 'handoff_rules' || k === 'knowledge_base') && v && typeof v !== 'string') {
             params.push(JSON.stringify(v));
-        } else if (k === 'enabled' || k === 'respond_in_groups') {
+        } else if (k === 'enabled' || k === 'respond_in_groups' || k === 'always_ai') {
             params.push(v ? 1 : 0);
         } else {
             params.push(v);

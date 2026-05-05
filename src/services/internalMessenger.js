@@ -90,14 +90,17 @@ async function sendInternalMessage(idEmpresa, payload) {
 
 function reasonToHuman(reason) {
     switch (reason) {
-        case 'manual':           return 'Reasignación manual desde el panel';
-        case 'reassign':         return 'Reasignación manual desde el panel';
-        case 'audio_too_long':   return 'El cliente envió un audio mayor a 2 minutos';
-        case 'timeout':          return 'Liberación automática por inactividad';
-        case 'sticky':           return 'Cliente con historial contigo';
-        case 'customer_returning': return 'Cliente recurrente que ya atendiste antes';
-        case 'queue':            return 'Chat tomado desde la cola';
-        default:                 return reason ? `Motivo: ${reason}` : null;
+        case 'manual':               return 'Reasignación manual desde el panel';
+        case 'reassign':             return 'Reasignación manual desde el panel';
+        case 'audio_too_long':       return 'El cliente envió un audio mayor a 2 minutos';
+        case 'timeout':              return 'Liberación automática por inactividad';
+        case 'sticky':               return 'Cliente con historial contigo';
+        case 'customer_returning':   return 'Cliente recurrente que ya atendiste antes';
+        case 'queue':                return 'Chat tomado desde la cola';
+        case 'presupuesto_generado': return 'Se generó un presupuesto — requiere tu seguimiento';
+        case 'ia_no_puede':          return 'La IA no pudo resolver la consulta del cliente';
+        case 'cliente_solicita':     return 'El cliente solicitó hablar con un asesor';
+        default:                     return reason ? `Motivo: ${reason}` : null;
     }
 }
 

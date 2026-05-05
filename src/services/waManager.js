@@ -42,6 +42,7 @@ const internalMessenger = require('./internalMessenger');
 const customerLookup = require('./customerLookup');
 const lidMapping = require('./lidMapping');
 const presupuestoService = require('./presupuestoService');
+const { classifyHandoffIntent } = require('../lib/intentClassifier');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -54,10 +55,15 @@ const _pendingPresupuestos = new Map();
 // jid → true. Al recibir "sí" en este estado se fuerza regeneración con marker.
 const _pendingConfirmacionSinMarker = new Map();
 
-const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESUPUEST\w*_DATA\]/i;
+const PRESUPUESTO_MARKER_RE = /\[PRESUPUESTO_DATA\]([\s\S]*?)\[\/PRESU\w*_DATA\]/i;
 const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
 // Detecta si el texto visible es un resumen listo para confirmar (la IA lo envió sin marker)
 const PRESUPUESTO_RESUMEN_RE = /confirmas\s+este\s+presupuesto/i;
+
+// Markers de escalada que la IA incluye en su respuesta para solicitar handoff.
+// Se extraen antes de enviar el texto al cliente (el cliente nunca los ve).
+const HANDOFF_IA_MARKER_RE      = /\[HANDOFF_IA\]/gi;
+const HANDOFF_CLIENTE_MARKER_RE = /\[HANDOFF_CLIENTE\]/gi;
 
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
 // El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
@@ -158,8 +164,14 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         const flags = await conversationStore.getConversationFlags(pool, jid);
         if (!flags) return;
         if (flags.isGroup) return;            // Fase 8: grupos fuera
-        if (flags.mode === 'human') return;   // empleado tomó la conversación
-        if (!flags.aiEnabled) return;         // toggle por conversación off
+        if (flags.mode === 'human') {
+            log.debug({ jid }, 'maybeAutoReply: skip — modo humano');
+            return;
+        }
+        if (!flags.aiEnabled) {
+            log.debug({ jid }, 'maybeAutoReply: skip — aiEnabled=false');
+            return;
+        }
 
         // Throttle anti-loop por jid
         const now = Date.now();
@@ -167,18 +179,83 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         if (now - last < AI_THROTTLE_MS) return;
         _aiLastReply.set(jid, now);
 
-        log.debug({ jid, incomingText: incoming.body, aiEnabled: flags.aiEnabled }, 'maybeAutoReply: llamando generateReply');
-        const reply = await aiService.generateReply({
-            pool,
-            jid,
-            incomingText: incoming.body,
-            agentId: flags.aiAgentId || null,
-            idEmpresa,
-            extraSystemContext,
-        });
+        // Resolver cliente registrado para personalizar el contexto de la IA.
+        // Si el JID es @lid se resuelve primero el teléfono real vía wa_lid_phone_map.
+        let clienteRegistradoCtx = '';
+        try {
+            let lookupJid = jid;
+            if (lidMapping.isLidJid(jid)) {
+                const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
+                if (phoneJid) lookupJid = phoneJid;
+            }
+            const clienteRegistrado = await customerLookup.findCustomerByJid(pool, lookupJid);
+            if (clienteRegistrado) {
+                const nombre = [clienteRegistrado.first_name, clienteRegistrado.last_name]
+                    .filter(Boolean).join(' ').trim();
+                clienteRegistradoCtx =
+                    `\n--- CLIENTE REGISTRADO EN EL SISTEMA ---` +
+                    `\nNombre completo: ${nombre}` +
+                    `\nTeléfono: ${clienteRegistrado.phone || ''}` +
+                    `\nIMPORTANTE: Este cliente YA ESTÁ REGISTRADO. NO le preguntes su nombre ni apellido.` +
+                    ` Usa "${nombre}" directamente como clienteNombre en el JSON del presupuesto.` +
+                    `\n--- FIN DATOS CLIENTE ---\n`;
+                log.info({ jid, customerId: clienteRegistrado._id, nombre },
+                    'maybeAutoReply: cliente registrado inyectado en contexto IA');
+            }
+        } catch (e) {
+            log.warn({ err: e, jid }, 'maybeAutoReply: lookup cliente falló (no crítico)');
+        }
+
+        const fullExtraContext = [clienteRegistradoCtx, extraSystemContext].filter(Boolean).join('\n');
+
+        // Obtener los últimos 3 mensajes del cliente (excluyendo el actual)
+        // para que el clasificador detecte frustración acumulada, no solo puntual.
+        let recentClientMessages = [];
+        try {
+            const [rows] = await pool.query(
+                `SELECT body FROM wa_messages
+                 WHERE jid = ? AND from_me = 0 AND body IS NOT NULL AND body != ?
+                 ORDER BY ts DESC LIMIT 3`,
+                [jid, incoming.body]
+            );
+            recentClientMessages = rows.map((r) => r.body).reverse();
+        } catch (_) { /* no crítico */ }
+
+        // Lanzar clasificador de intención y llamada principal a la IA en PARALELO.
+        // El clasificador (~2.5s) suele resolverse antes que Gemini (~4-8s),
+        // por lo que no añade latencia al camino feliz.
+        log.debug({ jid, incomingText: incoming.body }, 'maybeAutoReply: lanzando clasificador + generateReply en paralelo');
+
+        const [intentResult, reply] = await Promise.all([
+            classifyHandoffIntent(incoming.body, recentClientMessages),
+            aiService.generateReply({
+                pool,
+                jid,
+                incomingText: incoming.body,
+                agentId: flags.aiAgentId || null,
+                idEmpresa,
+                extraSystemContext: fullExtraContext,
+            }),
+        ]);
+
+        log.debug({ jid, intentResult }, 'maybeAutoReply: clasificador completado');
+
+        // ── Escenario 3: cliente quiere hablar con un humano ──────────────────
+        // El clasificador detectó human_request → bypassar la respuesta de la IA,
+        // enviar confirmación al cliente y escalar. La respuesta de Gemini se descarta.
+        if (intentResult === 'human_request') {
+            log.info({ jid }, 'maybeAutoReply: cliente solicita asesor humano');
+            sendText(idEmpresa, jid,
+                'Por supuesto, enseguida te comunico con uno de nuestros asesores. 😊',
+                { via: 'ai' }
+            ).catch(() => {});
+            handoffToHuman(idEmpresa, pool, jid, 'cliente_solicita').catch(() => {});
+            return;
+        }
+
+        // ── Validar respuesta de la IA ────────────────────────────────────────
         if (!reply) return;
 
-        // Gemini falló todos los reintentos — avisar al cliente y salir
         if (reply.error === 'gemini_failed') {
             log.warn({ jid }, 'maybeAutoReply: enviando mensaje de fallback por fallo de Gemini');
             sendText(idEmpresa, jid,
@@ -188,11 +265,18 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             return;
         }
 
-        // Extraer marker de presupuesto si la IA lo incluyó
-        let textToSend = reply.text;
-        const markerMatch = PRESUPUESTO_MARKER_RE.exec(reply.text);
+        // Detectar marker de escalada que la IA pudo haber incluido (red de seguridad).
+        const hasHandoffIa = HANDOFF_IA_MARKER_RE.test(reply.text);
+
+        // Limpiar markers y extraer datos de presupuesto si los hay.
+        let textToSend = reply.text
+            .replace(HANDOFF_IA_MARKER_RE, '')
+            .replace(HANDOFF_CLIENTE_MARKER_RE, '')
+            .trim();
+
+        const markerMatch = PRESUPUESTO_MARKER_RE.exec(textToSend);
         if (markerMatch) {
-            textToSend = reply.text.replace(markerMatch[0], '').trim();
+            textToSend = textToSend.replace(markerMatch[0], '').trim();
             try {
                 const presupuestoData = JSON.parse(markerMatch[1]);
                 _pendingPresupuestos.set(jid, presupuestoData);
@@ -200,16 +284,12 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             } catch (parseErr) {
                 log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
             }
-            // Si la IA incluyó solo el marker sin texto visible, garantizar que el
-            // cliente recibe el mensaje de confirmación. Sin esto, se enviaría el JSON crudo.
             if (!textToSend) {
                 textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
                 log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
             }
-            _pendingConfirmacionSinMarker.delete(jid); // marker presente: limpiar flag anterior
-        } else if (PRESUPUESTO_RESUMEN_RE.test(reply.text)) {
-            // La IA envió el resumen de confirmación visible pero olvidó el marker.
-            // Marcamos la conversación para que el próximo "sí" fuerce regeneración.
+            _pendingConfirmacionSinMarker.delete(jid);
+        } else if (PRESUPUESTO_RESUMEN_RE.test(textToSend)) {
             _pendingConfirmacionSinMarker.set(jid, true);
             log.warn({ jid }, 'maybeAutoReply: resumen enviado sin marker PRESUPUESTO_DATA — esperando "sí" para regenerar');
         }
@@ -228,6 +308,23 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 ['ai_auto', jid, sendErr.message, `gemini:${reply.model}`]
             ).catch(() => {});
             throw sendErr;
+        }
+
+        // ── Escenario 1: IA no puede resolver / cliente frustrado ─────────────
+        // Prioridad: clasificador > marker de la IA (ambos disparan el mismo handoff).
+        // En ambos casos se envía un mensaje de transición para que el cliente sepa
+        // que será atendido por una persona y no sienta que lo ignoraron.
+        if (intentResult === 'frustrated') {
+            log.info({ jid }, 'maybeAutoReply: cliente frustrado (classifier) — escalando tras enviar respuesta');
+            sendText(idEmpresa, jid,
+                'Quiero asegurarme de que recibas la mejor atención posible. He notificado a uno de nuestros asesores para que continúe contigo personalmente. 🙏',
+                { via: 'ai' }
+            ).catch(() => {});
+            handoffToHuman(idEmpresa, pool, jid, 'ia_no_puede').catch(() => {});
+        } else if (hasHandoffIa) {
+            // La IA ya redactó el mensaje de transición antes del marker, no se duplica.
+            log.info({ jid }, 'maybeAutoReply: IA incluyó [HANDOFF_IA] — escalando');
+            handoffToHuman(idEmpresa, pool, jid, 'ia_no_puede').catch(() => {});
         }
     } catch (e) {
         log.error({ err: e, tenantId: idEmpresa }, 'maybeAutoReply falló');
@@ -300,6 +397,68 @@ async function handleVoiceNote(idEmpresa, pool, result, rawAudioMessage) {
 }
 
 /**
+ * Envía un mensaje de WhatsApp directo al teléfono del vendedor notificándole
+ * que le fue asignada una conversación. Complementa al mensaje interno de
+ * ninesys: este llega al WhatsApp personal del vendedor, no al panel.
+ *
+ * Best-effort: nunca throws — un fallo aquí no debe bloquear el handoff.
+ */
+async function notifyVendorByWhatsApp(idEmpresa, pool, { vendorId, clientJid, reason }) {
+    try {
+        // 1. Teléfono del vendedor
+        const [[vendorRow]] = await pool.query(
+            `SELECT eu.telefono, eu.nombre
+             FROM api_empresas.empresas_usuarios eu
+             WHERE eu.id_usuario = ? LIMIT 1`,
+            [vendorId]
+        ).catch(() => [[]]);
+
+        const rawPhone = (vendorRow?.telefono || '').replace(/\D/g, '');
+        if (!rawPhone) {
+            log.warn({ tenantId: idEmpresa, vendorId }, 'notifyVendorByWhatsApp: vendedor sin teléfono registrado');
+            return;
+        }
+        const vendorJid = `${rawPhone}@s.whatsapp.net`;
+
+        // 2. Datos del cliente
+        const [[convRow]] = await pool.query(
+            `SELECT name FROM wa_conversations WHERE jid = ? LIMIT 1`,
+            [clientJid]
+        ).catch(() => [[]]);
+        const contactName = convRow?.name || null;
+
+        let phoneJid = clientJid;
+        if (lidMapping.isLidJid(clientJid)) {
+            phoneJid = (await lidMapping.resolvePhoneJid(pool, clientJid)) || null;
+        }
+        const clientPhone = phoneJid ? phoneJid.split('@')[0].replace(/^\+?/, '') : null;
+        const who = contactName
+            ? (clientPhone ? `${contactName} (+${clientPhone})` : contactName)
+            : (clientPhone ? `+${clientPhone}` : 'Cliente sin identificar');
+
+        // 3. Motivo legible
+        const motivoMap = {
+            presupuesto_generado: '📋 Se generó un presupuesto que requiere tu seguimiento.',
+            ia_no_puede:          '⚠️ La IA no pudo resolver la consulta del cliente.',
+            cliente_solicita:     '💬 El cliente solicitó hablar con un asesor.',
+            audio_too_long:       '🎙️ El cliente envió un audio demasiado largo.',
+            customer_returning:   '🔄 Cliente recurrente que ya atendiste antes.',
+        };
+        const motivo = motivoMap[reason] || `📌 Motivo: ${reason}`;
+
+        const msg = `*Conversación de WhatsApp asignada*\n`
+            + `👤 Cliente: ${who}\n`
+            + `${motivo}\n`
+            + `Ingresa a *ninesys* para atender la conversación.`;
+
+        await sendText(idEmpresa, vendorJid, msg, { via: 'api' });
+        log.info({ tenantId: idEmpresa, vendorId, vendorJid }, 'notifyVendorByWhatsApp: mensaje enviado');
+    } catch (e) {
+        log.warn({ err: e.message, tenantId: idEmpresa, vendorId }, 'notifyVendorByWhatsApp: falló (no crítico)');
+    }
+}
+
+/**
  * Escala una conversación a un humano automáticamente (handoff).
  * Usa la política de asignación para elegir al mejor vendedor disponible.
  * Si no hay nadie, la deja en cola (assigned_to = null).
@@ -333,31 +492,64 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
             });
         }
 
-        // 2. Marcar en DB de forma atómica: mode/ai_enabled/assigned_to +
-        //    assigned_at=NOW (reloj de timeout D.3) + last_vendor_reply_at=NULL.
-        await conversationStore.recordAutoHandoff(pool, jid, vendorId);
+        // 2. Leer el modo de operación del tenant.
+        //    always_ai=1: la IA sigue respondiendo; solo se notifica al vendedor.
+        //    always_ai=0: comportamiento normal — la conversación pasa a human.
+        const [[settingsRow]] = await pool.query(
+            'SELECT always_ai FROM wa_ai_settings WHERE id = 1'
+        ).catch(() => [[]]);
+        const alwaysAi = !!settingsRow?.always_ai;
 
-        // 3. Emitir evento para el panel
-        emit(idEmpresa, 'conversation:handoff', {
-            companyId: idEmpresa,
-            jid,
-            mode: 'human',
-            assignedTo: vendorId,
-            reason
-        });
+        if (alwaysAi) {
+            // Modo "IA siempre activa": no cambiar estado de la conversación.
+            // El vendedor recibe la notificación pero la IA sigue respondiendo.
+            log.info(
+                { tenantId: idEmpresa, jid, assignedTo: vendorId, reason },
+                'Handoff en modo always_ai: notificando vendedor sin cambiar modo'
+            );
+            emit(idEmpresa, 'conversation:handoff', {
+                companyId: idEmpresa,
+                jid,
+                mode: 'ai',       // permanece en AI
+                assignedTo: vendorId,
+                reason,
+                notifyOnly: true,
+            });
+        } else {
+            // Modo normal: marcar en DB + emitir evento de cambio a humano.
+            await conversationStore.recordAutoHandoff(pool, jid, vendorId);
+            emit(idEmpresa, 'conversation:handoff', {
+                companyId: idEmpresa,
+                jid,
+                mode: 'human',
+                assignedTo: vendorId,
+                reason,
+            });
+            log.info(
+                { tenantId: idEmpresa, jid, assignedTo: vendorId },
+                'Handoff automático: conversación pasada a modo humano'
+            );
+        }
 
-        // 4. Avisar al vendedor por la mensajería interna (best-effort).
-        //    Si no hay vendorId (cola), por ahora no notificamos a nadie —
-        //    el fan-out a cola se decidirá en un paso posterior.
+        // 4. Notificar al vendedor por dos canales (best-effort en ambos):
+        //    a) Mensajería interna de ninesys (panel)
+        //    b) WhatsApp directo al número personal del vendedor
+        //    Se ejecuta en ambos modos — en always_ai es solo notificación.
         if (vendorId) {
             internalMessenger.notifyVendorOfAssignment(idEmpresa, pool, {
                 vendorId,
                 jid,
                 reason,
             }).catch(() => {});
+
+            notifyVendorByWhatsApp(idEmpresa, pool, {
+                vendorId,
+                clientJid: jid,
+                reason,
+            }).catch(() => {});
         }
 
-        log.info({ tenantId: idEmpresa, jid, assignedTo: vendorId }, 'Handoff automático completado');
+        log.info({ tenantId: idEmpresa, jid, assignedTo: vendorId, alwaysAi }, 'Handoff automático completado');
         return { ok: true, assignedTo: vendorId };
     } catch (e) {
         log.error({ err: e, tenantId: idEmpresa, jid }, 'handoffToHuman falló');
@@ -455,12 +647,24 @@ async function init(idEmpresa) {
         // type: 'notify' (mensaje nuevo entrante) | 'append' (sync histórico)
         for (const m of messages || []) {
             try {
+                // Un mensaje 'append' reciente (< 90 s) puede ser un mensaje nuevo
+                // que Baileys entregó durante un resync justo después de reconectar.
+                // Lo tratamos como 'notify' para que la IA pueda responder.
+                const msgTs = (m.messageTimestamp || 0) * 1000;
+                const isRecentAppend = type === 'append' && !m.key?.fromMe
+                    && (Date.now() - msgTs) < 90_000;
+                const effectiveType = isRecentAppend ? 'notify' : type;
+                if (isRecentAppend) {
+                    log.info({ jid: m.key?.remoteJid, ageSec: Math.round((Date.now() - msgTs) / 1000) },
+                        'messages.upsert: append reciente tratado como notify');
+                }
+
                 const result = await conversationStore.ingestMessage(pool, m, {
-                    mediaHandler: type === 'notify' ? mediaHandler : undefined,
+                    mediaHandler: effectiveType === 'notify' ? mediaHandler : undefined,
                     log,
                 });
                 if (!result) continue;
-                if (type === 'notify') {
+                if (effectiveType === 'notify') {
                     // Si la conversación estaba en papelera y se restauró
                     // automáticamente (ver conversationStore.ingestMessage),
                     // avisamos al frontend para que la vuelva a mostrar.
@@ -726,8 +930,13 @@ async function init(idEmpresa) {
 
 /**
  * Forma para GET /session-info/:companyId.
+ * @param {number|string} idEmpresa
+ * @param {import('mysql2/promise').Pool} [pool] - Opcional: si se pasa, lee
+ *   phone_number, pushname y last_seen_at de wa_session_state como fuente
+ *   canónica (persiste entre reinicios y cubre el caso en que sock.user no
+ *   estuviera listo al disparar connection:open).
  */
-async function getSessionInfo(idEmpresa) {
+async function getSessionInfo(idEmpresa, pool = null) {
     const id = parseInt(idEmpresa, 10);
     let s = sessions.get(id);
     if (!s) {
@@ -745,16 +954,35 @@ async function getSessionInfo(idEmpresa) {
     }
 
     if (s.status === 'READY') {
+        // Leer desde la DB si hay pool: es la fuente más fiable (persiste entre
+        // reinicios de PM2 y cubre el caso en que sock.user llegó null al conectar).
+        let phone_number = s.info ? (s.info.id || '').split(':')[0] : null;
+        let pushname     = s.info?.name || null;
+        let last_seen_at = null;
+
+        if (pool) {
+            const [[row]] = await pool.query(
+                'SELECT phone_number, pushname, last_seen_at FROM wa_session_state WHERE id = 1'
+            ).catch(() => [[]]);
+            phone_number  = phone_number  || row?.phone_number  || null;
+            pushname      = pushname      || row?.pushname      || null;
+            last_seen_at  = row?.last_seen_at ? new Date(row.last_seen_at).toISOString() : null;
+        }
+
         return {
+            status: 'READY',
             qr: null,
             ws_ready: true,
+            phone_number,
+            pushname,
+            last_seen_at,
             message: `Cliente de WhatsApp listo para la compañía ID ${id}.`,
-            info: s.info ? {
-                id: s.info.id,
-                number: (s.info.id || '').split(':')[0],
+            info: {
+                id: s.info?.id || null,
+                number: phone_number,
                 platform: 'baileys',
-                pushname: s.info.name || null,
-            } : null,
+                pushname,
+            },
         };
     }
 
