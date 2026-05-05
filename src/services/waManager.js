@@ -716,11 +716,12 @@ async function init(idEmpresa) {
                                     'auto-asignación por cliente recurrente falló (se sigue con flujo normal)');
                             }
                         }
-                        if (!autoAssigned) {
-                            const audioMsg = m.message?.audioMessage;
+                        const audioMsg = m.message?.audioMessage;
+                        let handledByPresupuesto = false;
+                        let extraCtx = '';
 
+                        if (!autoAssigned) {
                             // Verificar si hay presupuesto pendiente de confirmación
-                            let handledByPresupuesto = false;
                             const pendingPres = _pendingPresupuestos.get(result.jid);
                             if (pendingPres) {
                                 const msgNorm = (result.message.body || '').trim();
@@ -783,15 +784,21 @@ async function init(idEmpresa) {
                                     const msgNorm = (result.message?.body || '').trim();
                                     const isRetryConfirm = _pendingConfirmacionSinMarker.get(result.jid)
                                         && PRESUPUESTO_CONFIRM_RE.test(msgNorm);
-                                    const extraCtx = isRetryConfirm
+                                    extraCtx = isRetryConfirm
                                         ? '⚠️ INSTRUCCIÓN OBLIGATORIA: El cliente acaba de confirmar el presupuesto. Debes responder con el resumen completo del pedido e incluir OBLIGATORIAMENTE el bloque [PRESUPUESTO_DATA]{...}[/PRESUPUESTO_DATA] al final del mensaje. Sin ese bloque el sistema no puede registrar el pedido.'
                                         : '';
                                     if (isRetryConfirm) {
                                         log.info({ jid: result.jid }, 'maybeAutoReply: retry con extraSystemContext para forzar marker');
                                     }
-                                    maybeAutoReply(id, pool, result, { extraSystemContext: extraCtx });
                                 }
                             }
+                        }
+
+                        // Llamar maybeAutoReply siempre para mensajes de texto (no presupuesto, no audio).
+                        // Si el handoff fue a humano (always_ai=false), maybeAutoReply sale sola al
+                        // verificar flags.mode. Si always_ai=true, el modo no cambió y la IA responde.
+                        if (!handledByPresupuesto && !audioMsg?.ptt) {
+                            maybeAutoReply(id, pool, result, { extraSystemContext: extraCtx });
                         }
                     }
                 }
