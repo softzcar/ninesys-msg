@@ -68,8 +68,18 @@ async function resolveItemIds(idEmpresa, items) {
  * vendorId viene del historial del cliente (último vendedor activo).
  */
 async function resolveCustomer(pool, jid, clienteData, clientPhone = '') {
-    // Buscar cliente existente
-    const existing = await customerLookup.findCustomerByJid(pool, jid);
+    // Buscar cliente existente por JID
+    let existing = await customerLookup.findCustomerByJid(pool, jid);
+
+    // Fallback: los JIDs @lid no contienen el teléfono real; usar clientPhone
+    // que ya viene resuelto desde waManager antes de llamar a submit().
+    if (!existing && clientPhone) {
+        existing = await customerLookup.findCustomerByJid(pool, clientPhone);
+        if (existing) {
+            log.info({ jid, customerId: existing._id }, 'presupuestoService: cliente encontrado por teléfono (fallback @lid)');
+        }
+    }
+
     if (existing) {
         const vendorId = await customerLookup.findLastEligibleVendor(pool, existing._id);
         log.info({ jid, customerId: existing._id, vendorId }, 'presupuestoService: cliente existente encontrado');
@@ -139,13 +149,13 @@ async function createPresupuesto(pool, { cliente, customerId, items, obs, total 
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
             [
                 now,
-                item.precio,
-                String(item.precio),
+                item.precio ?? 0,
+                String(item.precio ?? 0),
                 item.productoNombre,
                 presupuestoId,
                 item.cod || null,
                 item.cantidad,
-                item.idCategory || null,
+                item.idCategory ?? 0,
                 item.categoryName || 'Sin categoría',
                 item.sizeId ? String(item.sizeId) : String(item.talla || '').substring(0, 32),
                 item.corte || '',
