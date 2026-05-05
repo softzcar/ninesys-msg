@@ -219,9 +219,11 @@ async function fetchProducts(idEmpresa, searchTerm) {
         }
         log.info({ idEmpresa, finalSearch, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
-        const lines = ['Productos encontrados para la consulta del cliente (DEBES listar cada uno con su nombre y precios en tu respuesta):'];
+        const lines = [
+            'Productos encontrados (incluir en PRESUPUESTO_DATA: usa "cod" = id del producto, "precio" = precio según cantidad pedida):',
+        ];
         for (const p of catalog.products.slice(0, 10)) {
-            let line = `• ${p.name}`;
+            let line = `• ${p.name} [cod:${p.id}]`;
             if (p.is_design) {
                 line += ' (diseño personalizado — solicita cotización)';
             } else if (p.prices && p.prices.length > 0) {
@@ -234,7 +236,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
                 line += ` (${p.description})`;
             }
             if (p.categories && p.categories.length) {
-                line += ` [${p.categories.join(', ')}]`;
+                line += ` [cats:${p.categories.join(', ')}]`;
             }
             lines.push(line);
         }

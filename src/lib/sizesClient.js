@@ -16,6 +16,10 @@ const log = require('./logger').createLogger('sizesClient');
 const API_URL = process.env.API_URL;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+function normalizeSize(s) {
+    return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+}
+
 const http = axios.create({
     baseURL: API_URL,
     timeout: 5000,
@@ -58,7 +62,7 @@ async function fetchSizes(idEmpresa) {
         const map = new Map();
         for (const item of data) {
             if (item.name && item._id) {
-                map.set(String(item.name).toLowerCase().trim(), Number(item._id));
+                map.set(normalizeSize(item.name), Number(item._id));
             }
         }
 
@@ -81,7 +85,7 @@ async function fetchSizes(idEmpresa) {
  */
 async function resolveSize(idEmpresa, sizeName) {
     const map = await fetchSizes(idEmpresa);
-    return map.get(String(sizeName).toLowerCase().trim()) ?? null;
+    return map.get(normalizeSize(sizeName)) ?? null;
 }
 
 module.exports = { fetchSizes, resolveSize };
