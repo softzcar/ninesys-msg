@@ -63,11 +63,21 @@ async function resolveItemIds(idEmpresa, items) {
 }
 
 /**
- * Busca el cliente por JID. Si no existe lo crea.
+ * Resuelve o crea el cliente para el presupuesto.
  * Devuelve { customerId, vendorId|null }.
- * vendorId viene del historial del cliente (último vendedor activo).
+ *
+ * Si existingCustomerId se pasa (cliente ya identificado en maybeAutoReply),
+ * se usa directamente sin búsqueda por teléfono — esto evita duplicados cuando
+ * el JID es @lid y no contiene el teléfono real.
  */
-async function resolveCustomer(pool, jid, clienteData, clientPhone = '') {
+async function resolveCustomer(pool, jid, clienteData, clientPhone = '', existingCustomerId = null) {
+    // Camino rápido: customerId pre-resuelto por maybeAutoReply
+    if (existingCustomerId) {
+        const vendorId = await customerLookup.findLastEligibleVendor(pool, existingCustomerId);
+        log.info({ jid, customerId: existingCustomerId, vendorId }, 'presupuestoService: usando customerId pre-resuelto (cliente registrado)');
+        return { customerId: existingCustomerId, vendorId };
+    }
+
     // Buscar cliente existente por JID
     let existing = await customerLookup.findCustomerByJid(pool, jid);
 
@@ -183,7 +193,7 @@ async function createPresupuesto(pool, { cliente, customerId, items, obs, total 
  * @param {Function} opts.handoffFn    - waManager.handoffToHuman(idEmpresa, pool, jid, reason, opts)
  * @returns {Promise<{ok: boolean, id_presupuesto: number|null, vendorId: number|null}>}
  */
-async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn }) {
+async function submit({ idEmpresa, pool, jid, data, clientPhone = '', existingCustomerId = null, handoffFn }) {
     let _step = 'init';
     try {
         log.info({ idEmpresa, jid, itemCount: data.items?.length }, 'presupuestoService: iniciando submit');
@@ -194,7 +204,7 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', handoffFn 
 
         // 2. Cliente
         _step = 'resolveCustomer';
-        const { customerId, vendorId: historicVendorId } = await resolveCustomer(pool, jid, data.cliente || {}, clientPhone);
+        const { customerId, vendorId: historicVendorId } = await resolveCustomer(pool, jid, data.cliente || {}, clientPhone, existingCustomerId);
 
         // 3. Calcular total
         const total = resolvedItems.reduce(

@@ -51,6 +51,9 @@ const _aiLastReply = new Map(); // jid → ts ms
 
 // Presupuestos pendientes de confirmación del cliente: jid → data parseada
 const _pendingPresupuestos = new Map();
+// jid → customerId ya resuelto cuando el cliente es registrado.
+// Permite evitar búsquedas por teléfono en presupuestoService (bypassa duplicados).
+const _pendingPresupuestoCustomerIds = new Map();
 // Conversaciones donde la IA envió el resumen de confirmación pero olvidó el marker:
 // jid → true. Al recibir "sí" en este estado se fuerza regeneración con marker.
 const _pendingConfirmacionSinMarker = new Map();
@@ -192,13 +195,20 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             if (clienteRegistrado) {
                 const nombre = [clienteRegistrado.first_name, clienteRegistrado.last_name]
                     .filter(Boolean).join(' ').trim();
+                const fn    = clienteRegistrado.first_name || '';
+                const ln    = clienteRegistrado.last_name  || '';
+                const phone = clienteRegistrado.phone      || '';
                 clienteRegistradoCtx =
-                    `\n--- CLIENTE REGISTRADO EN EL SISTEMA ---` +
-                    `\nNombre completo: ${nombre}` +
-                    `\nTeléfono: ${clienteRegistrado.phone || ''}` +
-                    `\nIMPORTANTE: Este cliente YA ESTÁ REGISTRADO. NO le preguntes su nombre ni apellido.` +
-                    ` Usa "${nombre}" directamente como clienteNombre en el JSON del presupuesto.` +
-                    `\n--- FIN DATOS CLIENTE ---\n`;
+                    `\n=== CLIENTE REGISTRADO EN EL SISTEMA ===` +
+                    `\nNombre: ${nombre}` +
+                    `\nTeléfono: ${phone}` +
+                    `\nINSTRUCCIÓN CRÍTICA:` +
+                    `\n1. NO le preguntes nombre, apellido, cédula, teléfono ni ningún dato personal — ya los tienes.` +
+                    `\n2. Pasa DIRECTAMENTE a preguntar por el pedido (producto, cantidad, talla, tela).` +
+                    `\n3. Al generar el JSON de presupuesto usa estos datos en "cliente": nombre="${fn}", apellido="${ln}", cedula="", telefono="${phone}", email="", direccion=""` +
+                    `\n=== FIN DATOS CLIENTE ===\n`;
+                // Guardar el customerId para usarlo en presupuestoService sin búsqueda por teléfono.
+                _pendingPresupuestoCustomerIds.set(jid, clienteRegistrado._id);
                 log.info({ jid, customerId: clienteRegistrado._id, nombre },
                     'maybeAutoReply: cliente registrado inyectado en contexto IA');
             }
@@ -718,7 +728,11 @@ async function init(idEmpresa) {
                                     _pendingPresupuestos.delete(result.jid);
                                     handledByPresupuesto = true;
 
-                                    // Resolver teléfono del cliente desde el JID
+                                    // Usar customerId pre-resuelto si el cliente ya estaba registrado.
+                                    const existingCustomerId = _pendingPresupuestoCustomerIds.get(result.jid) || null;
+                                    _pendingPresupuestoCustomerIds.delete(result.jid);
+
+                                    // Resolver teléfono del cliente desde el JID (fallback si no hay customerId)
                                     let clientPhone = '';
                                     if (result.jid.includes('@s.whatsapp.net')) {
                                         clientPhone = result.jid.replace('@s.whatsapp.net', '');
@@ -738,6 +752,7 @@ async function init(idEmpresa) {
                                         jid: result.jid,
                                         data: pendingPres,
                                         clientPhone,
+                                        existingCustomerId,
                                         handoffFn: handoffToHuman,
                                     }).then(({ ok, id_presupuesto }) => {
                                         const msg = ok
