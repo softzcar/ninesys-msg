@@ -47,7 +47,7 @@ async function findCustomerByJid(pool, jid) {
            AND phone IS NOT NULL
            AND phone <> ''
            AND REGEXP_REPLACE(phone, '[^0-9]', '') LIKE CONCAT('%', ?)
-         ORDER BY moment DESC
+         ORDER BY _id ASC
          LIMIT 1`,
         [CUSTOMER_SYSTEM_ID, last10]
     );
