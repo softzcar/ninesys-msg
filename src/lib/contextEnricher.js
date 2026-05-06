@@ -223,7 +223,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
             'Productos encontrados (incluir en PRESUPUESTO_DATA: usa "cod" = id del producto, "precio" = precio según cantidad pedida):',
         ];
         for (const p of catalog.products.slice(0, 10)) {
-            let line = `• ${p.name} [cod:${p.id}]`;
+            let line = `• ${p.name} [cod:${p.id}][idCat:${p.category_id || 0}]`;
             if (p.is_design) {
                 line += ' (diseño personalizado — solicita cotización)';
             } else if (p.prices && p.prices.length > 0) {
