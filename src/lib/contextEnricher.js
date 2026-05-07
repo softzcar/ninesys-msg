@@ -210,71 +210,82 @@ async function fetchTelasContext(idEmpresa) {
 // Galería de imágenes — selección por Gemini Vision
 // ---------------------------------------------------------------------------
 
+const VISION_BATCH_SIZE = 12;
+const VISION_MAX_RESULTS = 4;
+
 /**
- * Descarga hasta 12 imágenes en paralelo y usa Gemini Vision para seleccionar
- * las relevantes al término de búsqueda. Devuelve URLs de las coincidentes (máx 4).
+ * Procesa imageUrls en lotes de 12, llamando a Gemini Vision por cada lote.
+ * Se detiene al acumular VISION_MAX_RESULTS URLs o al agotar la lista.
+ * Devuelve las URLs seleccionadas (máx 4).
  */
 async function visionSelectImages(imageUrls, productTerm) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || !imageUrls.length) return [];
 
     const axios = require('axios');
-    const candidates = imageUrls.slice(0, 12);
+    const collected = [];
 
-    const downloaded = await Promise.all(
-        candidates.map(async (url, i) => {
-            try {
-                const res = await axios.get(url, {
-                    responseType: 'arraybuffer',
-                    timeout: 5000,
-                    maxContentLength: 5 * 1024 * 1024,
-                });
-                const mimeType = (res.headers['content-type'] || 'image/png').split(';')[0].trim();
-                const data = Buffer.from(res.data).toString('base64');
-                return { index: i + 1, url, mimeType, data };
-            } catch {
-                return null;
-            }
-        })
-    );
+    for (let offset = 0; offset < imageUrls.length && collected.length < VISION_MAX_RESULTS; offset += VISION_BATCH_SIZE) {
+        const batch = imageUrls.slice(offset, offset + VISION_BATCH_SIZE);
+        const need = VISION_MAX_RESULTS - collected.length;
 
-    const valid = downloaded.filter(Boolean);
-    if (!valid.length) return [];
+        // Descargar lote en paralelo
+        const downloaded = await Promise.all(
+            batch.map(async (url, i) => {
+                try {
+                    const res = await axios.get(url, {
+                        responseType: 'arraybuffer',
+                        timeout: 5000,
+                        maxContentLength: 5 * 1024 * 1024,
+                    });
+                    const mimeType = (res.headers['content-type'] || 'image/png').split(';')[0].trim();
+                    const data = Buffer.from(res.data).toString('base64');
+                    return { index: i + 1, url, mimeType, data };
+                } catch {
+                    return null;
+                }
+            })
+        );
 
-    const parts = [
-        {
-            text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
+        const valid = downloaded.filter(Boolean);
+        if (!valid.length) continue;
+
+        const parts = [
+            {
+                text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
 Examina TODAS las imágenes numeradas e indica cuáles muestran ese tipo de prenda o producto, aunque tengan diseños o estampados encima.
-Selecciona TODAS las que coincidan (máximo 4). Responde SOLO con los números separados por coma (ej: 1,2,3,4). Si ninguna coincide, responde: ninguna`,
-        },
-    ];
-    for (const img of valid) {
-        parts.push({ text: `Imagen ${img.index}:` });
-        parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+Selecciona hasta ${need} imagen(es) relevante(s). Responde SOLO con los números separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
+            },
+        ];
+        for (const img of valid) {
+            parts.push({ text: `Imagen ${img.index}:` });
+            parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+        }
+
+        try {
+            const client = new GoogleGenAI({ apiKey });
+            const res = await client.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: [{ role: 'user', parts }],
+                config: { temperature: 0, maxOutputTokens: 32 },
+            });
+            const raw = (res?.text || '').trim().toLowerCase();
+            log.info({ productTerm, raw, batchOffset: offset, batchSize: valid.length, collected: collected.length }, 'visionSelectImages: lote procesado');
+
+            if (raw && raw !== 'ninguna') {
+                const found = raw
+                    .split(',')
+                    .map((s) => parseInt(s.trim(), 10))
+                    .filter((n) => !isNaN(n) && n >= 1 && n <= valid.length)
+                    .map((i) => valid[i - 1].url);
+                collected.push(...found);
+            }
+        } catch (err) {
+            log.warn({ err: err.message, productTerm, batchOffset: offset }, 'visionSelectImages: lote falló (continuando)');
+        }
     }
 
-    try {
-        const client = new GoogleGenAI({ apiKey });
-        const res = await client.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [{ role: 'user', parts }],
-            config: { temperature: 0, maxOutputTokens: 32 },
-        });
-        const raw = (res?.text || '').trim().toLowerCase();
-        log.info({ productTerm, raw, total: valid.length }, 'visionSelectImages: resultado Gemini');
-
-        if (!raw || raw === 'ninguna') return [];
-
-        return raw
-            .split(',')
-            .map((s) => parseInt(s.trim(), 10))
-            .filter((n) => !isNaN(n) && n >= 1 && n <= valid.length)
-            .slice(0, 4)
-            .map((i) => valid[i - 1].url);
-    } catch (err) {
-        log.warn({ err: err.message, productTerm }, 'visionSelectImages: falló (no crítico)');
-        return [];
-    }
+    return collected.slice(0, VISION_MAX_RESULTS);
 }
 
 /**
@@ -461,7 +472,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
                     setTimeout(() => {
                         log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería Vision');
                         resolve(null);
-                    }, 20000)
+                    }, 35000)
                 ),
             ])
             : Promise.resolve(null),
