@@ -211,7 +211,7 @@ async function fetchTelasContext(idEmpresa) {
 // ---------------------------------------------------------------------------
 
 const VISION_BATCH_SIZE = 12;
-const VISION_MAX_RESULTS = 4;
+const VISION_MAX_RESULTS = 1;
 
 /**
  * Procesa imageUrls en lotes de 12, llamando a Gemini Vision por cada lote.
@@ -311,7 +311,7 @@ async function fetchGallery(allImageUrls, productTerm, idEmpresa, excludeUrls = 
             return null;
         }
         const lines = [
-            `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url1|url2] para mostrar hasta 4 cuando el cliente pida ver modelos o fotos):`,
+            `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url] para mostrar 1 imagen cuando el cliente pida ver modelos o fotos):`,
         ];
         for (const url of selected) lines.push(`• ${url}`);
         return lines.join('\n');
