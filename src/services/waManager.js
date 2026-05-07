@@ -300,7 +300,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         if (imgMatch) {
             imgUrls = imgMatch[1].split('|')
                 .map((u) => u.trim())
-                .filter((u) => u.startsWith('http'))
+                .filter((u) => u.startsWith('https://cdn.nineteengreen.com/'))
                 .slice(0, 4);
             textToSend = textToSend.replace(imgMatch[0], '').trim();
             log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado');
