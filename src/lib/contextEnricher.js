@@ -207,29 +207,32 @@ async function fetchTelasContext(idEmpresa) {
 }
 
 // ---------------------------------------------------------------------------
-// Galería de imágenes — selección por Gemini Vision
+// Galería de imágenes — selección por Gemini Vision con caché
 // ---------------------------------------------------------------------------
 
 const VISION_BATCH_SIZE = 12;
-const VISION_MAX_RESULTS = 1;
+// Límite de imágenes a encontrar en el escaneo inicial (rellena el caché de una vez).
+const VISION_SCAN_LIMIT = 10;
+// Caché de resultados Vision: idEmpresa → productTerm → { urls: string[], fetchedAt }
+// Evita re-ejecutar Vision en cada mensaje del cliente para el mismo producto.
+const visionCache = new Map();
+const VISION_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
 
 /**
- * Procesa imageUrls en lotes de 12, llamando a Gemini Vision por cada lote.
- * Se detiene al acumular VISION_MAX_RESULTS URLs o al agotar la lista.
- * Devuelve las URLs seleccionadas (máx 4).
+ * Escanea imageUrls en lotes de VISION_BATCH_SIZE usando Gemini Vision.
+ * Recorre TODOS los lotes hasta encontrar VISION_SCAN_LIMIT coincidencias.
+ * Devuelve el array completo de URLs relevantes (para cachear).
  */
-async function visionSelectImages(imageUrls, productTerm) {
+async function visionScanAll(imageUrls, productTerm) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || !imageUrls.length) return [];
 
     const axios = require('axios');
     const collected = [];
 
-    for (let offset = 0; offset < imageUrls.length && collected.length < VISION_MAX_RESULTS; offset += VISION_BATCH_SIZE) {
+    for (let offset = 0; offset < imageUrls.length && collected.length < VISION_SCAN_LIMIT; offset += VISION_BATCH_SIZE) {
         const batch = imageUrls.slice(offset, offset + VISION_BATCH_SIZE);
-        const need = VISION_MAX_RESULTS - collected.length;
 
-        // Descargar lote en paralelo
         const downloaded = await Promise.all(
             batch.map(async (url, i) => {
                 try {
@@ -254,7 +257,7 @@ async function visionSelectImages(imageUrls, productTerm) {
             {
                 text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
 Examina TODAS las imágenes numeradas e indica cuáles muestran ese tipo de prenda o producto, aunque tengan diseños o estampados encima.
-Selecciona hasta ${need} imagen(es) relevante(s). Responde SOLO con los números separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
+Responde SOLO con los números separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
             },
         ];
         for (const img of valid) {
@@ -267,10 +270,10 @@ Selecciona hasta ${need} imagen(es) relevante(s). Responde SOLO con los números
             const res = await client.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: [{ role: 'user', parts }],
-                config: { temperature: 0, maxOutputTokens: 32 },
+                config: { temperature: 0, maxOutputTokens: 64 },
             });
             const raw = (res?.text || '').trim().toLowerCase();
-            log.info({ productTerm, raw, batchOffset: offset, batchSize: valid.length, collected: collected.length }, 'visionSelectImages: lote procesado');
+            log.info({ productTerm, raw, batchOffset: offset, batchSize: valid.length }, 'visionScanAll: lote procesado');
 
             if (raw && raw !== 'ninguna') {
                 const found = raw
@@ -281,40 +284,54 @@ Selecciona hasta ${need} imagen(es) relevante(s). Responde SOLO con los números
                 collected.push(...found);
             }
         } catch (err) {
-            log.warn({ err: err.message, productTerm, batchOffset: offset }, 'visionSelectImages: lote falló (continuando)');
+            log.warn({ err: err.message, productTerm, batchOffset: offset }, 'visionScanAll: lote falló (continuando)');
         }
     }
 
-    return collected.slice(0, VISION_MAX_RESULTS);
+    return collected;
 }
 
 /**
- * Selecciona imágenes relevantes del directorio de la empresa usando Vision.
- * Recibe la lista ya obtenida (evita doble llamada al CDN).
- * excludeUrls: URLs ya enviadas en esta conversación — se omiten para no repetir.
+ * Devuelve la siguiente URL no enviada para el producto dado.
+ * Primera llamada: ejecuta Vision sobre todo el directorio y cachea TODAS las coincidencias.
+ * Llamadas siguientes: lee del caché (sin Vision) y salta las ya enviadas.
  */
 async function fetchGallery(allImageUrls, productTerm, idEmpresa, excludeUrls = []) {
     if (!productTerm || productTerm.length < 2 || !allImageUrls.length) return null;
     try {
-        const candidates = excludeUrls.length
-            ? allImageUrls.filter((u) => !excludeUrls.includes(u))
-            : allImageUrls;
+        // Comprobar caché
+        const compCache = visionCache.get(idEmpresa);
+        const cached = compCache?.get(productTerm);
+        const isFresh = cached && (Date.now() - cached.fetchedAt < VISION_CACHE_TTL_MS);
 
-        if (!candidates.length) {
-            log.info({ idEmpresa, productTerm }, 'fetchGallery: todas las imágenes ya fueron enviadas');
+        let allMatching;
+        if (isFresh) {
+            allMatching = cached.urls;
+            log.info({ idEmpresa, productTerm, total: allMatching.length }, 'fetchGallery: usando caché Vision');
+        } else {
+            // Escanear todo el directorio con Vision y guardar resultado
+            allMatching = await visionScanAll(allImageUrls, productTerm);
+            if (!visionCache.has(idEmpresa)) visionCache.set(idEmpresa, new Map());
+            visionCache.get(idEmpresa).set(productTerm, { urls: allMatching, fetchedAt: Date.now() });
+            log.info({ idEmpresa, productTerm, total: allMatching.length }, 'fetchGallery: caché Vision poblado');
+        }
+
+        if (!allMatching.length) {
+            log.info({ idEmpresa, productTerm }, 'fetchGallery: sin imágenes para este producto');
             return null;
         }
 
-        const selected = await visionSelectImages(candidates, productTerm);
-        if (!selected.length) {
-            log.info({ idEmpresa, productTerm }, 'fetchGallery: Vision no encontró imágenes relevantes');
+        // Seleccionar la primera URL que no haya sido enviada aún
+        const next = allMatching.find((u) => !excludeUrls.includes(u));
+        if (!next) {
+            log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
             return null;
         }
-        const lines = [
+
+        return [
             `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url] para mostrar 1 imagen cuando el cliente pida ver modelos o fotos):`,
-        ];
-        for (const url of selected) lines.push(`• ${url}`);
-        return lines.join('\n');
+            `• ${next}`,
+        ].join('\n');
     } catch (err) {
         log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: falló (no crítico)');
         return null;
