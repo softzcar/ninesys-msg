@@ -191,21 +191,95 @@ async function fetchTelasContext(idEmpresa) {
 }
 
 // ---------------------------------------------------------------------------
-// Galería de imágenes de catálogo
+// Galería de imágenes — selección por Gemini Vision
 // ---------------------------------------------------------------------------
 
-async function fetchGallery(idEmpresa, searchTerm) {
-    if (!searchTerm || searchTerm.length < 2) return null;
+/**
+ * Descarga hasta 12 imágenes en paralelo y usa Gemini Vision para seleccionar
+ * las relevantes al término de búsqueda. Devuelve URLs de las coincidentes (máx 4).
+ */
+async function visionSelectImages(imageUrls, productTerm) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || !imageUrls.length) return [];
+
+    const axios = require('axios');
+    const candidates = imageUrls.slice(0, 12);
+
+    const downloaded = await Promise.all(
+        candidates.map(async (url, i) => {
+            try {
+                const res = await axios.get(url, {
+                    responseType: 'arraybuffer',
+                    timeout: 5000,
+                    maxContentLength: 5 * 1024 * 1024,
+                });
+                const mimeType = (res.headers['content-type'] || 'image/png').split(';')[0].trim();
+                const data = Buffer.from(res.data).toString('base64');
+                return { index: i + 1, url, mimeType, data };
+            } catch {
+                return null;
+            }
+        })
+    );
+
+    const valid = downloaded.filter(Boolean);
+    if (!valid.length) return [];
+
+    const parts = [
+        {
+            text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
+Examina cada imagen numerada e indica cuáles muestran ese tipo de producto o prenda.
+Responde SOLO con los números relevantes separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
+        },
+    ];
+    for (const img of valid) {
+        parts.push({ text: `Imagen ${img.index}:` });
+        parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+    }
+
     try {
-        const images = await galleryClient.listImages(idEmpresa, searchTerm);
-        if (!images.length) return null;
+        const client = new GoogleGenAI({ apiKey });
+        const res = await client.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [{ role: 'user', parts }],
+            config: { temperature: 0, maxOutputTokens: 32 },
+        });
+        const raw = (res?.text || '').trim().toLowerCase();
+        log.info({ productTerm, raw, total: valid.length }, 'visionSelectImages: resultado Gemini');
+
+        if (!raw || raw === 'ninguna') return [];
+
+        return raw
+            .split(',')
+            .map((s) => parseInt(s.trim(), 10))
+            .filter((n) => !isNaN(n) && n >= 1 && n <= valid.length)
+            .slice(0, 4)
+            .map((i) => valid[i - 1].url);
+    } catch (err) {
+        log.warn({ err: err.message, productTerm }, 'visionSelectImages: falló (no crítico)');
+        return [];
+    }
+}
+
+/**
+ * Selecciona imágenes relevantes del directorio de la empresa usando Vision.
+ * Recibe la lista ya obtenida (evita doble llamada al CDN).
+ */
+async function fetchGallery(allImageUrls, productTerm, idEmpresa) {
+    if (!productTerm || productTerm.length < 2 || !allImageUrls.length) return null;
+    try {
+        const selected = await visionSelectImages(allImageUrls, productTerm);
+        if (!selected.length) {
+            log.info({ idEmpresa, productTerm }, 'fetchGallery: Vision no encontró imágenes relevantes');
+            return null;
+        }
         const lines = [
-            `Galería de imágenes disponibles para "${searchTerm}" (usa [IMG:url1|url2] para mostrar hasta 4 cuando el cliente pida ver modelos o fotos):`,
+            `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url1|url2] para mostrar hasta 4 cuando el cliente pida ver modelos o fotos):`,
         ];
-        for (const url of images) lines.push(`• ${url}`);
+        for (const url of selected) lines.push(`• ${url}`);
         return lines.join('\n');
     } catch (err) {
-        log.warn({ err: err.message, idEmpresa, searchTerm }, 'fetchGallery: falló (no crítico)');
+        log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: falló (no crítico)');
         return null;
     }
 }
@@ -284,80 +358,92 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
 
     log.info({ idEmpresa, message: lastUserMessage }, 'enrichContext: INICIANDO');
 
-    // Wrapper con timeout para schedule (15s para llamadas HTTP remotas)
-    const schedulePromise = Promise.race([
-        fetchSchedule(idEmpresa),
-        new Promise((resolve) =>
-            setTimeout(() => {
-                log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
-                resolve(null);
-            }, 15000)
-        ),
+    // Fase 1 — todo lo independiente corre en paralelo:
+    //   horario, telas, listado de imágenes del CDN, extracción de término de producto.
+    const [resolvedProductTerm, schedule, telas, allImageUrls] = await Promise.all([
+        // Extraer término de producto del mensaje (Gemini Flash, texto)
+        (lastUserMessage && lastUserMessage.length >= 2)
+            ? Promise.race([
+                extractProductSearch(lastUserMessage),
+                new Promise((r) => setTimeout(() => r(null), INTENT_TIMEOUT_MS + 500)),
+            ])
+            : Promise.resolve(null),
+
+        // Horario de atención
+        Promise.race([
+            fetchSchedule(idEmpresa),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
+                    resolve(null);
+                }, 15000)
+            ),
+        ]),
+
+        // Catálogo de telas
+        Promise.race([
+            fetchTelasContext(idEmpresa),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
+                    resolve(null);
+                }, 10000)
+            ),
+        ]),
+
+        // Listar TODAS las imágenes del CDN (sin filtro por nombre — Vision decidirá)
+        Promise.race([
+            galleryClient.listImages(idEmpresa),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando listado de imágenes');
+                    resolve([]);
+                }, 8000)
+            ),
+        ]),
     ]);
 
-    // Extraer término de producto una sola vez para catálogo + galería (evita doble llamada a Gemini).
-    let resolvedProductTerm = null;
-    if (lastUserMessage && lastUserMessage.length >= 2) {
-        resolvedProductTerm = await Promise.race([
-            extractProductSearch(lastUserMessage),
-            new Promise((r) => setTimeout(() => r(null), INTENT_TIMEOUT_MS + 500)),
-        ]);
-    }
-
-    // El horario siempre se inyecta: es liviano y muy relevante.
-    const schedule = await schedulePromise;
     if (schedule) {
         sections.push(schedule);
         log.debug({ idEmpresa }, 'contextEnricher: horario inyectado');
     } else {
         log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo horario');
     }
+    if (telas) {
+        sections.push(telas);
+        log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
+    }
 
-    // Catálogo de telas con _id para que la IA los use directamente en el marker.
-    const telasPromise = Promise.race([
-        fetchTelasContext(idEmpresa),
-        new Promise((resolve) =>
-            setTimeout(() => {
-                log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
-                resolve(null);
-            }, 10000)
-        ),
+    // Fase 2 — catálogo de texto + galería Vision (ambos necesitan el término resuelto).
+    const [products, gallery] = await Promise.all([
+        resolvedProductTerm
+            ? Promise.race([
+                fetchProducts(idEmpresa, resolvedProductTerm),
+                new Promise((resolve) =>
+                    setTimeout(() => {
+                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
+                        resolve(null);
+                    }, 15000)
+                ),
+            ])
+            : Promise.resolve(null),
+
+        (resolvedProductTerm && allImageUrls.length)
+            ? Promise.race([
+                fetchGallery(allImageUrls, resolvedProductTerm, idEmpresa),
+                new Promise((resolve) =>
+                    setTimeout(() => {
+                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería Vision');
+                        resolve(null);
+                    }, 20000)
+                ),
+            ])
+            : Promise.resolve(null),
     ]);
-
-    // Catálogo de productos + galería de imágenes en paralelo (solo si hay término resuelto).
-    const productsPromise = resolvedProductTerm
-        ? Promise.race([
-            fetchProducts(idEmpresa, resolvedProductTerm),
-            new Promise((resolve) =>
-                setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
-                    resolve(null);
-                }, 15000)
-            ),
-        ])
-        : Promise.resolve(null);
-
-    const galleryPromise = resolvedProductTerm
-        ? Promise.race([
-            fetchGallery(idEmpresa, resolvedProductTerm),
-            new Promise((resolve) =>
-                setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
-                    resolve(null);
-                }, 10000)
-            ),
-        ])
-        : Promise.resolve(null);
-
-    const [products, telas, gallery] = await Promise.all([productsPromise, telasPromise, galleryPromise]);
 
     if (products) {
         sections.push(products);
         log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
-    }
-    if (telas) {
-        sections.push(telas);
-        log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
     }
     if (gallery) {
         sections.push(gallery);
