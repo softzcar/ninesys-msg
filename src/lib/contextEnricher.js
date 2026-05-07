@@ -218,6 +218,10 @@ const VISION_SCAN_LIMIT = 10;
 const visionCache = new Map();
 const VISION_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hora
 
+// Escaneos en curso para evitar lanzar dos scans concurrentes del mismo (empresa, producto).
+// key: `${idEmpresa}:${productTerm}`
+const visionPendingScans = new Set();
+
 /**
  * Escanea imageUrls en lotes de VISION_BATCH_SIZE usando Gemini Vision.
  * Recorre TODOS los lotes hasta encontrar VISION_SCAN_LIMIT coincidencias.
@@ -255,9 +259,11 @@ async function visionScanAll(imageUrls, productTerm) {
 
         const parts = [
             {
-                text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
-Examina TODAS las imágenes numeradas e indica cuáles muestran ese tipo de prenda o producto, aunque tengan diseños o estampados encima.
-Responde SOLO con los números separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
+                text: `Eres un clasificador de imágenes para una tienda de ropa personalizada. El cliente busca: "${productTerm}".
+
+Examina CADA imagen numerada. Marca como coincidencia si la imagen muestra una ${productTerm} — incluyendo prendas reales, mockups, plantillas digitales, renders 3D o maquetas con diseños, estampados o bordados encima. Si la prenda base parece ser una ${productTerm} aunque lleve un diseño encima, cuenta como coincidencia. Ante la duda, inclúyela.
+
+Responde SOLO con los números de las imágenes que coincidan, separados por coma (ej: 1,3,5). Si ninguna coincide, responde: ninguna`,
             },
         ];
         for (const img of valid) {
@@ -293,45 +299,64 @@ Responde SOLO con los números separados por coma (ej: 1,3). Si ninguna coincide
 
 /**
  * Devuelve la siguiente URL no enviada para el producto dado.
- * Primera llamada: ejecuta Vision sobre todo el directorio y cachea TODAS las coincidencias.
- * Llamadas siguientes: lee del caché (sin Vision) y salta las ya enviadas.
+ *
+ * - Caché fresco: sirve instantáneamente del caché y salta las ya enviadas.
+ * - Caché vacío + scan en curso: retorna null (la respuesta de la IA omitirá galería;
+ *   el siguiente mensaje del cliente encontrará el caché listo).
+ * - Caché vacío + sin scan en curso: lanza el scan en BACKGROUND y retorna null
+ *   (evita bloquear la respuesta actual con un scan de 20-30s).
  */
 async function fetchGallery(allImageUrls, productTerm, idEmpresa, excludeUrls = []) {
     if (!productTerm || productTerm.length < 2 || !allImageUrls.length) return null;
     try {
-        // Comprobar caché
         const compCache = visionCache.get(idEmpresa);
         const cached = compCache?.get(productTerm);
         const isFresh = cached && (Date.now() - cached.fetchedAt < VISION_CACHE_TTL_MS);
 
-        let allMatching;
         if (isFresh) {
-            allMatching = cached.urls;
+            const allMatching = cached.urls;
             log.info({ idEmpresa, productTerm, total: allMatching.length }, 'fetchGallery: usando caché Vision');
-        } else {
-            // Escanear todo el directorio con Vision y guardar resultado
-            allMatching = await visionScanAll(allImageUrls, productTerm);
-            if (!visionCache.has(idEmpresa)) visionCache.set(idEmpresa, new Map());
-            visionCache.get(idEmpresa).set(productTerm, { urls: allMatching, fetchedAt: Date.now() });
-            log.info({ idEmpresa, productTerm, total: allMatching.length }, 'fetchGallery: caché Vision poblado');
+
+            if (!allMatching.length) {
+                log.info({ idEmpresa, productTerm }, 'fetchGallery: sin imágenes en caché para este producto');
+                return null;
+            }
+            const next = allMatching.find((u) => !excludeUrls.includes(u));
+            if (!next) {
+                log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
+                return null;
+            }
+            return [
+                `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url] para mostrar 1 imagen cuando el cliente pida ver modelos o fotos):`,
+                `• ${next}`,
+            ].join('\n');
         }
 
-        if (!allMatching.length) {
-            log.info({ idEmpresa, productTerm }, 'fetchGallery: sin imágenes para este producto');
+        // Caché vacío — lanzar scan en background si no hay uno ya en curso.
+        const scanKey = `${idEmpresa}:${productTerm}`;
+        if (visionPendingScans.has(scanKey)) {
+            log.info({ idEmpresa, productTerm }, 'fetchGallery: scan ya en curso, retornando null (próximo mensaje usará caché)');
             return null;
         }
 
-        // Seleccionar la primera URL que no haya sido enviada aún
-        const next = allMatching.find((u) => !excludeUrls.includes(u));
-        if (!next) {
-            log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
-            return null;
-        }
+        visionPendingScans.add(scanKey);
+        log.info({ idEmpresa, productTerm, total: allImageUrls.length }, 'fetchGallery: iniciando scan Vision en background');
 
-        return [
-            `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url] para mostrar 1 imagen cuando el cliente pida ver modelos o fotos):`,
-            `• ${next}`,
-        ].join('\n');
+        // Fire-and-forget: no esperamos — el cliente recibirá imagen en el próximo turno.
+        visionScanAll(allImageUrls, productTerm)
+            .then((allMatching) => {
+                if (!visionCache.has(idEmpresa)) visionCache.set(idEmpresa, new Map());
+                visionCache.get(idEmpresa).set(productTerm, { urls: allMatching, fetchedAt: Date.now() });
+                log.info({ idEmpresa, productTerm, total: allMatching.length }, 'fetchGallery: caché Vision poblado (background)');
+            })
+            .catch((err) => {
+                log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: scan background falló');
+            })
+            .finally(() => {
+                visionPendingScans.delete(scanKey);
+            });
+
+        return null;
     } catch (err) {
         log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: falló (no crítico)');
         return null;
@@ -468,6 +493,23 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
     }
 
+    // Si el mensaje no menciona un producto explícito pero ya se enviaron imágenes de galería,
+    // recuperar el término del caché Vision (el cliente está pidiendo "otra imagen" del mismo producto).
+    let galleryProductTerm = resolvedProductTerm;
+    if (!galleryProductTerm && excludeGalleryUrls.length > 0) {
+        const compCache = visionCache.get(idEmpresa);
+        if (compCache) {
+            for (const [term, entry] of compCache.entries()) {
+                if (entry.urls.some((u) => excludeGalleryUrls.includes(u))) {
+                    galleryProductTerm = term;
+                    log.info({ idEmpresa, galleryProductTerm, excluded: excludeGalleryUrls.length },
+                        'enrichContext: término recuperado del caché Vision para continuación de galería');
+                    break;
+                }
+            }
+        }
+    }
+
     // Fase 2 — catálogo de texto + galería Vision (ambos necesitan el término resuelto).
     const [products, gallery] = await Promise.all([
         resolvedProductTerm
@@ -482,16 +524,8 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
             ])
             : Promise.resolve(null),
 
-        (resolvedProductTerm && allImageUrls.length)
-            ? Promise.race([
-                fetchGallery(allImageUrls, resolvedProductTerm, idEmpresa, excludeGalleryUrls),
-                new Promise((resolve) =>
-                    setTimeout(() => {
-                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería Vision');
-                        resolve(null);
-                    }, 35000)
-                ),
-            ])
+        (galleryProductTerm && allImageUrls.length)
+            ? fetchGallery(allImageUrls, galleryProductTerm, idEmpresa, excludeGalleryUrls)
             : Promise.resolve(null),
     ]);
 
