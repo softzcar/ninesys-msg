@@ -25,6 +25,7 @@ const businessHoursClient = require('./businessHoursClient');
 const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
 const telasClient = require('./telasClient');
+const galleryClient = require('./galleryClient');
 const log = require('./logger').createLogger('contextEnricher');
 
 const INTENT_TIMEOUT_MS = 3000;
@@ -190,6 +191,26 @@ async function fetchTelasContext(idEmpresa) {
 }
 
 // ---------------------------------------------------------------------------
+// Galería de imágenes de catálogo
+// ---------------------------------------------------------------------------
+
+async function fetchGallery(idEmpresa, searchTerm) {
+    if (!searchTerm || searchTerm.length < 2) return null;
+    try {
+        const images = await galleryClient.listImages(idEmpresa, searchTerm);
+        if (!images.length) return null;
+        const lines = [
+            `Galería de imágenes disponibles para "${searchTerm}" (usa [IMG:url1|url2] para mostrar hasta 4 cuando el cliente pida ver modelos o fotos):`,
+        ];
+        for (const url of images) lines.push(`• ${url}`);
+        return lines.join('\n');
+    } catch (err) {
+        log.warn({ err: err.message, idEmpresa, searchTerm }, 'fetchGallery: falló (no crítico)');
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Punto de entrada público
 // ---------------------------------------------------------------------------
 
@@ -204,20 +225,14 @@ async function fetchTelasContext(idEmpresa) {
 async function fetchProducts(idEmpresa, searchTerm) {
     if (!searchTerm || searchTerm.length < 2) return null;
 
-    const finalSearch = await extractProductSearch(searchTerm);
-    if (!finalSearch) {
-        log.info({ idEmpresa, searchTerm }, 'fetchProducts: Gemini no detectó búsqueda de productos');
-        return null;
-    }
-
     try {
-        log.info({ idEmpresa, originalTerm: searchTerm, finalSearch }, 'fetchProducts: buscando');
-        const catalog = await catalogClient.fetchCatalog(idEmpresa, finalSearch);
+        log.info({ idEmpresa, finalSearch: searchTerm }, 'fetchProducts: buscando');
+        const catalog = await catalogClient.fetchCatalog(idEmpresa, searchTerm);
         if (!catalog || !catalog.products || !catalog.products.length) {
-            log.info({ idEmpresa, finalSearch, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
+            log.info({ idEmpresa, finalSearch: searchTerm, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
             return null;
         }
-        log.info({ idEmpresa, finalSearch, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
+        log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
         const lines = [
             'Productos encontrados (incluir en PRESUPUESTO_DATA: usa "cod" = id del producto, "precio" = precio según cantidad pedida):',
@@ -247,7 +262,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
             code: err.code,
             errno: err.errno,
             idEmpresa,
-            searchTerm
+            finalSearch: searchTerm
         }, 'fetchProducts falló');
         return null;
     }
@@ -280,6 +295,15 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
         ),
     ]);
 
+    // Extraer término de producto una sola vez para catálogo + galería (evita doble llamada a Gemini).
+    let resolvedProductTerm = null;
+    if (lastUserMessage && lastUserMessage.length >= 2) {
+        resolvedProductTerm = await Promise.race([
+            extractProductSearch(lastUserMessage),
+            new Promise((r) => setTimeout(() => r(null), INTENT_TIMEOUT_MS + 500)),
+        ]);
+    }
+
     // El horario siempre se inyecta: es liviano y muy relevante.
     const schedule = await schedulePromise;
     if (schedule) {
@@ -288,18 +312,6 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
     } else {
         log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo horario');
     }
-
-    // Siempre intentar buscar productos (sin detectIntent). Si no hay resultados,
-    // fetchProducts devuelve null y simplemente no se inyecta nada.
-    const productsPromise = Promise.race([
-        fetchProducts(idEmpresa, lastUserMessage),
-        new Promise((resolve) =>
-            setTimeout(() => {
-                log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
-                resolve(null);
-            }, 15000)
-        ),
-    ]);
 
     // Catálogo de telas con _id para que la IA los use directamente en el marker.
     const telasPromise = Promise.race([
@@ -312,7 +324,32 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
         ),
     ]);
 
-    const [products, telas] = await Promise.all([productsPromise, telasPromise]);
+    // Catálogo de productos + galería de imágenes en paralelo (solo si hay término resuelto).
+    const productsPromise = resolvedProductTerm
+        ? Promise.race([
+            fetchProducts(idEmpresa, resolvedProductTerm),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
+                    resolve(null);
+                }, 15000)
+            ),
+        ])
+        : Promise.resolve(null);
+
+    const galleryPromise = resolvedProductTerm
+        ? Promise.race([
+            fetchGallery(idEmpresa, resolvedProductTerm),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
+                    resolve(null);
+                }, 10000)
+            ),
+        ])
+        : Promise.resolve(null);
+
+    const [products, telas, gallery] = await Promise.all([productsPromise, telasPromise, galleryPromise]);
 
     if (products) {
         sections.push(products);
@@ -321,6 +358,10 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
     if (telas) {
         sections.push(telas);
         log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
+    }
+    if (gallery) {
+        sections.push(gallery);
+        log.debug({ idEmpresa }, 'contextEnricher: galería inyectada');
     }
 
     const elapsed = Date.now() - startTime;
@@ -346,5 +387,6 @@ module.exports = {
     // Expuestos para tests
     _fetchSchedule: fetchSchedule,
     _fetchProducts: fetchProducts,
+    _fetchGallery: fetchGallery,
     _decimalToHHMM: decimalToHHMM,
 };

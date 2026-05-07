@@ -70,6 +70,9 @@ const PRESUPUESTO_RESUMEN_RE = /confirmas\s+este\s+presupuesto/i;
 const HANDOFF_IA_MARKER_RE      = /\[HANDOFF_IA\]/gi;
 const HANDOFF_CLIENTE_MARKER_RE = /\[HANDOFF_CLIENTE\]/gi;
 
+// Marker de galería de imágenes: [IMG:url1|url2|...]
+const IMG_MARKER_RE = /\[IMG:(https?:\/\/[^\]|]+(?:\|https?:\/\/[^\]|]+)*)\]/i;
+
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
 // El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
 // y lo evalúa sttService; aquí solo guardamos los textos de aviso.
@@ -286,6 +289,18 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             .replace(HANDOFF_CLIENTE_MARKER_RE, '')
             .trim();
 
+        // Extraer marker de imágenes [IMG:url1|url2|...] antes de enviar al cliente.
+        let imgUrls = [];
+        const imgMatch = IMG_MARKER_RE.exec(textToSend);
+        if (imgMatch) {
+            imgUrls = imgMatch[1].split('|')
+                .map((u) => u.trim())
+                .filter((u) => u.startsWith('http'))
+                .slice(0, 4);
+            textToSend = textToSend.replace(imgMatch[0], '').trim();
+            log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado');
+        }
+
         const markerMatch = PRESUPUESTO_MARKER_RE.exec(textToSend);
         if (markerMatch) {
             textToSend = textToSend.replace(markerMatch[0], '').trim();
@@ -320,6 +335,22 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 ['ai_auto', jid, sendErr.message, `gemini:${reply.model}`]
             ).catch(() => {});
             throw sendErr;
+        }
+
+        // Enviar imágenes de galería (serial, skip silencioso por imagen).
+        for (const url of imgUrls) {
+            const downloaded = await downloadImageBuffer(url);
+            if (!downloaded) continue;
+            try {
+                await sendMedia(idEmpresa, jid, {
+                    type: 'image',
+                    buffer: downloaded.buffer,
+                    mimeType: downloaded.mimeType,
+                    caption: '',
+                }, { via: 'ai' });
+            } catch (e) {
+                log.warn({ jid, url, err: e.message }, 'maybeAutoReply: skip imagen — fallo de envío');
+            }
         }
 
         // ── Escenario 1: IA no puede resolver / cliente frustrado ─────────────
@@ -1114,6 +1145,23 @@ async function destroy(idEmpresa) {
  *   pasa a mode='human', ai_enabled=0, assigned_to=sentByUser. Es la
  *   implementación de "el empleado tomó la conversación" (Fase 8.3).
  */
+async function downloadImageBuffer(url) {
+    try {
+        const axios = require('axios');
+        const res = await axios.get(url, {
+            responseType: 'arraybuffer',
+            timeout: 10000,
+            maxContentLength: 16 * 1024 * 1024,
+        });
+        const buffer = Buffer.from(res.data);
+        const mimeType = (res.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
+        return { buffer, mimeType };
+    } catch (err) {
+        log.warn({ url, err: err.message }, 'downloadImageBuffer: skip silencioso');
+        return null;
+    }
+}
+
 async function sendText(idEmpresa, jid, body, opts = {}) {
     const id = parseInt(idEmpresa, 10);
     const via = opts.via || 'api';
