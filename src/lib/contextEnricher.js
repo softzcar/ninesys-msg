@@ -30,19 +30,35 @@ const log = require('./logger').createLogger('contextEnricher');
 
 const INTENT_TIMEOUT_MS = 3000;
 
-const INTENT_PROMPT = `Eres un asistente de una tienda de ropa personalizada.
+const INTENT_PROMPT = `Eres un asistente de una tienda de ropa personalizada en Venezuela.
 
-Del siguiente mensaje de un cliente extrae el nombre del producto de ropa o tela que se menciona. Responde SOLO con el nombre del producto en singular y minúsculas, sin ningún texto adicional. Si no hay producto, responde solo la palabra: null
+Del siguiente mensaje de un cliente extrae el tipo de prenda o producto mencionado y normalízalo al término estándar en español. Responde SOLO con el término normalizado en singular y minúsculas. Si no hay producto, responde: null
 
-Ejemplos:
-"franela" → franela
-"joggers" → jogger
-"vender joggers" → jogger
-"tienen remeras?" → remera
+Reglas de normalización (términos regionales → término estándar):
+- franela, remera, playera, polera, camibuso, camiseta, t-shirt, swater, suéter, sweter, chemise, blusa → camiseta
+- gorra, cachucha, jockey, cap, sombrero → gorra
+- buzo, sudadera, hoodie, capota, chompa, sweatshirt → buzo
+- jean, pantalón, pants, pantalones → pantalón
+- jogger, jogging → jogger
+- bermuda, short, pantaloneta → bermuda
+- chaqueta, jacket, chamarra → chaqueta
+- chaleco, vest → chaleco
+- camisa, shirt → camisa
+- polo, camiseta polo → polo
+
+Ejemplos de respuesta esperada:
+"franela" → camiseta
+"franelas sublimadas" → camiseta
+"swater" → camiseta
+"tienen remeras?" → camiseta
 "cuanto salen las camisetas" → camiseta
 "me interesan los buzos con logo" → buzo
-"kiero vr los poleras" → polera
+"kiero vr los poleras" → camiseta
+"joggers" → jogger
 "bermuda" → bermuda
+"gorras personalizadas" → gorra
+"cachucha bordada" → gorra
+"mas modelos" → null
 "hola buenas" → null
 "gracias" → null
 "q tal les quedo el pedido" → null
@@ -228,8 +244,8 @@ async function visionSelectImages(imageUrls, productTerm) {
     const parts = [
         {
             text: `Eres un clasificador de imágenes de productos de ropa y accesorios. El cliente busca: "${productTerm}".
-Examina cada imagen numerada e indica cuáles muestran ese tipo de producto o prenda.
-Responde SOLO con los números relevantes separados por coma (ej: 1,3). Si ninguna coincide, responde: ninguna`,
+Examina TODAS las imágenes numeradas e indica cuáles muestran ese tipo de prenda o producto, aunque tengan diseños o estampados encima.
+Selecciona TODAS las que coincidan (máximo 4). Responde SOLO con los números separados por coma (ej: 1,2,3,4). Si ninguna coincide, responde: ninguna`,
         },
     ];
     for (const img of valid) {
@@ -264,11 +280,21 @@ Responde SOLO con los números relevantes separados por coma (ej: 1,3). Si ningu
 /**
  * Selecciona imágenes relevantes del directorio de la empresa usando Vision.
  * Recibe la lista ya obtenida (evita doble llamada al CDN).
+ * excludeUrls: URLs ya enviadas en esta conversación — se omiten para no repetir.
  */
-async function fetchGallery(allImageUrls, productTerm, idEmpresa) {
+async function fetchGallery(allImageUrls, productTerm, idEmpresa, excludeUrls = []) {
     if (!productTerm || productTerm.length < 2 || !allImageUrls.length) return null;
     try {
-        const selected = await visionSelectImages(allImageUrls, productTerm);
+        const candidates = excludeUrls.length
+            ? allImageUrls.filter((u) => !excludeUrls.includes(u))
+            : allImageUrls;
+
+        if (!candidates.length) {
+            log.info({ idEmpresa, productTerm }, 'fetchGallery: todas las imágenes ya fueron enviadas');
+            return null;
+        }
+
+        const selected = await visionSelectImages(candidates, productTerm);
         if (!selected.length) {
             log.info({ idEmpresa, productTerm }, 'fetchGallery: Vision no encontró imágenes relevantes');
             return null;
@@ -352,7 +378,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '') {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [] } = {}) {
     const startTime = Date.now();
     const sections = [];
 
@@ -430,7 +456,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '') {
 
         (resolvedProductTerm && allImageUrls.length)
             ? Promise.race([
-                fetchGallery(allImageUrls, resolvedProductTerm, idEmpresa),
+                fetchGallery(allImageUrls, resolvedProductTerm, idEmpresa, excludeGalleryUrls),
                 new Promise((resolve) =>
                     setTimeout(() => {
                         log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería Vision');

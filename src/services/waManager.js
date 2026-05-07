@@ -49,6 +49,10 @@ const log = require('../lib/logger').createLogger('waManager');
 const AI_THROTTLE_MS = 4000;
 const _aiLastReply = new Map(); // jid → ts ms
 
+// URLs de imágenes ya enviadas por galería en esta sesión: jid → Set<url>
+// Permite excluirlas en la siguiente llamada a Vision para no repetir imágenes.
+const _sentGalleryUrls = new Map();
+
 // Presupuestos pendientes de confirmación del cliente: jid → data parseada
 const _pendingPresupuestos = new Map();
 // jid → customerId ya resuelto cuando el cliente es registrado.
@@ -250,6 +254,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 agentId: flags.aiAgentId || null,
                 idEmpresa,
                 extraSystemContext: fullExtraContext,
+                excludeGalleryUrls: _sentGalleryUrls.has(jid) ? [..._sentGalleryUrls.get(jid)] : [],
             }),
         ]);
 
@@ -348,6 +353,9 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                     mimeType: downloaded.mimeType,
                     caption: '',
                 }, { via: 'ai' });
+                // Registrar URL como enviada para no repetirla en el siguiente turno.
+                if (!_sentGalleryUrls.has(jid)) _sentGalleryUrls.set(jid, new Set());
+                _sentGalleryUrls.get(jid).add(url);
             } catch (e) {
                 log.warn({ jid, url, err: e.message }, 'maybeAutoReply: skip imagen — fallo de envío');
             }
