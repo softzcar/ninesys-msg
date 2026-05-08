@@ -107,34 +107,42 @@ async function extractProductSearch(message) {
 }
 
 
-// ---------------------------------------------------------------------------
-// Candidatos CDN por término normalizado
-// El admin puede nombrar las carpetas CDN con cualquier sinónimo.
-// El bot prueba cada candidato en orden hasta encontrar imágenes.
-// ---------------------------------------------------------------------------
-const GALLERY_CANDIDATES = {
-    franela:  ['franela', 'franelas', 'camiseta', 'camisetas', 'remera', 'remeras', 'playera', 'playeras'],
-    chaqueta: ['chaqueta', 'chaquetas', 'jacket', 'jackets', 'chamarra', 'chamarras'],
-    gorra:    ['gorra', 'gorras', 'cachucha', 'cap', 'caps'],
-    buzo:     ['buzo', 'buzos', 'sudadera', 'sudaderas', 'hoodie', 'hoodies'],
-    'pantalón': ['pantalon', 'pantalones', 'jean', 'jeans', 'pants'],
-    jogger:   ['jogger', 'joggers'],
-    bermuda:  ['bermuda', 'bermudas', 'short', 'shorts', 'pantaloneta', 'pantalonetas'],
-    chaleco:  ['chaleco', 'chalecos', 'vest', 'vests'],
-    camisa:   ['camisa', 'camisas', 'shirt', 'shirts'],
-    polo:     ['polo', 'polos'],
-};
+// Cache de resolución término → carpeta CDN (para no repetir la llamada Gemini)
+// `${idEmpresa}:${term}` → { folder: string, fetchedAt: number }
+const galleryFolderResolutionCache = new Map();
+const FOLDER_RESOLUTION_TTL_MS = 30 * 60 * 1000;
 
 /**
- * Devuelve lista de términos a probar en el CDN para un producto dado.
- * Combina los candidatos del mapa + categoryTerm del catálogo (si es válido).
+ * Usa Gemini Flash para elegir la carpeta CDN más apropiada para un término de producto.
+ * Devuelve el nombre de la carpeta o null si ninguna coincide.
  */
-function buildGalleryCandidates(resolvedTerm, categoryTerm) {
-    const base = GALLERY_CANDIDATES[resolvedTerm] || [resolvedTerm, resolvedTerm + 's'];
-    const cat = categoryTerm && categoryTerm !== 'uncategorized' && categoryTerm !== 'sin categoría'
-        ? [categoryTerm]
-        : [];
-    return [...new Set([...base, ...cat])];
+async function resolveGalleryFolder(term, availableFolders) {
+    if (!availableFolders.length) return null;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return null;
+
+    const { GoogleGenAI } = require('@google/genai');
+    const client = new GoogleGenAI({ apiKey });
+    const prompt = `Tienes estas carpetas de galería disponibles: [${availableFolders.join(', ')}]
+El cliente busca imágenes de: "${term}"
+¿Cuál carpeta corresponde mejor? Responde SOLO con el nombre exacto de la carpeta. Si ninguna corresponde, responde: null`;
+
+    try {
+        const res = await client.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            config: { temperature: 0, maxOutputTokens: 32 },
+        });
+        const answer = (res?.text || '').trim().toLowerCase();
+        if (!answer || answer === 'null') return null;
+        // Verificar que la respuesta sea una carpeta real
+        const match = availableFolders.find((f) => f.toLowerCase() === answer);
+        log.info({ term, availableFolders, answer, match }, 'resolveGalleryFolder: resultado Gemini');
+        return match || null;
+    } catch (err) {
+        log.warn({ err: err.message, term }, 'resolveGalleryFolder: falló');
+        return null;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,55 +274,77 @@ async function fetchTelasContext(idEmpresa) {
 const urlToGalleryTerm = new Map();
 
 /**
- * Devuelve la siguiente URL no enviada probando cada candidato hasta encontrar imágenes.
- * Itera sobre galleryCandidates en orden; usa el primero que tenga fotos en el CDN.
+ * Devuelve la instrucción de galería para Gemini con la siguiente imagen no enviada.
+ *
+ * Estrategia de 2 pasos:
+ *   1. Prueba el término directo (el CDN ya hace prefix matching chaqueta↔chaquetas).
+ *   2. Si vacío: lista todas las carpetas disponibles y usa Gemini Flash para elegir
+ *      la carpeta semánticamente más cercana (franela → camiseta, etc.).
+ *      El resultado se cachea 30 min para no repetir la llamada.
  *
  * @param {number}   idEmpresa
- * @param {string[]} galleryCandidates - términos a probar (ej: ["chaqueta","chaquetas","jacket"])
- * @param {string[]} excludeUrls       - URLs ya enviadas en esta conversación
+ * @param {string}   productTerm  - término normalizado (ej: "franela", "chaqueta")
+ * @param {string[]} excludeUrls  - URLs ya enviadas en esta conversación
  * @returns {Promise<string|null>}
  */
-async function fetchGallery(idEmpresa, galleryCandidates, excludeUrls = []) {
-    const candidates = Array.isArray(galleryCandidates) ? galleryCandidates : [galleryCandidates];
-    for (const productTerm of candidates) {
-        if (!productTerm || productTerm.length < 2) continue;
-        try {
-            const images = await galleryClient.listImages(idEmpresa, productTerm);
-            if (!images.length) {
-                log.info({ idEmpresa, productTerm }, 'fetchGallery: carpeta vacía, probando siguiente candidato');
-                continue;
+async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
+    if (!productTerm || productTerm.length < 2) return null;
+
+    // Paso 1: intento directo (CDN maneja singular/plural por prefix matching)
+    let images = await galleryClient.listImages(idEmpresa, productTerm).catch(() => []);
+
+    // Paso 2: si vacío, buscar la carpeta por similitud semántica via Gemini Flash
+    if (!images.length) {
+        const cacheKey = `${idEmpresa}:${productTerm}`;
+        const cached = galleryFolderResolutionCache.get(cacheKey);
+        let resolvedFolder = cached && Date.now() - cached.fetchedAt < FOLDER_RESOLUTION_TTL_MS
+            ? cached.folder
+            : null;
+
+        if (!resolvedFolder) {
+            const folders = await galleryClient.listFolders(idEmpresa).catch(() => []);
+            if (folders.length) {
+                resolvedFolder = await resolveGalleryFolder(productTerm, folders);
+                galleryFolderResolutionCache.set(cacheKey, { folder: resolvedFolder, fetchedAt: Date.now() });
             }
+        }
 
-            const next = images.find((u) => !excludeUrls.includes(u));
-            if (!next) {
-                log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
-                return null;
-            }
-
-            urlToGalleryTerm.set(next, productTerm);
-
-            const shown = excludeUrls.filter((u) => images.includes(u)).length;
-            const remaining = images.length - shown - 1;
-            log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
-            const afterNote = remaining > 0
-                ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
-                : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
-            return [
-                `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
-                `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
-                `URL a enviar: ${next}`,
-                `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
-                `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
-                afterNote,
-                `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
-                `=== FIN INSTRUCCIÓN IMAGEN ===`,
-            ].join('\n');
-        } catch (err) {
-            log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: error en candidato (continuando)');
+        if (resolvedFolder && resolvedFolder !== productTerm) {
+            log.info({ idEmpresa, productTerm, resolvedFolder }, 'fetchGallery: carpeta resuelta por Gemini');
+            images = await galleryClient.listImages(idEmpresa, resolvedFolder).catch(() => []);
+            if (images.length) productTerm = resolvedFolder; // usar el término real para logs/continuación
         }
     }
-    log.info({ idEmpresa, candidates }, 'fetchGallery: ningún candidato tiene imágenes');
-    return null;
+
+    if (!images.length) {
+        log.info({ idEmpresa, productTerm }, 'fetchGallery: carpeta vacía o inexistente');
+        return null;
+    }
+
+    const next = images.find((u) => !excludeUrls.includes(u));
+    if (!next) {
+        log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
+        return null;
+    }
+
+    urlToGalleryTerm.set(next, productTerm);
+
+    const shown = excludeUrls.filter((u) => images.includes(u)).length;
+    const remaining = images.length - shown - 1;
+    log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
+    const afterNote = remaining > 0
+        ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
+        : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
+    return [
+        `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
+        `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
+        `URL a enviar: ${next}`,
+        `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
+        `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
+        afterNote,
+        `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
+        `=== FIN INSTRUCCIÓN IMAGEN ===`,
+    ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -488,21 +518,17 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.debug({ idEmpresa }, 'contextEnricher: catálogo inyectado');
     }
 
-    // Fase 2b — galería: construir lista de candidatos CDN y probar en orden.
-    // El admin puede nombrar las carpetas con cualquier sinónimo; iteramos hasta encontrar imágenes.
-    const baseGalleryTerm = galleryProductTerm; // término extraído del mensaje (ej: "chaqueta")
-    const galleryCandidates = wantsGallery && baseGalleryTerm
-        ? buildGalleryCandidates(baseGalleryTerm, productResult?.categoryTerm)
-        : [];
-
-    const gallery = galleryCandidates.length
+    // Fase 2b — galería: fetchGallery resuelve automáticamente el nombre de carpeta CDN.
+    // Paso 1: intento directo (CDN hace prefix matching). Paso 2 si vacío: lista carpetas
+    // + Gemini Flash elige la más cercana semánticamente (franela → camiseta, etc.).
+    const gallery = wantsGallery && galleryProductTerm
         ? await Promise.race([
-            fetchGallery(idEmpresa, galleryCandidates, excludeGalleryUrls),
+            fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls),
             new Promise((resolve) =>
                 setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
                     resolve(null);
-                }, 8000)
+                }, 12000)
             ),
         ])
         : null;
