@@ -150,7 +150,7 @@ El cliente busca imágenes de: "${term}"
 // ---------------------------------------------------------------------------
 
 // Galería: el cliente quiere VER imágenes / modelos
-const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
+const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
 // Presupuesto: el cliente quiere cotizar / pedir
 const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
 
@@ -373,7 +373,8 @@ async function fetchProducts(idEmpresa, searchTerm) {
         log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length, categoryTerm }, 'fetchProducts: productos encontrados');
 
         const lines = [
-            'Productos encontrados (en submit_presupuesto: "cod"=id producto, "precio"=precio UNITARIO del tramo que corresponda — NO es el total, es precio por unidad):',
+            '⚠️ INSTRUCCIÓN INTERNA — NO MOSTRAR AL CLIENTE: Los marcadores [cod:X][idCat:X] son referencias para la función submit_presupuesto. Jamás los incluyas en tu respuesta al cliente.',
+            'Productos disponibles (precios UNITARIOS por tramo de cantidad):',
         ];
         for (const p of catalog.products.slice(0, 10)) {
             let line = `• ${p.name} [cod:${p.id}][idCat:${p.category_id || 0}]`;
