@@ -108,6 +108,36 @@ async function extractProductSearch(message) {
 
 
 // ---------------------------------------------------------------------------
+// Candidatos CDN por término normalizado
+// El admin puede nombrar las carpetas CDN con cualquier sinónimo.
+// El bot prueba cada candidato en orden hasta encontrar imágenes.
+// ---------------------------------------------------------------------------
+const GALLERY_CANDIDATES = {
+    franela:  ['franela', 'franelas', 'camiseta', 'camisetas', 'remera', 'remeras', 'playera', 'playeras'],
+    chaqueta: ['chaqueta', 'chaquetas', 'jacket', 'jackets', 'chamarra', 'chamarras'],
+    gorra:    ['gorra', 'gorras', 'cachucha', 'cap', 'caps'],
+    buzo:     ['buzo', 'buzos', 'sudadera', 'sudaderas', 'hoodie', 'hoodies'],
+    'pantalón': ['pantalon', 'pantalones', 'jean', 'jeans', 'pants'],
+    jogger:   ['jogger', 'joggers'],
+    bermuda:  ['bermuda', 'bermudas', 'short', 'shorts', 'pantaloneta', 'pantalonetas'],
+    chaleco:  ['chaleco', 'chalecos', 'vest', 'vests'],
+    camisa:   ['camisa', 'camisas', 'shirt', 'shirts'],
+    polo:     ['polo', 'polos'],
+};
+
+/**
+ * Devuelve lista de términos a probar en el CDN para un producto dado.
+ * Combina los candidatos del mapa + categoryTerm del catálogo (si es válido).
+ */
+function buildGalleryCandidates(resolvedTerm, categoryTerm) {
+    const base = GALLERY_CANDIDATES[resolvedTerm] || [resolvedTerm, resolvedTerm + 's'];
+    const cat = categoryTerm && categoryTerm !== 'uncategorized' && categoryTerm !== 'sin categoría'
+        ? [categoryTerm]
+        : [];
+    return [...new Set([...base, ...cat])];
+}
+
+// ---------------------------------------------------------------------------
 // Detección de intención de acción (rule-based, síncrona, sin latencia)
 // ---------------------------------------------------------------------------
 
@@ -236,53 +266,55 @@ async function fetchTelasContext(idEmpresa) {
 const urlToGalleryTerm = new Map();
 
 /**
- * Devuelve la siguiente URL no enviada para el producto dado.
- * Las imágenes vienen de gallery/{idEmpresa}/{productTerm}/ en el CDN.
- * El administrador sube ahí las fotos pre-clasificadas.
+ * Devuelve la siguiente URL no enviada probando cada candidato hasta encontrar imágenes.
+ * Itera sobre galleryCandidates en orden; usa el primero que tenga fotos en el CDN.
  *
  * @param {number}   idEmpresa
- * @param {string}   productTerm  - término normalizado (ej: "camiseta")
- * @param {string[]} excludeUrls  - URLs ya enviadas en esta conversación
+ * @param {string[]} galleryCandidates - términos a probar (ej: ["chaqueta","chaquetas","jacket"])
+ * @param {string[]} excludeUrls       - URLs ya enviadas en esta conversación
  * @returns {Promise<string|null>}
  */
-async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
-    if (!productTerm || productTerm.length < 2) return null;
-    try {
-        const images = await galleryClient.listImages(idEmpresa, productTerm);
-        if (!images.length) {
-            log.info({ idEmpresa, productTerm }, 'fetchGallery: carpeta vacía o inexistente');
-            return null;
+async function fetchGallery(idEmpresa, galleryCandidates, excludeUrls = []) {
+    const candidates = Array.isArray(galleryCandidates) ? galleryCandidates : [galleryCandidates];
+    for (const productTerm of candidates) {
+        if (!productTerm || productTerm.length < 2) continue;
+        try {
+            const images = await galleryClient.listImages(idEmpresa, productTerm);
+            if (!images.length) {
+                log.info({ idEmpresa, productTerm }, 'fetchGallery: carpeta vacía, probando siguiente candidato');
+                continue;
+            }
+
+            const next = images.find((u) => !excludeUrls.includes(u));
+            if (!next) {
+                log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
+                return null;
+            }
+
+            urlToGalleryTerm.set(next, productTerm);
+
+            const shown = excludeUrls.filter((u) => images.includes(u)).length;
+            const remaining = images.length - shown - 1;
+            log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
+            const afterNote = remaining > 0
+                ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
+                : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
+            return [
+                `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
+                `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
+                `URL a enviar: ${next}`,
+                `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
+                `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
+                afterNote,
+                `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
+                `=== FIN INSTRUCCIÓN IMAGEN ===`,
+            ].join('\n');
+        } catch (err) {
+            log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: error en candidato (continuando)');
         }
-
-        const next = images.find((u) => !excludeUrls.includes(u));
-        if (!next) {
-            log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
-            return null;
-        }
-
-        // Registrar qué producto originó esta URL (para continuación de galería).
-        urlToGalleryTerm.set(next, productTerm);
-
-        const shown = excludeUrls.filter((u) => images.includes(u)).length;
-        const remaining = images.length - shown - 1; // pendientes DESPUÉS de enviar esta
-        log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
-        const afterNote = remaining > 0
-            ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
-            : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
-        return [
-            `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
-            `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
-            `URL a enviar: ${next}`,
-            `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
-            `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
-            afterNote,
-            `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
-            `=== FIN INSTRUCCIÓN IMAGEN ===`,
-        ].join('\n');
-    } catch (err) {
-        log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: falló (no crítico)');
-        return null;
     }
+    log.info({ idEmpresa, candidates }, 'fetchGallery: ningún candidato tiene imágenes');
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -456,16 +488,16 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.debug({ idEmpresa }, 'contextEnricher: catálogo inyectado');
     }
 
-    // Fase 2b — galería: usar categoryTerm del catálogo como fuente de verdad.
-    // Ej: usuario dice "camiseta" → extractProductSearch → "franela" → fetchProducts → categoryTerm="franelas"
-    // → fetchGallery busca carpeta "franelas" en CDN, no "camiseta".
-    const resolvedGalleryTerm = wantsGallery
-        ? (productResult?.categoryTerm || galleryProductTerm)
-        : null;
+    // Fase 2b — galería: construir lista de candidatos CDN y probar en orden.
+    // El admin puede nombrar las carpetas con cualquier sinónimo; iteramos hasta encontrar imágenes.
+    const baseGalleryTerm = galleryProductTerm; // término extraído del mensaje (ej: "chaqueta")
+    const galleryCandidates = wantsGallery && baseGalleryTerm
+        ? buildGalleryCandidates(baseGalleryTerm, productResult?.categoryTerm)
+        : [];
 
-    const gallery = resolvedGalleryTerm
+    const gallery = galleryCandidates.length
         ? await Promise.race([
-            fetchGallery(idEmpresa, resolvedGalleryTerm, excludeGalleryUrls),
+            fetchGallery(idEmpresa, galleryCandidates, excludeGalleryUrls),
             new Promise((resolve) =>
                 setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
