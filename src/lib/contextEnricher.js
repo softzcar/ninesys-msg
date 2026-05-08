@@ -34,8 +34,8 @@ const INTENT_PROMPT = `Eres un asistente de una tienda de ropa personalizada en 
 
 Del siguiente mensaje de un cliente extrae el tipo de prenda o producto mencionado y normalízalo al término estándar en español. Responde SOLO con el término normalizado en singular y minúsculas. Si no hay producto, responde: null
 
-Reglas de normalización (términos regionales → término estándar):
-- franela, remera, playera, polera, camibuso, camiseta, t-shirt, swater, suéter, sweter, chemise, blusa → camiseta
+Reglas de normalización (sinónimos → término nativo del catálogo):
+- camiseta, remera, playera, polera, camibuso, t-shirt, swater, suéter, sweter, chemise, blusa → franela
 - gorra, cachucha, jockey, cap, sombrero → gorra
 - buzo, sudadera, hoodie, capota, chompa, sweatshirt → buzo
 - jean, pantalón, pants, pantalones → pantalón
@@ -47,13 +47,14 @@ Reglas de normalización (términos regionales → término estándar):
 - polo, camiseta polo → polo
 
 Ejemplos de respuesta esperada:
-"franela" → camiseta
-"franelas sublimadas" → camiseta
-"swater" → camiseta
-"tienen remeras?" → camiseta
-"cuanto salen las camisetas" → camiseta
+"franela" → franela
+"franelas sublimadas" → franela
+"camiseta" → franela
+"swater" → franela
+"tienen remeras?" → franela
+"cuanto salen las camisetas" → franela
 "me interesan los buzos con logo" → buzo
-"kiero vr los poleras" → camiseta
+"kiero vr los poleras" → franela
 "joggers" → jogger
 "bermuda" → bermuda
 "gorras personalizadas" → gorra
@@ -306,10 +307,11 @@ async function fetchProducts(idEmpresa, searchTerm) {
             log.info({ idEmpresa, finalSearch: searchTerm, found: catalog?.products?.length || 0 }, 'fetchProducts: sin resultados');
             return null;
         }
-        log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
+        const categoryTerm = catalog.products[0]?.categories?.[0]?.toLowerCase().trim() || null;
+        log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length, categoryTerm }, 'fetchProducts: productos encontrados');
 
         const lines = [
-            'Productos encontrados (en PRESUPUESTO_DATA: "cod"=id producto, "precio"=precio UNITARIO del tramo que corresponda — NO es el total, es precio por unidad):',
+            'Productos encontrados (en submit_presupuesto: "cod"=id producto, "precio"=precio UNITARIO del tramo que corresponda — NO es el total, es precio por unidad):',
         ];
         for (const p of catalog.products.slice(0, 10)) {
             let line = `• ${p.name} [cod:${p.id}][idCat:${p.category_id || 0}]`;
@@ -333,7 +335,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
             }
             lines.push(line);
         }
-        return lines.join('\n');
+        return { text: lines.join('\n'), categoryTerm };
     } catch (err) {
         log.error({
             err: err.message,
@@ -436,37 +438,43 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         }
     }
 
-    // Fase 2 — catálogo de texto + galería (ambos necesitan el término resuelto).
-    const [products, gallery] = await Promise.all([
-        resolvedProductTerm
-            ? Promise.race([
-                fetchProducts(idEmpresa, resolvedProductTerm),
-                new Promise((resolve) =>
-                    setTimeout(() => {
-                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
-                        resolve(null);
-                    }, 15000)
-                ),
-            ])
-            : Promise.resolve(null),
+    // Fase 2a — catálogo (secuencial: necesitamos categoryTerm antes de buscar galería)
+    const productResult = resolvedProductTerm
+        ? await Promise.race([
+            fetchProducts(idEmpresa, resolvedProductTerm),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
+                    resolve(null);
+                }, 15000)
+            ),
+        ])
+        : null;
 
-        galleryProductTerm
-            ? Promise.race([
-                fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls),
-                new Promise((resolve) =>
-                    setTimeout(() => {
-                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
-                        resolve(null);
-                    }, 8000)
-                ),
-            ])
-            : Promise.resolve(null),
-    ]);
-
-    if (products) {
-        sections.push(products);
-        log.debug({ idEmpresa, productLength: products.length }, 'contextEnricher: catálogo inyectado');
+    if (productResult?.text) {
+        sections.push(productResult.text);
+        log.debug({ idEmpresa }, 'contextEnricher: catálogo inyectado');
     }
+
+    // Fase 2b — galería: usar categoryTerm del catálogo como fuente de verdad.
+    // Ej: usuario dice "camiseta" → extractProductSearch → "franela" → fetchProducts → categoryTerm="franelas"
+    // → fetchGallery busca carpeta "franelas" en CDN, no "camiseta".
+    const resolvedGalleryTerm = wantsGallery
+        ? (productResult?.categoryTerm || galleryProductTerm)
+        : null;
+
+    const gallery = resolvedGalleryTerm
+        ? await Promise.race([
+            fetchGallery(idEmpresa, resolvedGalleryTerm, excludeGalleryUrls),
+            new Promise((resolve) =>
+                setTimeout(() => {
+                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
+                    resolve(null);
+                }, 8000)
+            ),
+        ])
+        : null;
+
     if (gallery) {
         sections.push(gallery);
         log.debug({ idEmpresa }, 'contextEnricher: galería inyectada');
