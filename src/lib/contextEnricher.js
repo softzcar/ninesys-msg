@@ -107,6 +107,26 @@ async function extractProductSearch(message) {
 
 
 // ---------------------------------------------------------------------------
+// Detección de intención de acción (rule-based, síncrona, sin latencia)
+// ---------------------------------------------------------------------------
+
+// Galería: el cliente quiere VER imágenes / modelos
+const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
+// Presupuesto: el cliente quiere cotizar / pedir
+const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
+
+/**
+ * Clasifica la intención de acción del mensaje sin llamar a Gemini.
+ * @returns {'gallery'|'presupuesto'|'catalog'}
+ */
+function detectActionIntent(message) {
+    if (!message) return 'catalog';
+    if (PRESUPUESTO_RE.test(message)) return 'presupuesto';
+    if (GALLERY_RE.test(message)) return 'gallery';
+    return 'catalog';
+}
+
+// ---------------------------------------------------------------------------
 // Formateadores de contexto
 // ---------------------------------------------------------------------------
 
@@ -242,10 +262,21 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
         // Registrar qué producto originó esta URL (para continuación de galería).
         urlToGalleryTerm.set(next, productTerm);
 
-        log.info({ idEmpresa, productTerm, url: next }, 'fetchGallery: imagen seleccionada');
+        const shown = excludeUrls.filter((u) => images.includes(u)).length;
+        const remaining = images.length - shown - 1; // pendientes DESPUÉS de enviar esta
+        log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
+        const afterNote = remaining > 0
+            ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
+            : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
         return [
-            `Galería de imágenes disponibles para "${productTerm}" (usa [IMG:url] para mostrar 1 imagen cuando el cliente pida ver modelos o fotos):`,
-            `• ${next}`,
+            `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
+            `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
+            `URL a enviar: ${next}`,
+            `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
+            `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
+            afterNote,
+            `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
+            `=== FIN INSTRUCCIÓN IMAGEN ===`,
         ].join('\n');
     } catch (err) {
         log.warn({ err: err.message, idEmpresa, productTerm }, 'fetchGallery: falló (no crítico)');
@@ -278,16 +309,20 @@ async function fetchProducts(idEmpresa, searchTerm) {
         log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length }, 'fetchProducts: productos encontrados');
 
         const lines = [
-            'Productos encontrados (incluir en PRESUPUESTO_DATA: usa "cod" = id del producto, "precio" = precio según cantidad pedida):',
+            'Productos encontrados (en PRESUPUESTO_DATA: "cod"=id producto, "precio"=precio UNITARIO del tramo que corresponda — NO es el total, es precio por unidad):',
         ];
         for (const p of catalog.products.slice(0, 10)) {
             let line = `• ${p.name} [cod:${p.id}][idCat:${p.category_id || 0}]`;
             if (p.is_design) {
                 line += ' (diseño personalizado — solicita cotización)';
             } else if (p.prices && p.prices.length > 0) {
-                const priceStrings = p.prices.map(
-                    pr => `$${pr.price.toFixed(2)} (${pr.descripcion})`
-                );
+                const priceStrings = p.prices.map((pr, i) => {
+                    const thisQty = parseInt((pr.descripcion || '').match(/\d+/)?.[0] || '1', 10);
+                    const next = p.prices[i + 1];
+                    const nextQty = next ? parseInt((next.descripcion || '').match(/\d+/)?.[0] || '99999', 10) : null;
+                    const range = nextQty ? `${thisQty}–${nextQty - 1} uds` : `${thisQty}+ uds`;
+                    return `$${pr.price.toFixed(2)}/unid (${range})`;
+                });
                 line += ` — ${priceStrings.join(', ')}`;
             }
             if (p.description) {
@@ -325,12 +360,16 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const startTime = Date.now();
     const sections = [];
 
-    log.info({ idEmpresa, message: lastUserMessage }, 'enrichContext: INICIANDO');
+    const actionIntent = detectActionIntent(lastUserMessage);
+    const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
 
-    // Fase 1 — todo lo independiente corre en paralelo:
-    //   horario, telas, extracción de término de producto.
+    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent }, 'enrichContext: INICIANDO');
+
+    // Fase 1 — todo lo independiente corre en paralelo.
+    // Schedule y telas se saltan en solicitudes de galería: son irrelevantes y
+    // solo añaden ruido que interfiere con la instrucción de imagen.
     const [resolvedProductTerm, schedule, telas] = await Promise.all([
-        // Extraer término de producto del mensaje (Gemini Flash, texto)
+        // Extraer término de producto del mensaje (Gemini Flash, temperatura 0)
         (lastUserMessage && lastUserMessage.length >= 2)
             ? Promise.race([
                 extractProductSearch(lastUserMessage),
@@ -338,33 +377,37 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
             ])
             : Promise.resolve(null),
 
-        // Horario de atención
-        Promise.race([
-            fetchSchedule(idEmpresa),
-            new Promise((resolve) =>
-                setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
-                    resolve(null);
-                }, 15000)
-            ),
-        ]),
+        // Horario de atención — omitir si el cliente solo pide imágenes
+        isGalleryRequest
+            ? Promise.resolve(null)
+            : Promise.race([
+                fetchSchedule(idEmpresa),
+                new Promise((resolve) =>
+                    setTimeout(() => {
+                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
+                        resolve(null);
+                    }, 15000)
+                ),
+            ]),
 
-        // Catálogo de telas
-        Promise.race([
-            fetchTelasContext(idEmpresa),
-            new Promise((resolve) =>
-                setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
-                    resolve(null);
-                }, 10000)
-            ),
-        ]),
+        // Catálogo de telas — omitir si el cliente solo pide imágenes
+        isGalleryRequest
+            ? Promise.resolve(null)
+            : Promise.race([
+                fetchTelasContext(idEmpresa),
+                new Promise((resolve) =>
+                    setTimeout(() => {
+                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
+                        resolve(null);
+                    }, 10000)
+                ),
+            ]),
     ]);
 
     if (schedule) {
         sections.push(schedule);
         log.debug({ idEmpresa }, 'contextEnricher: horario inyectado');
-    } else {
+    } else if (!isGalleryRequest) {
         log.warn({ idEmpresa }, 'contextEnricher: no se obtuvo horario');
     }
     if (telas) {
@@ -372,11 +415,17 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
     }
 
-    // Si el mensaje no menciona producto explícito pero hay URLs de galería ya enviadas,
-    // recuperar el término del mapa urlToGalleryTerm (el cliente pide "otra imagen" del mismo producto).
-    let galleryProductTerm = resolvedProductTerm;
+    // La galería solo se busca cuando el cliente explícitamente pide imágenes (intent=gallery)
+    // o cuando ya se envió una imagen antes (continuación de sesión de galería).
+    // Si la intención es presupuesto o consulta de catálogo, NO inyectar galería para que
+    // Gemini no llame a send_gallery_image cuando el cliente quiere comprar.
+    const wantsGallery = actionIntent === 'gallery' || excludeGalleryUrls.length > 0;
+
+    // Recuperar término de producto para continuar una sesión de galería anterior
+    // (ej: cliente dice "muéstrame otro" sin mencionar el producto).
+    let galleryProductTerm = wantsGallery ? resolvedProductTerm : null;
     if (!galleryProductTerm && excludeGalleryUrls.length > 0) {
-        for (const url of excludeGalleryUrls) {
+        for (const url of [...excludeGalleryUrls].reverse()) {
             const term = urlToGalleryTerm.get(url);
             if (term) {
                 galleryProductTerm = term;
