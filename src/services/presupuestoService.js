@@ -33,6 +33,18 @@ function today() {
  * Los items que no tengan talla/tela resolubles se marcan con id null
  * (el insert igual procede, con el campo en null).
  */
+const CORTE_MAP = {
+    caballero: 'Caballeros', caballeros: 'Caballeros',
+    dama: 'Damas', damas: 'Damas',
+    'niño': 'Niños', 'niños': 'Niños', nino: 'Niños', ninos: 'Niños',
+    unisex: 'Unisex',
+};
+
+function normalizeCorte(corte) {
+    if (!corte) return corte;
+    return CORTE_MAP[corte.trim().toLowerCase()] || corte;
+}
+
 async function resolveItemIds(idEmpresa, items) {
     return Promise.all(
         items.map(async (item) => {
@@ -57,7 +69,7 @@ async function resolveItemIds(idEmpresa, items) {
                 log.warn({ idEmpresa, tela: item.tela }, 'presupuestoService: tela no resuelta a ID');
             }
 
-            return { ...item, sizeId, telaId };
+            return { ...item, corte: normalizeCorte(item.corte), sizeId, telaId };
         })
     );
 }
@@ -197,6 +209,16 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', existingCu
     let _step = 'init';
     try {
         log.info({ idEmpresa, jid, itemCount: data.items?.length }, 'presupuestoService: iniciando submit');
+
+        // Guard: rechazar si algún item no tiene idCategory válido (producto inventado por IA)
+        const invalidItems = (data.items || []).filter(
+            (item) => !item.idCategory || Number(item.idCategory) === 0
+        );
+        if (invalidItems.length > 0) {
+            log.warn({ jid, invalidItems: invalidItems.map((i) => i.productoNombre) },
+                'presupuestoService: RECHAZADO — items sin idCategory válido (producto no encontrado en catálogo)');
+            return { ok: false, id_presupuesto: null, vendorId: null, reason: 'invalid_catalog' };
+        }
 
         // 1. Resolver IDs
         _step = 'resolveItemIds';

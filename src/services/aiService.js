@@ -191,6 +191,86 @@ function resetBreaker() {
     breaker.openedAt = 0;
 }
 
+// ---------------------------------------------------------------------------
+// Function calling — herramientas disponibles para el agente de ventas
+// ---------------------------------------------------------------------------
+
+// Declaración de funciones que Gemini puede llamar en lugar de usar marcadores
+// de texto. Esto es más fiable que parsear [IMG:url] de texto libre.
+const AGENT_TOOLS = [
+    {
+        functionDeclarations: [
+            {
+                name: 'send_gallery_image',
+                description:
+                    'Envía al cliente una imagen de la galería del producto. '
+                    + 'Llamar SIEMPRE que el contexto muestre una URL bajo "INSTRUCCIÓN OBLIGATORIA DE IMAGEN". '
+                    + 'Usar la URL exacta del contexto, sin modificarla. '
+                    + 'IMPORTANTE: siempre acompañar la llamada con un texto breve de presentación en la respuesta.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        url: {
+                            type: 'string',
+                            description: 'URL completa de la imagen, copiada exactamente del contexto.',
+                        },
+                    },
+                    required: ['url'],
+                },
+            },
+            {
+                name: 'submit_presupuesto',
+                description:
+                    'Registra un presupuesto cuando el cliente ha confirmado todos los datos (producto, cantidad, talla, corte, tela y datos personales). '
+                    + 'Llamar AL MISMO TIEMPO que se envía el resumen de confirmación al cliente. '
+                    + 'Cada combinación de talla+corte diferente va como ítem separado en el array items.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        cliente: {
+                            type: 'object',
+                            description: 'Datos personales del cliente',
+                            properties: {
+                                nombre:    { type: 'string', description: 'Nombre del cliente' },
+                                apellido:  { type: 'string', description: 'Apellido del cliente' },
+                                cedula:    { type: 'string', description: 'Cédula/documento (puede ser vacío)' },
+                                email:     { type: 'string', description: 'Email (puede ser vacío)' },
+                                direccion: { type: 'string', description: 'Dirección (puede ser vacío)' },
+                                ubicacion: { type: 'string', description: 'Ciudad/ubicación del cliente' },
+                            },
+                            required: ['nombre'],
+                        },
+                        obs: {
+                            type: 'string',
+                            description: 'Descripción completa del diseño indicada por el cliente, íntegra y sin resumir.',
+                        },
+                        items: {
+                            type: 'array',
+                            description: 'Lista de productos. Cada combinación talla+corte distinta es un ítem aparte.',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    productoNombre: { type: 'string', description: 'Nombre del producto tal como aparece en el catálogo' },
+                                    cod:            { type: 'integer', description: 'ID del producto [cod:X] del catálogo' },
+                                    idCategory:     { type: 'integer', description: 'ID de categoría [idCat:X] del catálogo' },
+                                    categoryName:   { type: 'string', description: 'Nombre de la categoría' },
+                                    cantidad:       { type: 'integer', description: 'Cantidad pedida para esta talla/corte' },
+                                    talla:          { type: 'string', description: 'Talla (ej: S, M, L, XL, XXL, Único)' },
+                                    corte:          { type: 'string', description: 'Corte — usar EXACTAMENTE uno de estos valores: "Damas", "Caballeros", "Niños", "Unisex"' },
+                                    tela:           { type: 'string', description: 'ID numérico de la tela (del campo _id del catálogo de telas) o nombre si no hay ID' },
+                                    precio:         { type: 'number', description: 'Precio unitario del tramo que corresponde a la cantidad total pedida del producto' },
+                                },
+                                required: ['productoNombre', 'cod', 'idCategory', 'cantidad', 'precio'],
+                            },
+                        },
+                    },
+                    required: ['cliente', 'items'],
+                },
+            },
+        ],
+    },
+];
+
 let _client = null;
 function getClient() {
     if (_client) return _client;
@@ -527,8 +607,7 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
             .filter((m) => !m.from_me && m.body)
             .slice(-4)
             .map((m) => m.body);
-        const searchQuery = [incomingText, ...recentUserTexts].filter(Boolean).join(' ');
-        dynamicContext = await contextEnricher.enrichContext(idEmpresa, searchQuery, { excludeGalleryUrls })
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls })
             .catch((err) => {
                 log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
                 return '';
@@ -552,6 +631,8 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
                 systemInstruction,
                 temperature: effectiveTemp,
                 maxOutputTokens: effectiveMaxTokens,
+                tools: AGENT_TOOLS,
+                toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
             },
         });
         log.info(
@@ -575,9 +656,12 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     }
 
     const text = (response?.text || '').trim();
-    if (!text) return null;
+    const functionCalls = response?.functionCalls || [];
 
-    return { text, model: effectiveModel, agentId: agent?.id || null };
+    // Si Gemini no devolvió texto ni llamadas a función → nada útil que enviar.
+    if (!text && !functionCalls.length) return null;
+
+    return { text, functionCalls, model: effectiveModel, agentId: agent?.id || null };
 }
 
 /**
