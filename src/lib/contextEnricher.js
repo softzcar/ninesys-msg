@@ -195,7 +195,8 @@ const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisi
 // Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden.
 // IMPORTANTE: los sub-patrones que terminan en palabras completas (ordenes?, pedido) pueden usar \b.
 // Los que terminan en prefijos (ord) causaban falsos negativos — se reemplazaron por palabras completas.
-const ORDER_RE = /\b(pedidos?|mis?\s+ordenes?|mi\s+ordene?|ordenes|órdenes|tengo\s+\w+\s*ordenes?|la\s+orden\b|orden\s+#?\d|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abonos?|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(la\s+|esa\s+|mi\s+)?ordenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(ped[íi]|compr[eé])|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ordenes?|items?\s+de\s+(la\s+|mi\s+))/i;
+// (?<!\w) en vez de \b: los acentuados (ó, é) son \W en JS y nunca forman \b
+const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*|mi\s+deuda|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
 
 /**
  * Extrae el número de teléfono de un JID de WhatsApp.
