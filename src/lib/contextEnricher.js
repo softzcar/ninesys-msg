@@ -26,6 +26,7 @@ const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
 const telasClient = require('./telasClient');
 const galleryClient = require('./galleryClient');
+const orderClient = require('./orderClient');
 const log = require('./logger').createLogger('contextEnricher');
 
 const INTENT_TIMEOUT_MS = 3000;
@@ -187,6 +188,19 @@ async function resolveGalleryFolder(idEmpresa, term, availableFolders) {
 const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
 // Presupuesto: el cliente quiere cotizar / pedir
 const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
+// Órdenes/pagos: el cliente pregunta por su pedido, saldo o estado de pago
+const ORDER_RE = /\b(mi\s+pedi|pedido|mis?\s+orden|mi\s+orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra)\b/i;
+
+/**
+ * Extrae el número de teléfono de un JID de WhatsApp.
+ * "5804241234567@s.whatsapp.net" → "5804241234567"
+ * "@lid" JIDs no tienen número real → null
+ */
+function extractPhoneFromJid(jid) {
+    if (!jid || jid.includes('@lid')) return null;
+    const phone = jid.split('@')[0];
+    return /^\d{7,15}$/.test(phone) ? phone : null;
+}
 
 /**
  * Clasifica la intención de acción del mensaje sin llamar a Gemini.
@@ -392,6 +406,68 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
 }
 
 // ---------------------------------------------------------------------------
+// Órdenes y estado de pago del cliente
+// ---------------------------------------------------------------------------
+
+/**
+ * Obtiene las órdenes activas del cliente (identificado por teléfono) y las
+ * formatea como texto para que Gemini pueda responder preguntas sobre saldo,
+ * abonos y fecha de entrega.
+ *
+ * @param {number} idEmpresa
+ * @param {string} phone  - número extraído del JID (ej: "5804241234567")
+ * @returns {Promise<string|null>}
+ */
+async function fetchOrderContext(idEmpresa, phone) {
+    try {
+        const result = await orderClient.fetchOrdersByPhone(idEmpresa, phone);
+        if (!result || !result.found || !result.ordenes || !result.ordenes.length) {
+            log.info({ idEmpresa, phone, found: result?.found }, 'fetchOrderContext: sin órdenes');
+            return null;
+        }
+
+        const fmt = (n) => `$${Number(n).toFixed(2)}`;
+        const fmtDate = (s) => {
+            if (!s) return '-';
+            const d = new Date(s);
+            return isNaN(d.getTime()) ? s : d.toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' });
+        };
+        const fmtStatus = (s) => {
+            const map = {
+                pendiente: 'Pendiente', en_produccion: 'En producción',
+                listo: 'Listo para entrega', entregado: 'Entregado',
+                cancelada: 'Cancelada',
+            };
+            return map[s] || s || '-';
+        };
+
+        const lines = [`Órdenes activas de ${result.customer_name || 'este cliente'}:`];
+        let totalDeuda = 0;
+        for (const o of result.ordenes) {
+            const deuda = Number(o.saldo_pendiente);
+            totalDeuda += deuda;
+            lines.push(
+                `• Orden #${o.id_orden} | Estado: ${fmtStatus(o.status)} | ` +
+                `Entrega estimada: ${fmtDate(o.fecha_entrega)} | ` +
+                `Total: ${fmt(o.pago_total)} | ` +
+                `Abonos: ${fmt(o.total_abonos)} | ` +
+                (o.total_descuentos > 0 ? `Descuentos: ${fmt(o.total_descuentos)} | ` : '') +
+                `Saldo pendiente: ${fmt(deuda)}`
+            );
+        }
+        if (result.ordenes.length > 1) {
+            lines.push(`Total adeudado (todas las órdenes): ${fmt(totalDeuda)}`);
+        }
+
+        log.info({ idEmpresa, phone, ordenes: result.ordenes.length, totalDeuda }, 'fetchOrderContext: inyectando');
+        return lines.join('\n');
+    } catch (err) {
+        log.warn({ err: err.message, idEmpresa, phone }, 'fetchOrderContext: falló (no crítico)');
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Punto de entrada público
 // ---------------------------------------------------------------------------
 
@@ -465,14 +541,16 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [] } = {}) {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null } = {}) {
     const startTime = Date.now();
     const sections = [];
 
     const actionIntent = detectActionIntent(lastUserMessage);
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
+    const isOrderRequest = ORDER_RE.test(lastUserMessage || '');
+    const clientPhone = isOrderRequest ? extractPhoneFromJid(jid) : null;
 
-    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent }, 'enrichContext: INICIANDO');
+    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');
 
     // Helper para crear un Promise.race con clearTimeout automático.
     function raceWithTimeout(promise, ms, onTimeout) {
@@ -489,7 +567,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // Fase 1 — todo lo independiente corre en paralelo.
     // Schedule y telas se saltan en solicitudes de galería: son irrelevantes y
     // solo añaden ruido que interfiere con la instrucción de imagen.
-    const [resolvedProductTerm, schedule, telas] = await Promise.all([
+    const [resolvedProductTerm, schedule, telas, orderCtx] = await Promise.all([
         // Extraer término de producto del mensaje (Gemini Flash, temperatura 0)
         (lastUserMessage && lastUserMessage.length >= 2)
             ? raceWithTimeout(
@@ -516,6 +594,15 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
                 10000,
                 () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas')
             ),
+
+        // Órdenes del cliente — solo si el mensaje pregunta por pedidos/saldo y tenemos teléfono
+        clientPhone
+            ? raceWithTimeout(
+                fetchOrderContext(idEmpresa, clientPhone),
+                8000,
+                () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando órdenes')
+            )
+            : Promise.resolve(null),
     ]);
 
     if (schedule) {
@@ -527,6 +614,12 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     if (telas) {
         sections.push(telas);
         log.debug({ idEmpresa }, 'contextEnricher: telas inyectadas');
+    }
+    if (orderCtx) {
+        sections.push(orderCtx);
+        log.debug({ idEmpresa }, 'contextEnricher: órdenes inyectadas');
+    } else if (isOrderRequest && !clientPhone) {
+        log.info({ idEmpresa, jid }, 'contextEnricher: pregunta de orden pero sin teléfono en JID — omitido');
     }
 
     // La galería solo se busca cuando el cliente explícitamente pide imágenes (intent=gallery)
@@ -609,6 +702,8 @@ module.exports = {
     _fetchSchedule: fetchSchedule,
     _fetchProducts: fetchProducts,
     _fetchGallery: fetchGallery,
+    _fetchOrderContext: fetchOrderContext,
+    _extractPhoneFromJid: extractPhoneFromJid,
     _decimalToHHMM: decimalToHHMM,
     _urlToGalleryTerm: urlToGalleryTerm,
 };
