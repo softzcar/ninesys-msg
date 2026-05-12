@@ -192,8 +192,10 @@ const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
 // Cuando se detecta, se suprime la galería aunque haya URLs previas, para que
 // Gemini procese el pedido en vez de seguir enviando imágenes.
 const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisiera\s+(comprar|pedir|ordenar)|voy\s+a\s+(comprar|pedir)|me\s+llevo|me\s+interes[ao]\s+\d|\d+\s*(unidades?|piezas?|franelas?|camisetas?|buzos?|gorras?|pantalones?|bermudas?|joggers?|polos?|chaquetas?|camisas?))\b/i;
-// Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden
-const ORDER_RE = /\b(mi\s+pedi|pedido[s]?|mis?\s+orden|mi\s+orden|ordenes|órdenes|tengo\s+\w*\s*orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra|product[oa]s?\s+(de\s+(la\s+|esa\s+|mi\s+)?ord|del?\s+ped)|qu[eé]\s+(ped[íi]|compr[eé]|tien[eo]\s+mi|lleva|tiene\s+(la\s+|esa\s+|mi\s+)?ord)|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ord|items?\s+(de|del?))\b/i;
+// Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden.
+// IMPORTANTE: los sub-patrones que terminan en palabras completas (ordenes?, pedido) pueden usar \b.
+// Los que terminan en prefijos (ord) causaban falsos negativos — se reemplazaron por palabras completas.
+const ORDER_RE = /\b(pedidos?|mis?\s+ordenes?|mi\s+ordene?|ordenes|órdenes|tengo\s+\w+\s*ordenes?|la\s+orden\b|orden\s+#?\d|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abonos?|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(la\s+|esa\s+|mi\s+)?ordenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(ped[íi]|compr[eé])|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ordenes?|items?\s+de\s+(la\s+|mi\s+))/i;
 
 /**
  * Extrae el número de teléfono de un JID de WhatsApp.
