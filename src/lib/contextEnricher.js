@@ -188,6 +188,10 @@ async function resolveGalleryFolder(idEmpresa, term, availableFolders) {
 const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
 // Presupuesto: el cliente quiere cotizar / pedir
 const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
+// Compra directa: el cliente expresa intención de comprar/pedir con cantidad.
+// Cuando se detecta, se suprime la galería aunque haya URLs previas, para que
+// Gemini procese el pedido en vez de seguir enviando imágenes.
+const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisiera\s+(comprar|pedir|ordenar)|voy\s+a\s+(comprar|pedir)|me\s+llevo|me\s+interes[ao]\s+\d|\d+\s*(unidades?|piezas?|franelas?|camisetas?|buzos?|gorras?|pantalones?|bermudas?|joggers?|polos?|chaquetas?|camisas?))\b/i;
 // Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden
 const ORDER_RE = /\b(mi\s+pedi|pedido|mis?\s+orden|mi\s+orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra|product[oa]s?\s+(de\s+(la\s+|esa\s+|mi\s+)?ord|del?\s+ped)|qu[eé]\s+(ped[íi]|compr[eé]|tien[eo]\s+mi|lleva|tiene\s+(la\s+|esa\s+|mi\s+)?ord)|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ord|items?\s+(de|del?))\b/i;
 
@@ -554,11 +558,12 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const sections = [];
 
     const actionIntent = detectActionIntent(lastUserMessage);
+    const isCompraDirecta = COMPRA_RE.test(lastUserMessage || '');
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
     const isOrderRequest = ORDER_RE.test(lastUserMessage || '');
     const clientPhone = isOrderRequest ? extractPhoneFromJid(jid) : null;
 
-    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');
+    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, isCompraDirecta, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');
 
     // Helper para crear un Promise.race con clearTimeout automático.
     function raceWithTimeout(promise, ms, onTimeout) {
@@ -632,9 +637,9 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
 
     // La galería solo se busca cuando el cliente explícitamente pide imágenes (intent=gallery)
     // o cuando ya se envió una imagen antes (continuación de sesión de galería).
-    // Si la intención es presupuesto o consulta de catálogo, NO inyectar galería para que
-    // Gemini no llame a send_gallery_image cuando el cliente quiere comprar.
-    const wantsGallery = actionIntent === 'gallery' || excludeGalleryUrls.length > 0;
+    // EXCEPCIÓN: si el cliente expresa intención de compra directa (COMPRA_RE), suprimir
+    // la galería para que Gemini procese el pedido en lugar de seguir enviando imágenes.
+    const wantsGallery = !isCompraDirecta && (actionIntent === 'gallery' || excludeGalleryUrls.length > 0);
 
     // Recuperar término de producto para continuar una sesión de galería anterior
     // (ej: cliente dice "muéstrame otro" sin mencionar el producto).
