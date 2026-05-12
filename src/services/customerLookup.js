@@ -41,7 +41,7 @@ async function findCustomerByJid(pool, jid) {
     const last10 = last10DigitsFromJid(jid);
     if (!last10) return null;
     const [rows] = await pool.query(
-        `SELECT _id, first_name, last_name, phone
+        `SELECT _id, first_name, last_name, phone, cedula, address, email
          FROM customers
          WHERE _id <> ?
            AND phone IS NOT NULL

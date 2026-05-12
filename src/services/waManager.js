@@ -210,17 +210,23 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             if (clienteRegistrado) {
                 const nombre = [clienteRegistrado.first_name, clienteRegistrado.last_name]
                     .filter(Boolean).join(' ').trim();
-                const fn    = clienteRegistrado.first_name || '';
-                const ln    = clienteRegistrado.last_name  || '';
-                const phone = clienteRegistrado.phone      || '';
+                const fn      = clienteRegistrado.first_name || '';
+                const ln      = clienteRegistrado.last_name  || '';
+                const phone   = clienteRegistrado.phone      || '';
+                const cedula  = clienteRegistrado.cedula     || '';
+                const address = clienteRegistrado.address    || '';
+                const email   = clienteRegistrado.email      || '';
                 clienteRegistradoCtx =
                     `\n=== CLIENTE REGISTRADO EN EL SISTEMA ===` +
                     `\nNombre: ${nombre}` +
                     `\nTeléfono: ${phone}` +
+                    (cedula  ? `\nCédula: ${cedula}`    : '') +
+                    (address ? `\nDirección: ${address}` : '') +
+                    (email   ? `\nEmail: ${email}`       : '') +
                     `\nINSTRUCCIÓN CRÍTICA:` +
-                    `\n1. NO le preguntes nombre, apellido, cédula, teléfono ni ningún dato personal — ya los tienes.` +
+                    `\n1. NO le preguntes nombre, apellido, cédula, teléfono, dirección ni ningún dato personal — ya los tienes arriba.` +
                     `\n2. Pasa DIRECTAMENTE a preguntar por el pedido (producto, cantidad, talla, tela).` +
-                    `\n3. Al generar el JSON de presupuesto usa estos datos en "cliente": nombre="${fn}", apellido="${ln}", cedula="", telefono="${phone}", email="", direccion=""` +
+                    `\n3. Al generar el JSON de presupuesto usa estos datos en "cliente": nombre="${fn}", apellido="${ln}", cedula="${cedula}", telefono="${phone}", email="${email}", direccion="${address}"` +
                     `\n=== FIN DATOS CLIENTE ===\n`;
                 // Guardar el customerId para usarlo en presupuestoService sin búsqueda por teléfono.
                 _pendingPresupuestoCustomerIds.set(jid, clienteRegistrado._id);
