@@ -43,6 +43,7 @@ const customerLookup = require('./customerLookup');
 const lidMapping = require('./lidMapping');
 const presupuestoService = require('./presupuestoService');
 const { classifyHandoffIntent } = require('../lib/intentClassifier');
+const { _urlToGalleryTerm } = require('../lib/contextEnricher');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -368,8 +369,11 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
 
         // Garantizar texto mínimo cuando hay imagen pero Gemini no generó texto.
         if (!textToSend && imgUrls.length > 0) {
-            textToSend = '¡Aquí te muestro!';
-            log.warn({ jid }, 'maybeAutoReply: texto vacío con imagen — usando texto de respaldo');
+            const galleryTerm = _urlToGalleryTerm.get(imgUrls[0]);
+            textToSend = galleryTerm
+                ? `¡Aquí te muestro un modelo de ${galleryTerm}! ¿Te gusta el estilo? Si quieres ver otro modelo, dímelo. 😊`
+                : '¡Aquí te muestro!';
+            log.warn({ jid, galleryTerm: galleryTerm || null }, 'maybeAutoReply: texto vacío con imagen — usando texto de respaldo contextual');
         }
 
         if (textToSend) {

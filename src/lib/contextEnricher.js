@@ -359,7 +359,10 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
         return null;
     }
 
-    urlToGalleryTerm.set(next, productTerm);
+    // Guardar displayTerm (término del usuario, ej "franela") no productTerm
+    // (carpeta CDN, ej "camiseta"), para que la lógica de continuación y el
+    // texto de respaldo usen el término que el cliente reconoce.
+    urlToGalleryTerm.set(next, displayTerm);
 
     const shown = excludeUrls.filter((u) => images.includes(u)).length;
     const remaining = images.length - shown - 1;
@@ -380,9 +383,7 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
         `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
         `El cliente pidió ver "${displayTerm}". La siguiente imagen AÚN NO ha sido enviada.`,
         `URL a enviar AHORA: ${next}`,
-        `ACCIÓN REQUERIDA: llama a send_gallery_image con esa URL exacta Y escribe una oración presentando el producto.`,
-        `Ejemplo de respuesta: "¡Aquí te muestro un modelo de ${displayTerm}! ¿Te gusta el estilo? ${remaining > 0 ? `Tengo ${remaining} modelo(s) más si quieres ver otro.` : 'Es el último modelo disponible.'}"`,
-        `NO digas que no tienes imágenes. NO omitas el texto — enviar texto ES obligatorio junto al function call.`,
+        `ACCIÓN REQUERIDA: llama a send_gallery_image con esa URL exacta. NO digas que no tienes imágenes.`,
         disambig,
         `(Conteo sesión: ${shown} de ${images.length} imagen(es) de "${displayTerm}" ya enviadas.)`,
         afterNote,
