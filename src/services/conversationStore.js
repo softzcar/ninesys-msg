@@ -294,8 +294,10 @@ async function listConversations(pool, { limit = 100, includeDeleted = false, vi
             // no exponer accidentalmente todo el inbox del tenant.
             return [];
         }
-        where.push('c.assigned_to = ?');
-        params.push(Number(userId));
+        // assigned_to: asignación manual (humano tomó la conv)
+        // owner_id:    asignación automática por vendedor histórico (bot)
+        where.push('(c.assigned_to = ? OR c.owner_id = ?)');
+        params.push(Number(userId), Number(userId));
     } else if (resolvedView === 'queue') {
         where.push("c.assigned_to IS NULL AND c.mode = 'human'");
     }
