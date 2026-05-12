@@ -193,7 +193,7 @@ const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
 // Gemini procese el pedido en vez de seguir enviando imágenes.
 const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisiera\s+(comprar|pedir|ordenar)|voy\s+a\s+(comprar|pedir)|me\s+llevo|me\s+interes[ao]\s+\d|\d+\s*(unidades?|piezas?|franelas?|camisetas?|buzos?|gorras?|pantalones?|bermudas?|joggers?|polos?|chaquetas?|camisas?))\b/i;
 // Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden
-const ORDER_RE = /\b(mi\s+pedi|pedido|mis?\s+orden|mi\s+orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra|product[oa]s?\s+(de\s+(la\s+|esa\s+|mi\s+)?ord|del?\s+ped)|qu[eé]\s+(ped[íi]|compr[eé]|tien[eo]\s+mi|lleva|tiene\s+(la\s+|esa\s+|mi\s+)?ord)|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ord|items?\s+(de|del?))\b/i;
+const ORDER_RE = /\b(mi\s+pedi|pedido[s]?|mis?\s+orden|mi\s+orden|ordenes|órdenes|tengo\s+\w*\s*orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra|product[oa]s?\s+(de\s+(la\s+|esa\s+|mi\s+)?ord|del?\s+ped)|qu[eé]\s+(ped[íi]|compr[eé]|tien[eo]\s+mi|lleva|tiene\s+(la\s+|esa\s+|mi\s+)?ord)|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ord|items?\s+(de|del?))\b/i;
 
 /**
  * Extrae el número de teléfono de un JID de WhatsApp.
@@ -446,8 +446,11 @@ async function fetchOrderContext(idEmpresa, phone) {
         };
 
         const lines = [
-            `Órdenes de ${result.customer_name || 'este cliente'} (datos en tiempo real):`,
-            `INSTRUCCIÓN: Con estos datos puedes responder directamente preguntas de saldo, deuda, estado de pedidos y productos de cada orden. NO incluyas [HANDOFF_IA] — esta consulta NO requiere asesor humano.`,
+            `=== ÓRDENES DEL CLIENTE (datos en tiempo real) ===`,
+            `INSTRUCCIONES CRÍTICAS:`,
+            `1. Ya tienes TODAS las órdenes de ${result.customer_name || 'este cliente'} — NO pidas número de orden, NO digas que no tienes información.`,
+            `2. Responde directamente usando los datos de abajo: saldo, productos, estado, fecha de entrega.`,
+            `3. Esta consulta NO requiere asesor humano — NO incluyas [HANDOFF_IA].`,
         ];
         let totalDeuda = 0;
         for (const o of result.ordenes) {
