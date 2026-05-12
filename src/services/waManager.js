@@ -119,6 +119,11 @@ async function loadBaileys() {
 // id_empresa → session
 const sessions = new Map();
 
+// Guard: previene que llamadas concurrentes a init() creen múltiples sockets
+// para el mismo tenant. Almacena la Promise en curso; los callers posteriores
+// comparten esa misma Promise en lugar de lanzar un nuevo init.
+const _initInProgress = new Map();
+
 // io de Socket.IO se inyecta desde app.js / websocket.js
 let ioRef = null;
 function setIo(io) {
@@ -620,6 +625,20 @@ async function init(idEmpresa) {
         return existing;
     }
 
+    // Si ya hay un init corriendo para este tenant, devolver la misma promesa
+    // en lugar de crear otro socket Baileys en paralelo.
+    if (_initInProgress.has(id)) {
+        log.info({ tenantId: id }, 'init: ya hay un init en curso, esperando el mismo');
+        return _initInProgress.get(id);
+    }
+
+    const initPromise = _doInit(id).finally(() => _initInProgress.delete(id));
+    _initInProgress.set(id, initPromise);
+    return initPromise;
+}
+
+async function _doInit(idEmpresa) {
+    const id = parseInt(idEmpresa, 10);
     const {
         default: makeWASocket,
         DisconnectReason,
