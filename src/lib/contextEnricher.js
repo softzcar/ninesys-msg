@@ -543,17 +543,21 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     }
 
     // Fase 2a — catálogo (secuencial: necesitamos categoryTerm antes de buscar galería)
-    const productResult = resolvedProductTerm
-        ? await Promise.race([
-            fetchProducts(idEmpresa, resolvedProductTerm),
-            new Promise((resolve) =>
-                setTimeout(() => {
+    const productResult = await (async () => {
+        if (!resolvedProductTerm) return null;
+        let catalogTimer;
+        const result = await Promise.race([
+            fetchProducts(idEmpresa, resolvedProductTerm).finally(() => clearTimeout(catalogTimer)),
+            new Promise((resolve) => {
+                catalogTimer = setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
                     resolve(null);
-                }, 15000)
-            ),
-        ])
-        : null;
+                }, 15000);
+            }),
+        ]);
+        clearTimeout(catalogTimer);
+        return result;
+    })();
 
     if (productResult?.text) {
         sections.push(productResult.text);
@@ -563,17 +567,21 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // Fase 2b — galería: fetchGallery resuelve automáticamente el nombre de carpeta CDN.
     // Paso 1: intento directo (CDN hace prefix matching). Paso 2 si vacío: lista carpetas
     // + Gemini Flash elige la más cercana semánticamente (franela → camiseta, etc.).
-    const gallery = wantsGallery && galleryProductTerm
-        ? await Promise.race([
-            fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls),
-            new Promise((resolve) =>
-                setTimeout(() => {
+    const gallery = await (async () => {
+        if (!wantsGallery || !galleryProductTerm) return null;
+        let galleryTimer;
+        const result = await Promise.race([
+            fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls).finally(() => clearTimeout(galleryTimer)),
+            new Promise((resolve) => {
+                galleryTimer = setTimeout(() => {
                     log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
                     resolve(null);
-                }, 12000)
-            ),
-        ])
-        : null;
+                }, 12000);
+            }),
+        ]);
+        clearTimeout(galleryTimer);
+        return result;
+    })();
 
     const elapsed = Date.now() - startTime;
 

@@ -633,6 +633,9 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
                 maxOutputTokens: effectiveMaxTokens,
                 tools: AGENT_TOOLS,
                 toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+                // Thinking no aporta valor en un bot conversacional y consume parte
+                // del presupuesto de maxOutputTokens, dejando 0 tokens para la respuesta.
+                thinkingConfig: { thinkingBudget: 0 },
             },
         });
         log.info(
@@ -659,7 +662,16 @@ async function generateReply({ pool, jid, incomingText, historyLimit = DEFAULT_H
     const functionCalls = response?.functionCalls || [];
 
     // Si Gemini no devolvió texto ni llamadas a función → nada útil que enviar.
-    if (!text && !functionCalls.length) return null;
+    if (!text && !functionCalls.length) {
+        log.warn({
+            jid,
+            candidatesLength: response?.candidates?.length ?? 'null',
+            promptFeedback: response?.promptFeedback ?? null,
+            finishReason: response?.candidates?.[0]?.finishReason ?? null,
+            usage: response?.usageMetadata ?? null,
+        }, 'aiService: Gemini devolvió respuesta vacía (0 tokens output)');
+        return null;
+    }
 
     return { text, functionCalls, model: effectiveModel, agentId: agent?.id || null };
 }

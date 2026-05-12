@@ -279,7 +279,14 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         }
 
         // ── Validar respuesta de la IA ────────────────────────────────────────
-        if (!reply) return;
+        if (!reply) {
+            log.warn({ jid }, 'maybeAutoReply: Gemini devolvió null — enviando fallback genérico');
+            sendText(idEmpresa, jid,
+                'Disculpa, tuve un inconveniente al procesar tu mensaje. ¿Puedes repetirlo? 🙏',
+                { via: 'ai' }
+            ).catch(() => {});
+            return;
+        }
 
         if (reply.error === 'gemini_failed') {
             log.warn({ jid }, 'maybeAutoReply: enviando mensaje de fallback por fallo de Gemini');
