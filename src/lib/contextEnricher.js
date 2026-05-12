@@ -471,43 +471,48 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
 
     log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent }, 'enrichContext: INICIANDO');
 
+    // Helper para crear un Promise.race con clearTimeout automático.
+    function raceWithTimeout(promise, ms, onTimeout) {
+        let timer;
+        const timeout = new Promise((resolve) => {
+            timer = setTimeout(() => { onTimeout(); resolve(null); }, ms);
+        });
+        return Promise.race([
+            promise.finally(() => clearTimeout(timer)),
+            timeout,
+        ]).then((v) => { clearTimeout(timer); return v; });
+    }
+
     // Fase 1 — todo lo independiente corre en paralelo.
     // Schedule y telas se saltan en solicitudes de galería: son irrelevantes y
     // solo añaden ruido que interfiere con la instrucción de imagen.
     const [resolvedProductTerm, schedule, telas] = await Promise.all([
         // Extraer término de producto del mensaje (Gemini Flash, temperatura 0)
         (lastUserMessage && lastUserMessage.length >= 2)
-            ? Promise.race([
+            ? raceWithTimeout(
                 extractProductSearch(lastUserMessage),
-                new Promise((r) => setTimeout(() => r(null), INTENT_TIMEOUT_MS + 500)),
-            ])
+                INTENT_TIMEOUT_MS + 500,
+                () => {}
+            )
             : Promise.resolve(null),
 
         // Horario de atención — omitir si el cliente solo pide imágenes
         isGalleryRequest
             ? Promise.resolve(null)
-            : Promise.race([
+            : raceWithTimeout(
                 fetchSchedule(idEmpresa),
-                new Promise((resolve) =>
-                    setTimeout(() => {
-                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule');
-                        resolve(null);
-                    }, 15000)
-                ),
-            ]),
+                15000,
+                () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando schedule')
+            ),
 
         // Catálogo de telas — omitir si el cliente solo pide imágenes
         isGalleryRequest
             ? Promise.resolve(null)
-            : Promise.race([
+            : raceWithTimeout(
                 fetchTelasContext(idEmpresa),
-                new Promise((resolve) =>
-                    setTimeout(() => {
-                        log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas');
-                        resolve(null);
-                    }, 10000)
-                ),
-            ]),
+                10000,
+                () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas')
+            ),
     ]);
 
     if (schedule) {
@@ -543,21 +548,13 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     }
 
     // Fase 2a — catálogo (secuencial: necesitamos categoryTerm antes de buscar galería)
-    const productResult = await (async () => {
-        if (!resolvedProductTerm) return null;
-        let catalogTimer;
-        const result = await Promise.race([
-            fetchProducts(idEmpresa, resolvedProductTerm).finally(() => clearTimeout(catalogTimer)),
-            new Promise((resolve) => {
-                catalogTimer = setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo');
-                    resolve(null);
-                }, 15000);
-            }),
-        ]);
-        clearTimeout(catalogTimer);
-        return result;
-    })();
+    const productResult = resolvedProductTerm
+        ? await raceWithTimeout(
+            fetchProducts(idEmpresa, resolvedProductTerm),
+            15000,
+            () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo')
+        )
+        : null;
 
     if (productResult?.text) {
         sections.push(productResult.text);
@@ -567,21 +564,13 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // Fase 2b — galería: fetchGallery resuelve automáticamente el nombre de carpeta CDN.
     // Paso 1: intento directo (CDN hace prefix matching). Paso 2 si vacío: lista carpetas
     // + Gemini Flash elige la más cercana semánticamente (franela → camiseta, etc.).
-    const gallery = await (async () => {
-        if (!wantsGallery || !galleryProductTerm) return null;
-        let galleryTimer;
-        const result = await Promise.race([
-            fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls).finally(() => clearTimeout(galleryTimer)),
-            new Promise((resolve) => {
-                galleryTimer = setTimeout(() => {
-                    log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería');
-                    resolve(null);
-                }, 12000);
-            }),
-        ]);
-        clearTimeout(galleryTimer);
-        return result;
-    })();
+    const gallery = (wantsGallery && galleryProductTerm)
+        ? await raceWithTimeout(
+            fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls),
+            12000,
+            () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería')
+        )
+        : null;
 
     const elapsed = Date.now() - startTime;
 
