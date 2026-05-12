@@ -188,8 +188,8 @@ async function resolveGalleryFolder(idEmpresa, term, availableFolders) {
 const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
 // Presupuesto: el cliente quiere cotizar / pedir
 const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
-// Órdenes/pagos: el cliente pregunta por su pedido, saldo o estado de pago
-const ORDER_RE = /\b(mi\s+pedi|pedido|mis?\s+orden|mi\s+orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra)\b/i;
+// Órdenes/pagos/productos: el cliente pregunta por su pedido, saldo, estado o contenido de la orden
+const ORDER_RE = /\b(mi\s+pedi|pedido|mis?\s+orden|mi\s+orden|cuánto\s+debo|cuanto\s+debo|mi\s+deuda|saldo|abono|abonos|cuándo\s+(me\s+)?entreg|cuando\s+(me\s+)?entreg|estado\s+de\s+mi|falta\s+(por\s+)?pagar|cuánto\s+me\s+falt|cuanto\s+me\s+falt|cuánto\s+queda|cuanto\s+queda|pagué|pague|ya\s+pagu[eé]|pagado|mis?\s+compra|mi\s+compra|product[oa]s?\s+(de\s+(la\s+|esa\s+|mi\s+)?ord|del?\s+ped)|qu[eé]\s+(ped[íi]|compr[eé]|tien[eo]\s+mi|lleva|tiene\s+(la\s+|esa\s+|mi\s+)?ord)|detalle\s+de\s+(la\s+|mi\s+|esa\s+)?ord|items?\s+(de|del?))\b/i;
 
 /**
  * Extrae el número de teléfono de un JID de WhatsApp.
@@ -443,7 +443,7 @@ async function fetchOrderContext(idEmpresa, phone) {
 
         const lines = [
             `Órdenes de ${result.customer_name || 'este cliente'} (datos en tiempo real):`,
-            `INSTRUCCIÓN: Con estos datos puedes responder directamente preguntas de saldo, deuda o estado de pedidos. NO incluyas [HANDOFF_IA] — esta consulta NO requiere asesor humano.`,
+            `INSTRUCCIÓN: Con estos datos puedes responder directamente preguntas de saldo, deuda, estado de pedidos y productos de cada orden. NO incluyas [HANDOFF_IA] — esta consulta NO requiere asesor humano.`,
         ];
         let totalDeuda = 0;
         for (const o of result.ordenes) {
@@ -457,6 +457,11 @@ async function fetchOrderContext(idEmpresa, phone) {
                 (o.total_descuentos > 0 ? `Descuentos: ${fmt(o.total_descuentos)} | ` : '') +
                 `Saldo pendiente: ${fmt(deuda)}`
             );
+            if (Array.isArray(o.productos) && o.productos.length) {
+                for (const p of o.productos) {
+                    lines.push(`  - ${p.name} × ${p.cantidad}${p.detalle_tallas ? ` (${p.detalle_tallas})` : ''}`);
+                }
+            }
         }
         if (result.ordenes.length > 1) {
             lines.push(`Total adeudado (todas las órdenes): ${fmt(totalDeuda)}`);
