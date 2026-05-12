@@ -292,59 +292,95 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
 
         // Detectar marker de escalada que la IA pudo haber incluido (red de seguridad).
         const hasHandoffIa = HANDOFF_IA_MARKER_RE.test(reply.text);
+        log.info({ jid, replyText: (reply.text || '').slice(0, 300), fcs: (reply.functionCalls || []).map((f) => f.name) }, 'maybeAutoReply: respuesta cruda Gemini');
 
         // Limpiar markers y extraer datos de presupuesto si los hay.
-        let textToSend = reply.text
+        let textToSend = (reply.text || '')
             .replace(HANDOFF_IA_MARKER_RE, '')
             .replace(HANDOFF_CLIENTE_MARKER_RE, '')
             .trim();
 
-        // Extraer marker de imágenes [IMG:url1|url2|...] antes de enviar al cliente.
+        // ── Galería: función nativa primero, marcador de texto como fallback ──
+        // Gemini debería llamar a send_gallery_image() en lugar de [IMG:url].
+        // Mantenemos el regex como red de seguridad por si el modelo eligió texto.
         let imgUrls = [];
-        const imgMatch = IMG_MARKER_RE.exec(textToSend);
-        if (imgMatch) {
-            imgUrls = imgMatch[1].split('|')
-                .map((u) => u.trim())
-                .filter((u) => u.startsWith('https://cdn.nineteengreen.com/'))
-                .slice(0, 4);
-            textToSend = textToSend.replace(imgMatch[0], '').trim();
-            log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado');
+        const fcGallery = (reply.functionCalls || []).find((fc) => fc.name === 'send_gallery_image');
+        if (fcGallery?.args?.url) {
+            const fcUrl = String(fcGallery.args.url).trim();
+            if (fcUrl.startsWith('https://cdn.nineteengreen.com/')) {
+                imgUrls = [fcUrl];
+                log.info({ jid, url: fcUrl }, 'maybeAutoReply: send_gallery_image function call');
+            } else {
+                log.warn({ jid, url: fcUrl }, 'maybeAutoReply: send_gallery_image URL inválida — ignorada');
+            }
+        } else {
+            // Fallback: buscar marcador de texto [IMG:url]
+            const imgMatch = IMG_MARKER_RE.exec(textToSend);
+            if (imgMatch) {
+                imgUrls = imgMatch[1].split('|')
+                    .map((u) => u.trim())
+                    .filter((u) => u.startsWith('https://cdn.nineteengreen.com/'))
+                    .slice(0, 4);
+                textToSend = textToSend.replace(imgMatch[0], '').trim();
+                log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado (fallback)');
+            }
         }
 
-        const markerMatch = PRESUPUESTO_MARKER_RE.exec(textToSend);
-        if (markerMatch) {
-            textToSend = textToSend.replace(markerMatch[0], '').trim();
-            try {
-                const presupuestoData = JSON.parse(markerMatch[1]);
-                _pendingPresupuestos.set(jid, presupuestoData);
-                log.info({ jid }, 'maybeAutoReply: presupuesto pendiente registrado');
-            } catch (parseErr) {
-                log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
-            }
+        // ── Presupuesto: función nativa primero, marcador de texto como fallback ──
+        const fcPresupuesto = (reply.functionCalls || []).find((fc) => fc.name === 'submit_presupuesto');
+        if (fcPresupuesto?.args) {
+            _pendingPresupuestos.set(jid, fcPresupuesto.args);
+            log.info({ jid }, 'maybeAutoReply: submit_presupuesto function call — presupuesto pendiente');
             if (!textToSend) {
                 textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
-                log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
+                log.warn({ jid }, 'maybeAutoReply: submit_presupuesto sin texto — usando confirmación de respaldo');
             }
             _pendingConfirmacionSinMarker.delete(jid);
-        } else if (PRESUPUESTO_RESUMEN_RE.test(textToSend)) {
-            _pendingConfirmacionSinMarker.set(jid, true);
-            log.warn({ jid }, 'maybeAutoReply: resumen enviado sin marker PRESUPUESTO_DATA — esperando "sí" para regenerar');
+        } else {
+            // Fallback: buscar marcador de texto [PRESUPUESTO_DATA]
+            const markerMatch = PRESUPUESTO_MARKER_RE.exec(textToSend);
+            if (markerMatch) {
+                textToSend = textToSend.replace(markerMatch[0], '').trim();
+                try {
+                    const presupuestoData = JSON.parse(markerMatch[1]);
+                    _pendingPresupuestos.set(jid, presupuestoData);
+                    log.info({ jid }, 'maybeAutoReply: presupuesto pendiente registrado (fallback marker)');
+                } catch (parseErr) {
+                    log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
+                }
+                if (!textToSend) {
+                    textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
+                    log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
+                }
+                _pendingConfirmacionSinMarker.delete(jid);
+            } else if (PRESUPUESTO_RESUMEN_RE.test(textToSend)) {
+                _pendingConfirmacionSinMarker.set(jid, true);
+                log.warn({ jid }, 'maybeAutoReply: resumen enviado sin función ni marker — esperando "sí" para regenerar');
+            }
         }
 
-        try {
-            await sendText(idEmpresa, jid, textToSend, { via: 'ai' });
-            await pool.query(
-                `INSERT INTO wa_send_log (endpoint, phone, status, requested_by)
-                 VALUES (?, ?, 'ok', ?)`,
-                ['ai_auto', jid, `gemini:${reply.model}`]
-            );
-        } catch (sendErr) {
-            await pool.query(
-                `INSERT INTO wa_send_log (endpoint, phone, status, error, requested_by)
-                 VALUES (?, ?, 'error', ?, ?)`,
-                ['ai_auto', jid, sendErr.message, `gemini:${reply.model}`]
-            ).catch(() => {});
-            throw sendErr;
+        // Garantizar texto mínimo cuando hay imagen pero Gemini no generó texto.
+        if (!textToSend && imgUrls.length > 0) {
+            textToSend = '¡Aquí te muestro!';
+            log.warn({ jid }, 'maybeAutoReply: texto vacío con imagen — usando texto de respaldo');
+        }
+
+        if (textToSend) {
+            try {
+                await sendText(idEmpresa, jid, textToSend, { via: 'ai' });
+                await pool.query(
+                    `INSERT INTO wa_send_log (endpoint, phone, status, requested_by)
+                     VALUES (?, ?, 'ok', ?)`,
+                    ['ai_auto', jid, `gemini:${reply.model}`]
+                );
+            } catch (sendErr) {
+                await pool.query(
+                    `INSERT INTO wa_send_log (endpoint, phone, status, error, requested_by)
+                     VALUES (?, ?, 'error', ?, ?)`,
+                    ['ai_auto', jid, sendErr.message, `gemini:${reply.model}`]
+                ).catch(() => {});
+                throw sendErr;
+            }
         }
 
         // Enviar imágenes de galería (serial, skip silencioso por imagen).
@@ -815,10 +851,15 @@ async function _doInit(idEmpresa) {
                                         clientPhone,
                                         existingCustomerId,
                                         handoffFn: handoffToHuman,
-                                    }).then(({ ok, id_presupuesto }) => {
-                                        const msg = ok
-                                            ? `Tu presupuesto #${id_presupuesto} ha sido generado. Un asesor revisará tu pedido y te contactará en breve.`
-                                            : 'Hubo un problema al generar tu presupuesto. Te atenderemos personalmente.';
+                                    }).then(({ ok, id_presupuesto, reason }) => {
+                                        let msg;
+                                        if (ok) {
+                                            msg = `Tu presupuesto #${id_presupuesto} ha sido generado. Un asesor revisará tu pedido y te contactará en breve.`;
+                                        } else if (reason === 'invalid_catalog') {
+                                            msg = 'No pude generar el presupuesto porque uno o más productos no están en nuestro catálogo. Un asesor te contactará para ayudarte directamente.';
+                                        } else {
+                                            msg = 'Hubo un problema al generar tu presupuesto. Te atenderemos personalmente.';
+                                        }
                                         sendText(id, result.jid, msg, { via: 'api' }).catch(() => {});
                                         if (!ok) {
                                             handoffToHuman(id, pool, result.jid, 'presupuesto_error').catch(() => {});
@@ -845,7 +886,7 @@ async function _doInit(idEmpresa) {
                                     const isRetryConfirm = _pendingConfirmacionSinMarker.get(result.jid)
                                         && PRESUPUESTO_CONFIRM_RE.test(msgNorm);
                                     extraCtx = isRetryConfirm
-                                        ? '⚠️ INSTRUCCIÓN OBLIGATORIA: El cliente acaba de confirmar el presupuesto. Debes responder con el resumen completo del pedido e incluir OBLIGATORIAMENTE el bloque [PRESUPUESTO_DATA]{...}[/PRESUPUESTO_DATA] al final del mensaje. Sin ese bloque el sistema no puede registrar el pedido.'
+                                        ? '⚠️ INSTRUCCIÓN OBLIGATORIA: El cliente acaba de confirmar el presupuesto. Debes responder con el mensaje de confirmación Y llamar OBLIGATORIAMENTE a la función submit_presupuesto con todos los datos del pedido. Sin esa llamada el sistema no puede registrar el pedido.'
                                         : '';
                                     if (isRetryConfirm) {
                                         log.info({ jid: result.jid }, 'maybeAutoReply: retry con extraSystemContext para forzar marker');
