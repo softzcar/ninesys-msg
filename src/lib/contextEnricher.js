@@ -441,7 +441,10 @@ async function fetchOrderContext(idEmpresa, phone) {
             return map[s] || s || '-';
         };
 
-        const lines = [`Órdenes activas de ${result.customer_name || 'este cliente'}:`];
+        const lines = [
+            `Órdenes de ${result.customer_name || 'este cliente'} (datos en tiempo real):`,
+            `INSTRUCCIÓN: Con estos datos puedes responder directamente preguntas de saldo, deuda o estado de pedidos. NO incluyas [HANDOFF_IA] — esta consulta NO requiere asesor humano.`,
+        ];
         let totalDeuda = 0;
         for (const o of result.ordenes) {
             const deuda = Number(o.saldo_pendiente);
