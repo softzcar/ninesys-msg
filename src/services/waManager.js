@@ -199,14 +199,14 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
 
         // Resolver cliente registrado para personalizar el contexto de la IA.
         // Si el JID es @lid se resuelve primero el teléfono real vía wa_lid_phone_map.
+        let resolvedJid = jid; // se sobreescribe si @lid → phone JID resuelto con éxito
         let clienteRegistradoCtx = '';
         try {
-            let lookupJid = jid;
             if (lidMapping.isLidJid(jid)) {
                 const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
-                if (phoneJid) lookupJid = phoneJid;
+                if (phoneJid) resolvedJid = phoneJid;
             }
-            const clienteRegistrado = await customerLookup.findCustomerByJid(pool, lookupJid);
+            const clienteRegistrado = await customerLookup.findCustomerByJid(pool, resolvedJid);
             if (clienteRegistrado) {
                 const nombre = [clienteRegistrado.first_name, clienteRegistrado.last_name]
                     .filter(Boolean).join(' ').trim();
@@ -256,6 +256,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             aiService.generateReply({
                 pool,
                 jid,
+                resolvedJid,
                 incomingText: incoming.body,
                 agentId: flags.aiAgentId || null,
                 idEmpresa,
