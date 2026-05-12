@@ -206,7 +206,10 @@ const AGENT_TOOLS = [
                     'Envía al cliente una imagen de la galería del producto. '
                     + 'Llamar SIEMPRE que el contexto muestre una URL bajo "INSTRUCCIÓN OBLIGATORIA DE IMAGEN". '
                     + 'Usar la URL exacta del contexto, sin modificarla. '
-                    + 'IMPORTANTE: siempre acompañar la llamada con un texto breve de presentación en la respuesta.',
+                    + 'OBLIGATORIO: la respuesta debe incluir SIEMPRE texto junto a la llamada a función — '
+                    + 'presenta brevemente el producto y pregunta si le gusta o si quiere ver más. '
+                    + 'Ejemplo de texto: "¡Aquí te muestro un modelo de [producto]! ¿Te gusta el estilo? '
+                    + 'Tengo más opciones disponibles si quieres ver otra."',
                 parameters: {
                     type: 'object',
                     properties: {
