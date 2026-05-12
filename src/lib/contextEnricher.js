@@ -41,10 +41,11 @@ Reglas de normalización (sinónimos → término nativo del catálogo):
 - jean, pantalón, pants, pantalones → pantalón
 - jogger, jogging → jogger
 - bermuda, short, pantaloneta → bermuda
-- chaqueta, jacket, chamarra → chaqueta
+- chaqueta, jacket, chamarra, saco, blazer, abrigo, casaca, cazadora, sobretodo → chaqueta
 - chaleco, vest → chaleco
 - camisa, shirt → camisa
 - polo, camiseta polo → polo
+- Para cualquier otra prenda o accesorio de ropa no listada arriba: devuelve el nombre en singular y minúsculas (ej: "vestidos" → vestido, "leggins" → legging, "corbatas" → corbata)
 
 Ejemplos de respuesta esperada:
 "franela" → franela
@@ -107,42 +108,75 @@ async function extractProductSearch(message) {
 }
 
 
-// Cache de resolución término → carpeta CDN (para no repetir la llamada Gemini)
-// `${idEmpresa}:${term}` → { folder: string, fetchedAt: number }
-const galleryFolderResolutionCache = new Map();
-const FOLDER_RESOLUTION_TTL_MS = 30 * 60 * 1000;
+// Cache del mapa de normalización de carpetas CDN por tenant.
+// Clave: `${idEmpresa}:${sortedFolders}` → { map: Map<normalizedTerm, folderName>, fetchedAt }
+// Se invalida automáticamente cuando el admin añade/elimina carpetas (la clave cambia).
+const folderNormalizationCache = new Map();
+const FOLDER_NORM_TTL_MS = 30 * 60 * 1000;
 
 /**
- * Usa Gemini Flash para elegir la carpeta CDN más apropiada para un término de producto.
- * Devuelve el nombre de la carpeta o null si ninguna coincide.
+ * Normaliza los nombres de carpetas CDN usando la misma función extractProductSearch
+ * que normaliza los mensajes del usuario. Resultado: Map<normalizedTerm, folderName>.
+ * Ej: "camiseta" → "franela", "chaquetas" → "chaqueta", "Vestidos" → "vestido"
+ *
+ * Al usar extractProductSearch para ambos lados (usuario y carpeta), INTENT_PROMPT
+ * es la única fuente de verdad — sin tablas hardcodeadas aquí.
  */
-async function resolveGalleryFolder(term, availableFolders) {
-    if (!availableFolders.length) return null;
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return null;
+async function buildFolderNormMap(idEmpresa, availableFolders) {
+    if (!availableFolders.length) return new Map();
 
-    const { GoogleGenAI } = require('@google/genai');
-    const client = new GoogleGenAI({ apiKey });
-    const prompt = `Tienes estas carpetas de galería disponibles: [${availableFolders.join(', ')}]
-El cliente busca imágenes de: "${term}"
-¿Cuál carpeta corresponde mejor? Responde SOLO con el nombre exacto de la carpeta. Si ninguna corresponde, responde: null`;
+    const cacheKey = `${idEmpresa}:${[...availableFolders].sort().join(',')}`;
+    const cached = folderNormalizationCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < FOLDER_NORM_TTL_MS) return cached.map;
 
-    try {
-        const res = await client.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            config: { temperature: 0, maxOutputTokens: 32 },
-        });
-        const answer = (res?.text || '').trim().toLowerCase();
-        if (!answer || answer === 'null') return null;
-        // Verificar que la respuesta sea una carpeta real
-        const match = availableFolders.find((f) => f.toLowerCase() === answer);
-        log.info({ term, availableFolders, answer, match }, 'resolveGalleryFolder: resultado Gemini');
-        return match || null;
-    } catch (err) {
-        log.warn({ err: err.message, term }, 'resolveGalleryFolder: falló');
-        return null;
+    // Normalizar cada carpeta con el mismo INTENT_PROMPT del usuario (en paralelo)
+    const entries = await Promise.all(
+        availableFolders.map(async (folder) => {
+            const normalized = await extractProductSearch(folder).catch(() => null);
+            // Si extractProductSearch devuelve null (término desconocido), usar el nombre
+            // de la carpeta en singular y minúsculas como fallback.
+            const key = normalized || folder.toLowerCase().replace(/e?s$/, '').trim();
+            return [key, folder];
+        })
+    );
+
+    const map = new Map();
+    for (const [key, folder] of entries) {
+        if (key && !map.has(key)) map.set(key, folder);
     }
+
+    folderNormalizationCache.set(cacheKey, { map, fetchedAt: Date.now() });
+    log.info({ idEmpresa, map: [...map.entries()] }, 'buildFolderNormMap: mapa construido');
+    return map;
+}
+
+/**
+ * Devuelve el nombre de la carpeta CDN que corresponde al término de producto dado.
+ * No contiene tablas de sinónimos — usa buildFolderNormMap para normalizar
+ * dinámicamente y comparar.
+ */
+async function resolveGalleryFolder(idEmpresa, term, availableFolders) {
+    if (!availableFolders.length) return null;
+
+    const folderMap = await buildFolderNormMap(idEmpresa, availableFolders);
+    if (!folderMap.size) return null;
+
+    // Match directo por término normalizado
+    const direct = folderMap.get(term);
+    if (direct) {
+        log.info({ idEmpresa, term, folder: direct }, 'resolveGalleryFolder: match directo');
+        return direct;
+    }
+
+    // Match parcial: cubre casos residuales de singular/plural no manejados por INTENT_PROMPT
+    const partial = [...folderMap.entries()].find(([k]) => k.startsWith(term) || term.startsWith(k));
+    if (partial) {
+        log.info({ idEmpresa, term, folder: partial[1] }, 'resolveGalleryFolder: match parcial');
+        return partial[1];
+    }
+
+    log.info({ idEmpresa, term, folderMap: [...folderMap.entries()] }, 'resolveGalleryFolder: sin match');
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,29 +324,27 @@ const urlToGalleryTerm = new Map();
 async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
     if (!productTerm || productTerm.length < 2) return null;
 
+    // Conservar el término original del usuario para la instrucción a Gemini.
+    // El CDN puede tener la carpeta con un nombre diferente ("camiseta" para "franela"),
+    // pero la instrucción debe referirse al término que el cliente usó para que Gemini
+    // no lo confunda con otro producto que haya mostrado antes.
+    const displayTerm = productTerm;
+
     // Paso 1: intento directo (CDN maneja singular/plural por prefix matching)
     let images = await galleryClient.listImages(idEmpresa, productTerm).catch(() => []);
 
-    // Paso 2: si vacío, buscar la carpeta por similitud semántica via Gemini Flash
+    // Paso 2: si vacío, normalizar carpetas CDN y buscar por equivalencia semántica
     if (!images.length) {
-        const cacheKey = `${idEmpresa}:${productTerm}`;
-        const cached = galleryFolderResolutionCache.get(cacheKey);
-        let resolvedFolder = cached && Date.now() - cached.fetchedAt < FOLDER_RESOLUTION_TTL_MS
-            ? cached.folder
-            : null;
-
-        if (!resolvedFolder) {
-            const folders = await galleryClient.listFolders(idEmpresa).catch(() => []);
-            if (folders.length) {
-                resolvedFolder = await resolveGalleryFolder(productTerm, folders);
-                galleryFolderResolutionCache.set(cacheKey, { folder: resolvedFolder, fetchedAt: Date.now() });
-            }
+        const folders = await galleryClient.listFolders(idEmpresa).catch(() => []);
+        let resolvedFolder = null;
+        if (folders.length) {
+            resolvedFolder = await resolveGalleryFolder(idEmpresa, productTerm, folders);
         }
 
         if (resolvedFolder && resolvedFolder !== productTerm) {
-            log.info({ idEmpresa, productTerm, resolvedFolder }, 'fetchGallery: carpeta resuelta por Gemini');
+            log.info({ idEmpresa, productTerm, resolvedFolder }, 'fetchGallery: carpeta resuelta por normalización');
             images = await galleryClient.listImages(idEmpresa, resolvedFolder).catch(() => []);
-            if (images.length) productTerm = resolvedFolder; // usar el término real para logs/continuación
+            if (images.length) productTerm = resolvedFolder; // nombre real de carpeta (para urlToGalleryTerm y continuación)
         }
     }
 
@@ -331,20 +363,29 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
 
     const shown = excludeUrls.filter((u) => images.includes(u)).length;
     const remaining = images.length - shown - 1;
-    log.info({ idEmpresa, productTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
+    log.info({ idEmpresa, productTerm, displayTerm, url: next, total: images.length, shown, remaining }, 'fetchGallery: imagen seleccionada');
+
+    // Nota de desambiguación: si hay URLs de OTROS productos en el historial,
+    // indicarle a Gemini que la imagen actual es de un producto DIFERENTE.
+    const prevTerms = [...new Set(excludeUrls.map((u) => urlToGalleryTerm.get(u)).filter(Boolean))];
+    const otherTerms = prevTerms.filter((t) => t !== productTerm && t !== displayTerm);
+    const disambig = otherTerms.length
+        ? `IMPORTANTE: Las imágenes anteriores eran de "${otherTerms.join('", "')}", NO de "${displayTerm}". Esta imagen es de "${displayTerm}" y es DIFERENTE — aún no enviada.`
+        : '';
+
     const afterNote = remaining > 0
-        ? `Después de esta quedan ${remaining} imagen(es) más sin mostrar.`
-        : `Esta es la última imagen de "${productTerm}" disponible en la galería.`;
+        ? `Después de enviar esta quedarán ${remaining} imagen(es) más de "${displayTerm}" disponibles.`
+        : `Esta es la última imagen de "${displayTerm}" disponible — todavía NO enviada al cliente.`;
     return [
         `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
-        `Galería "${productTerm}": ${images.length} imagen(es) en total, ${shown} ya mostrada(s).`,
-        `URL a enviar: ${next}`,
-        `ACCIÓN REQUERIDA: (1) Escribe un texto breve de presentación (ej: "¡Aquí te muestro un modelo de chaqueta!") y (2) llama a la función send_gallery_image con esa URL exacta.`,
-        `Si la función no está disponible, incluye [IMG:${next}] en tu respuesta como alternativa.`,
+        `El cliente pidió ver "${displayTerm}". La siguiente imagen AÚN NO ha sido enviada.`,
+        `URL a enviar AHORA: ${next}`,
+        `ACCIÓN REQUERIDA: llama a send_gallery_image con esa URL exacta. NO digas que no tienes imágenes.`,
+        disambig,
+        `(Conteo sesión: ${shown} de ${images.length} imagen(es) de "${displayTerm}" ya enviadas.)`,
         afterNote,
-        `NUNCA digas "es el único modelo que tenemos" — el catálogo puede tener más productos aunque la galería tenga ${images.length} foto(s).`,
         `=== FIN INSTRUCCIÓN IMAGEN ===`,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -534,12 +575,18 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         ])
         : null;
 
+    const elapsed = Date.now() - startTime;
+
+    // La instrucción de galería va PRIMERO para que Gemini no la ignore por ruido de
+    // otras secciones. Las demás secciones (horario, telas, catálogo) van después.
     if (gallery) {
-        sections.push(gallery);
-        log.debug({ idEmpresa }, 'contextEnricher: galería inyectada');
+        sections.unshift(gallery); // al inicio, máxima prioridad
+        log.debug({ idEmpresa }, 'contextEnricher: galería inyectada (primero)');
+    } else if (wantsGallery && galleryProductTerm && excludeGalleryUrls.length > 0) {
+        sections.unshift(`NOTA INTERNA: Ya se enviaron todas las fotos disponibles de "${galleryProductTerm}" en esta conversación. Si el cliente pide más, dile que ya le mostraste todas las que tienes. NO digas que no tienes imágenes — sí las tienes, pero ya las mostraste todas.`);
+        log.debug({ idEmpresa, galleryProductTerm }, 'contextEnricher: nota "galería agotada" inyectada');
     }
 
-    const elapsed = Date.now() - startTime;
     log.info({ idEmpresa, sections: sections.length, elapsed }, 'enrichContext: COMPLETADO');
 
     if (!sections.length) {
