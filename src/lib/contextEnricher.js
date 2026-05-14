@@ -697,6 +697,9 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     } else if (wantsGallery && galleryProductTerm && excludeGalleryUrls.length > 0) {
         sections.unshift(`NOTA INTERNA: Ya se enviaron todas las fotos disponibles de "${galleryProductTerm}" en esta conversación. Si el cliente pide más, dile que ya le mostraste todas las que tienes. NO digas que no tienes imágenes — sí las tienes, pero ya las mostraste todas.`);
         log.debug({ idEmpresa, galleryProductTerm }, 'contextEnricher: nota "galería agotada" inyectada');
+    } else if (wantsGallery && galleryProductTerm) {
+        sections.unshift(`NOTA INTERNA: No hay imágenes disponibles en el catálogo para "${galleryProductTerm}". Informa al cliente de forma amable que por el momento no tienes fotos disponibles de ese producto. NO llames a send_gallery_image ni inventes URLs.`);
+        log.debug({ idEmpresa, galleryProductTerm }, 'contextEnricher: nota "sin imágenes" inyectada');
     }
 
     log.info({ idEmpresa, sections: sections.length, elapsed }, 'enrichContext: COMPLETADO');
