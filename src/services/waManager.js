@@ -191,6 +191,13 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             return;
         }
 
+        // Cargar settings globales de IA para validar si está activa
+        const settings = await aiService.loadSettings(pool);
+        if (!settings || !settings.enabled) {
+            log.debug({ jid }, 'maybeAutoReply: skip — IA global deshabilitada');
+            return;
+        }
+
         // Throttle anti-loop por jid
         const now = Date.now();
         const last = _aiLastReply.get(jid) || 0;
