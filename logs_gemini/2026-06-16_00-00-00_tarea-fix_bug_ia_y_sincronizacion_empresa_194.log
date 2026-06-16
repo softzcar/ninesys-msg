@@ -1,0 +1,57 @@
+================================================================================
+TAREA: Corrección de Bug de IA y Sincronización de Prompt de Ventas (Empresa 194)
+FECHA: 2026-06-16
+ESTADO: COMPLETADO
+================================================================================
+
+## CONTEXTO
+
+El servicio de auto-respuesta de WhatsApp de la empresa 194 presentaba fallos en producción:
+1. Cuando la IA global estaba deshabilitada (wa_ai_settings.enabled = 0), el servicio enviaba de todas formas el mensaje de fallback "Disculpa, tuve un inconveniente al procesar tu mensaje. ¿Puedes repetirlo? 🙏" en vez de quedarse en silencio.
+2. La configuración del agente de ventas de la empresa 194 no estaba sincronizada con la última versión de prompts y conocimiento (knowledge_base) desarrollada y probada en la empresa 195 (entorno de desarrollo).
+
+---
+
+## ACCIONES REALIZADAS
+
+### 1. Corrección del Bug en el Código
+- Archivo Modificado: src/services/waManager.js
+- Cambio: Se inyectó una verificación al inicio del flujo `maybeAutoReply` cargando los ajustes globales con `aiService.loadSettings(pool)`. Si la IA global no está activa, la función retorna inmediatamente, evitando disparar la lógica de auto-respuesta y previniendo el envío del fallback de error.
+
+### 2. Sincronización de Base de Datos en Producción
+- Se respaldaron las tablas de configuración de la empresa 194 en producción (`wa_ai_settings` y `wa_ai_agents`).
+- Se importaron las tablas desde el VPS de Desarrollo, normalizando la estructura de la empresa 194 a la arquitectura estándar de multi-agentes:
+  - Agent 1: General (slug: general, is_default: 0).
+  - Agent 2: Ventas (slug: ventas, is_default: 1, temperature: 0.10, max_tokens: 3000).
+- Se sincronizó el system_prompt maestro (13,505 caracteres) y la base de conocimiento JSON (2,420 caracteres) del agente de ventas desde el VPS de Desarrollo.
+- Se habilitó la IA global (`enabled = 1`) en `wa_ai_settings` para la empresa 194.
+
+### 3. Despliegue e Integración
+- Se subieron los cambios de código al repositorio GitHub (`softzcar/ninesys-msg`) en las ramas `main` y `feat/baileys-7-upgrade`.
+- Se aplicó `git pull` en los servidores VPS de Desarrollo y Producción.
+- Se reinició el proceso PM2 `ntmsg-app` en ambos servidores de forma exitosa.
+
+---
+
+## VERIFICACIÓN
+
+- **Pruebas de Sintaxis**: `node --check` del código modificado pasó sin fallos.
+- **Auditoría de Logs**: Se auditaron los logs de PM2 (`pm2 logs ntmsg-app`) en producción y desarrollo, confirmando que la aplicación arrancó correctamente, cargó las plantillas del bot e inició la conexión lazy de las sesiones vinculadas.
+- **Verificación de Base de Datos**: Consultas SQL directas a la base de datos de producción confirmaron la carga idéntica de la configuración y prompts de ventas de la empresa 194 con respecto a desarrollo.
+
+---
+
+## COMMITS REALIZADOS
+
+  Repositorio: softzcar/ninesys-msg
+  
+  Commit 1:
+    Hash: e58677c
+    Mensaje: fix(waManager): exit early in maybeAutoReply if global AI is disabled
+    Archivo: src/services/waManager.js
+    
+  Commit 2:
+    Mensaje: docs(logs): add gemini log for AI bugfix and company 194 sync
+    Archivo: logs_gemini/2026-06-16_00-00-00_tarea-fix_bug_ia_y_sincronizacion_empresa_194.log
+
+================================================================================
