@@ -46,6 +46,13 @@ El servicio de auto-respuesta de WhatsApp de la empresa 194 presentaba fallos en
 
 ---
 
+## CONSIDERACIONES DE INTEGRACIÓN
+
+- **Conflicto de Sesión Simultánea (Crítico)**: Puesto que las credenciales de sesión se clonaron para la misma cuenta de WhatsApp (`584268730136`), no deben correr simultáneamente los servicios de desarrollo y producción para este número para evitar desconexiones o respuestas automáticas duplicadas.
+- **Consumo de Datos Dinámicos en Producción**: La IA en producción consulta la información del catálogo, telas, horarios y pedidos desde el backend de producción. Para un comportamiento idéntico al de desarrollo, es fundamental que el catálogo e inventarios de la empresa 194 en producción estén debidamente sincronizados.
+
+---
+
 ## COMMITS REALIZADOS
 
   Repositorio: softzcar/ninesys-msg
@@ -56,7 +63,18 @@ El servicio de auto-respuesta de WhatsApp de la empresa 194 presentaba fallos en
     Archivo: src/services/waManager.js
     
   Commit 2:
+    Hash: 9e6763c
     Mensaje: docs(logs): add gemini log for AI bugfix and company 194 sync
+    Archivo: logs_gemini/2026-06-16_00-00-00_tarea-fix_bug_ia_y_sincronizacion_empresa_194.log
+
+  Commit 3:
+    Hash: e4d3df5
+    Mensaje: docs(logs): update gemini task log to include session migration details
+    Archivo: logs_gemini/2026-06-16_00-00-00_tarea-fix_bug_ia_y_sincronizacion_empresa_194.log
+
+  Commit 4:
+    Hash: bec31e4
+    Mensaje: docs(logs): add integration warnings and notes to task logs
     Archivo: logs_gemini/2026-06-16_00-00-00_tarea-fix_bug_ia_y_sincronizacion_empresa_194.log
 
 ================================================================================
