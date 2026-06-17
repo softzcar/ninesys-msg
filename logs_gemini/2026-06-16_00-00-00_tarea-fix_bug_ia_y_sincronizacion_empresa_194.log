@@ -31,13 +31,18 @@ El servicio de auto-respuesta de WhatsApp de la empresa 194 presentaba fallos en
 - Se aplicó `git pull` en los servidores VPS de Desarrollo y Producción.
 - Se reinició el proceso PM2 `ntmsg-app` en ambos servidores de forma exitosa.
 
+### 4. Migración de Sesión Activa de WhatsApp (17-Junio)
+- **Copiado de credenciales**: Se migraron las tablas `wa_session_auth` y `wa_session_state` de la base de datos `api_emp_194` del VPS de Desarrollo al VPS de Producción usando la cuenta de acceso `api_user_194`.
+- **Actualización de Schema SQL**: Se detectó una inconsistencia de esquema en producción para la columna `status` de la tabla `wa_session_state` que impedía almacenar el estado `'DEGRADED'`. Se ejecutó un comando `ALTER TABLE wa_session_state MODIFY COLUMN status enum('NOT_REGISTERED','INITIALIZING','REQUIRES_QR','AUTHENTICATED','READY','PAUSED','ERROR','DISCONNECTED','DEGRADED') NOT NULL DEFAULT 'NOT_REGISTERED';` de forma exitosa en el servidor de producción.
+- **Reinicio del Servicio**: Se reinició el proceso PM2 `ntmsg-app` en producción, logrando cargar las credenciales migradas y estableciendo la sesión de forma inmediata en estado `READY` para el número `584268730136`.
+
 ---
 
 ## VERIFICACIÓN
 
 - **Pruebas de Sintaxis**: `node --check` del código modificado pasó sin fallos.
 - **Auditoría de Logs**: Se auditaron los logs de PM2 (`pm2 logs ntmsg-app`) en producción y desarrollo, confirmando que la aplicación arrancó correctamente, cargó las plantillas del bot e inició la conexión lazy de las sesiones vinculadas.
-- **Verificación de Base de Datos**: Consultas SQL directas a la base de datos de producción confirmaron la carga idéntica de la configuración y prompts de ventas de la empresa 194 con respecto a desarrollo.
+- **Verificación de Base de Datos**: Consultas SQL directas a la base de datos de producción confirmaron la carga idéntica de la configuración y prompts de ventas de la empresa 194 con respecto a desarrollo y la activación del estado `READY` para la sesión clonada.
 
 ---
 
