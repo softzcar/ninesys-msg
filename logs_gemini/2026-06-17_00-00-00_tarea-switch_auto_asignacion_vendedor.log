@@ -1,0 +1,50 @@
+================================================================================
+TAREA: Switch por Vendedor Individual para Auto-Asignación (Clientes Recurrentes)
+FECHA: 2026-06-17
+ESTADO: COMPLETADO
+================================================================================
+
+## CONTEXTO
+
+El cliente solicitó añadir un switch/toggle individual por cada vendedor para habilitar o deshabilitar la auto-asignación automática de conversaciones cuando escribe un cliente recurrente (histórico). Esto otorga flexibilidad administrativa para decidir qué vendedores participan de la asignación automática sin alterar la lógica de negocio ni interrumpir la IA global.
+
+---
+
+## ACCIONES REALIZADAS
+
+### 1. Base de Datos
+- **Nueva Migración (010)**: Se creó el archivo [010_vendor_auto_assign.sql](file:///home/developer/Escritorio/niesys/msg_ninesys/db/migrations/010_vendor_auto_assign.sql) para añadir la columna `allow_auto_assign TINYINT(1) NOT NULL DEFAULT 1` a la tabla `wa_vendor_state`.
+- **Plantilla de Empresa**: Se actualizó la definición de `wa_vendor_state` en la plantilla SQL para nuevas empresas ([create_new_company_api_emp_N.sql](file:///home/developer/Escritorio/niesys/ninesys-api/public/model/create_new_company_api_emp_N.sql)) para incorporar de fábrica la columna `allow_auto_assign`.
+
+### 2. Backend (msg_ninesys)
+- **Filtro de Vendedor Histórico**: Se modificó la consulta en [customerLookup.js](file:///home/developer/Escritorio/niesys/msg_ninesys/src/services/customerLookup.js) para realizar un `LEFT JOIN` con `wa_vendor_state` y verificar que `allow_auto_assign` sea `NULL` o `1`.
+- **Persistencia y Lectura**: Se actualizaron las funciones `getVendorState`, `setVendorState` y `listVendorStates` en [assignmentPolicy.js](file:///home/developer/Escritorio/niesys/msg_ninesys/src/services/assignmentPolicy.js) para manejar la columna `allow_auto_assign`.
+- **Endpoint**: Se adaptó el método `setVendorState` en [whatsappController.js](file:///home/developer/Escritorio/niesys/msg_ninesys/controllers/whatsappController.js) para capturar `allowAutoAssign` del request body y guardarlo en la base de datos.
+
+### 3. Frontend (app_multi)
+- **UI de Configuración**: Se integró en [WaConfiguracion.vue](file:///home/developer/Escritorio/niesys/app_multi/components/whatsapp/WaConfiguracion.vue) una nueva tarjeta ("Auto-asignación de Clientes Recurrentes por Vendedor") que lista a los vendedores activos (dptos 5 y 6) y provee un toggle (`b-form-checkbox switch`) para activar o desactivar su elegibilidad. Al cambiar el toggle, se realiza una petición en caliente (`POST /vendor-state/:companyId/:userId`) para guardar el cambio de forma inmediata en la base de datos de la empresa.
+
+---
+
+## VERIFICACIÓN
+
+- **Chequeo de Sintaxis**: Se comprobó la sintaxis localmente usando `node --check` en todos los archivos modificados de Node.js, resultando exitoso.
+- **Commits Locales**: Los cambios se confirmaron localmente en los tres repositorios.
+
+---
+
+## COMMITS REALIZADOS
+
+1. Repositorio: softzcar/ninesys-msg (msg_ninesys)
+   - Hash: dac3ff0
+   - Mensaje: feat(vendor-state): add allow_auto_assign column and filters for salespeople
+
+2. Repositorio: softzcar/ninesys-api (ninesys-api)
+   - Hash: 1c99d11
+   - Mensaje: feat(model): include allow_auto_assign column in wa_vendor_state template
+
+3. Repositorio: softzcar/app_multi (app_multi)
+   - Hash: e49cb18
+   - Mensaje: feat(whatsapp-config): add auto-assignment settings per vendor
+
+================================================================================
