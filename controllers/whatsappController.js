@@ -840,10 +840,10 @@ async function getVendorState(req, res) {
 
 async function setVendorState(req, res) {
     const { companyId, userId } = req.params;
-    const { isAvailable, maxActive } = req.body || {};
+    const { isAvailable, maxActive, allowAutoAssign } = req.body || {};
     try {
         const pool = await tenantResolver.getPool(companyId);
-        const result = await assignmentPolicy.setVendorState(pool, userId, { isAvailable, maxActive });
+        const result = await assignmentPolicy.setVendorState(pool, userId, { isAvailable, maxActive, allowAutoAssign });
         res.status(200).json(result);
     } catch (e) {
         res.status(500).json({ message: 'Error actualizando estado del vendedor', error: e.message });

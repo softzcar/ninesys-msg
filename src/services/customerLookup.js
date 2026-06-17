@@ -67,10 +67,13 @@ async function findLastEligibleVendor(pool, customerId) {
               ON u.id_usuario = o.responsable
          JOIN api_empresas.empresas_usuarios_departamentos d
               ON d.id_empleado = u.id_usuario
+         LEFT JOIN wa_vendor_state vs
+              ON vs.user_id = o.responsable
          WHERE o.id_wp = ?
            AND o.responsable IS NOT NULL
            AND u.activo = 1
            AND d.id_departamento IN (7, 8)
+           AND (vs.allow_auto_assign IS NULL OR vs.allow_auto_assign = 1)
          GROUP BY o.responsable
          ORDER BY last_order DESC
          LIMIT 1`,

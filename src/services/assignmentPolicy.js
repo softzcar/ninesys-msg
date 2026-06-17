@@ -69,25 +69,26 @@ async function pickNextVendor({ pool, jid, excludeUserId = null }) {
  */
 async function getVendorState(pool, userId) {
     const [[state]] = await pool.query(
-        `SELECT is_available, max_active FROM wa_vendor_state WHERE user_id = ?`,
+        `SELECT is_available, max_active, allow_auto_assign FROM wa_vendor_state WHERE user_id = ?`,
         [userId]
     );
-    return state || { is_available: 1, max_active: 0 }; // Default: disponible, sin tope
+    return state || { is_available: 1, max_active: 0, allow_auto_assign: 1 }; // Default: disponible, sin tope, auto-asignar activo
 }
 
 /**
  * Actualiza el estado de disponibilidad de un vendedor (UPSERT).
  */
-async function setVendorState(pool, userId, { isAvailable, maxActive }) {
+async function setVendorState(pool, userId, { isAvailable, maxActive, allowAutoAssign }) {
     await pool.query(
-        `INSERT INTO wa_vendor_state (user_id, is_available, max_active)
-         VALUES (?, ?, ?)
+        `INSERT INTO wa_vendor_state (user_id, is_available, max_active, allow_auto_assign)
+         VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE 
             is_available = VALUES(is_available),
-            max_active = VALUES(max_active)`,
-        [userId, isAvailable ? 1 : 0, maxActive || 0]
+            max_active = VALUES(max_active),
+            allow_auto_assign = VALUES(allow_auto_assign)`,
+        [userId, isAvailable ? 1 : 0, maxActive || 0, allowAutoAssign ? 1 : 0]
     );
-    return { user_id: userId, isAvailable, maxActive };
+    return { user_id: userId, isAvailable, maxActive, allowAutoAssign };
 }
 
 /**
@@ -95,7 +96,7 @@ async function setVendorState(pool, userId, { isAvailable, maxActive }) {
  */
 async function listVendorStates(pool) {
     const [rows] = await pool.query(`
-        SELECT vs.user_id, vs.is_available, vs.max_active,
+        SELECT vs.user_id, vs.is_available, vs.max_active, vs.allow_auto_assign,
                (SELECT COUNT(*) FROM wa_conversations 
                 WHERE assigned_to = vs.user_id AND mode = 'human' AND deleted_at IS NULL) as active_count
         FROM wa_vendor_state vs
