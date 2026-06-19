@@ -486,7 +486,8 @@ async function loadHistory(pool, jid, limit) {
          FROM wa_messages
          WHERE jid = ?
            AND (
-             (type != 'audio' AND body IS NOT NULL)
+             (type NOT IN ('audio', 'image', 'video', 'document') AND body IS NOT NULL)
+             OR (type IN ('image', 'video', 'document'))
              OR (type = 'audio' AND transcript IS NOT NULL)
            )
          ORDER BY ts DESC

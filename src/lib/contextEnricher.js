@@ -404,7 +404,7 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
         `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
         `El cliente pidió ver "${displayTerm}". La siguiente imagen AÚN NO ha sido enviada.`,
         `URL a enviar AHORA: ${next}`,
-        `ACCIÓN REQUERIDA: llama a send_gallery_image con esa URL exacta. NO digas que no tienes imágenes.`,
+        `ACCIÓN REQUERIDA: llama a la función send_gallery_image con la URL exacta "${next}". NO inventes, NO modifiques ni uses ninguna otra URL.`,
         disambig,
         `(Conteo sesión: ${shown} de ${images.length} imagen(es) de "${displayTerm}" ya enviadas.)`,
         afterNote,
