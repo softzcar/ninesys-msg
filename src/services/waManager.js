@@ -264,6 +264,16 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // por lo que no añade latencia al camino feliz.
         log.debug({ jid, incomingText: incoming.body }, 'maybeAutoReply: lanzando clasificador + generateReply en paralelo');
 
+        // Recuperar imágenes de galería previamente enviadas desde la base de datos para persistencia ante reinicios
+        const [galleryRows] = await pool.query(
+            `SELECT body FROM wa_messages
+             WHERE jid = ? AND type = 'image' AND body LIKE 'https://cdn.nineteengreen.com/%'`,
+            [jid]
+        ).catch(() => [[]]);
+        const dbSentUrls = galleryRows.map((r) => r.body);
+        const memSentUrls = _sentGalleryUrls.get(jid) || new Set();
+        const combinedExcludeUrls = [...new Set([...dbSentUrls, ...memSentUrls])];
+
         const [intentResult, reply] = await Promise.all([
             classifyHandoffIntent(incoming.body, recentClientMessages),
             aiService.generateReply({
@@ -274,7 +284,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 agentId: flags.aiAgentId || null,
                 idEmpresa,
                 extraSystemContext: fullExtraContext,
-                excludeGalleryUrls: _sentGalleryUrls.has(jid) ? [..._sentGalleryUrls.get(jid)] : [],
+                excludeGalleryUrls: combinedExcludeUrls,
             }),
         ]);
 
@@ -418,6 +428,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                     buffer: downloaded.buffer,
                     mimeType: downloaded.mimeType,
                     caption: '',
+                    bodyForDb: url,
                 }, { via: 'ai' });
                 // Registrar URL como enviada para no repetirla en el siguiente turno.
                 if (!_sentGalleryUrls.has(jid)) _sentGalleryUrls.set(jid, new Set());
@@ -1436,7 +1447,8 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
         // body en DB: documento→filename, audio PTT→null (nota de voz sin texto),
         // resto (image/video/audio-archivo)→caption si hay.
         let bodyForDb;
-        if (type === 'document') bodyForDb = fileName;
+        if (params.bodyForDb) bodyForDb = params.bodyForDb;
+        else if (type === 'document') bodyForDb = fileName;
         else if (type === 'audio' && ptt) bodyForDb = null;
         else bodyForDb = caption || null;
         const pool = await tenantResolver.getPool(id);

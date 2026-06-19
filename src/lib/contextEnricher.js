@@ -647,16 +647,21 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // la galería para que Gemini procese el pedido en lugar de seguir enviando imágenes.
     const wantsGallery = !isCompraDirecta && (actionIntent === 'gallery' || excludeGalleryUrls.length > 0);
 
-    // Recuperar término de producto para continuar una sesión de galería anterior
-    // (ej: cliente dice "muéstrame otro" sin mencionar el producto).
     let galleryProductTerm = wantsGallery ? resolvedProductTerm : null;
     if (!galleryProductTerm && excludeGalleryUrls.length > 0) {
         for (const url of [...excludeGalleryUrls].reverse()) {
-            const term = urlToGalleryTerm.get(url);
+            let term = urlToGalleryTerm.get(url);
+            if (!term && url.includes('/gallery/')) {
+                const parts = url.split('/');
+                const idx = parts.indexOf('gallery');
+                if (idx !== -1 && parts[idx + 1]) {
+                    term = parts[idx + 1];
+                }
+            }
             if (term) {
                 galleryProductTerm = term;
                 log.info({ idEmpresa, galleryProductTerm, excluded: excludeGalleryUrls.length },
-                    'enrichContext: término recuperado de urlToGalleryTerm para continuación de galería');
+                    'enrichContext: término recuperado para continuación de galería');
                 break;
             }
         }
