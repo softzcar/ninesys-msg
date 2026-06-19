@@ -209,14 +209,21 @@ function extractPhoneFromJid(jid) {
     return /^\d{7,15}$/.test(phone) ? phone : null;
 }
 
+// Continuación de galería: palabras clave que indican solicitar otra imagen,
+// pero que solo son válidas si ya hay una sesión de galería activa.
+const GALLERY_CONTINUATION_RE = /\b(siguiente|siguientes|otr[ao]s?|m[aá]s|ver\s+m[aá]s|p[aá]same|env[ií]ame)\b/i;
+
 /**
  * Clasifica la intención de acción del mensaje sin llamar a Gemini.
+ * @param {string} message
+ * @param {boolean} hasGallerySession - si ya se enviaron imágenes en esta sesión
  * @returns {'gallery'|'presupuesto'|'catalog'}
  */
-function detectActionIntent(message) {
+function detectActionIntent(message, hasGallerySession = false) {
     if (!message) return 'catalog';
     if (PRESUPUESTO_RE.test(message)) return 'presupuesto';
     if (GALLERY_RE.test(message)) return 'gallery';
+    if (hasGallerySession && GALLERY_CONTINUATION_RE.test(message)) return 'gallery';
     return 'catalog';
 }
 
@@ -563,7 +570,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const startTime = Date.now();
     const sections = [];
 
-    const actionIntent = detectActionIntent(lastUserMessage);
+    const actionIntent = detectActionIntent(lastUserMessage, excludeGalleryUrls.length > 0);
     const isCompraDirecta = COMPRA_RE.test(lastUserMessage || '');
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
     const isOrderRequest = ORDER_RE.test(lastUserMessage || '');
@@ -641,14 +648,15 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.info({ idEmpresa, jid }, 'contextEnricher: pregunta de orden pero sin teléfono en JID — omitido');
     }
 
-    // La galería solo se busca cuando el cliente explícitamente pide imágenes (intent=gallery)
-    // o cuando ya se envió una imagen antes (continuación de sesión de galería).
-    // EXCEPCIÓN: si el cliente expresa intención de compra directa (COMPRA_RE), suprimir
-    // la galería para que Gemini procese el pedido en lugar de seguir enviando imágenes.
-    const wantsGallery = !isCompraDirecta && (actionIntent === 'gallery' || excludeGalleryUrls.length > 0);
+    // No queremos forzar una nueva imagen de galería si el cliente está haciendo una
+    // pregunta sobre catálogo, precios o un presupuesto, para permitir que Gemini
+    // responda con texto y datos concretos en vez de interrumpir con otra imagen.
+    const wantsGallery = !isCompraDirecta && (actionIntent === 'gallery');
 
-    let galleryProductTerm = wantsGallery ? resolvedProductTerm : null;
-    if (!galleryProductTerm && wantsGallery && recentUserTexts && recentUserTexts.length > 0) {
+    // Siempre intentamos deducir el término de producto del historial o del mensaje actual,
+    // ya que tanto el catálogo (precios) como la galería dependen del producto activo.
+    let galleryProductTerm = resolvedProductTerm;
+    if (!galleryProductTerm && recentUserTexts && recentUserTexts.length > 0) {
         for (const text of [...recentUserTexts].reverse()) {
             if (text === lastUserMessage) continue;
             const term = await extractProductSearch(text).catch(() => null);
