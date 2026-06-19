@@ -1016,11 +1016,12 @@ async function _doInit(idEmpresa) {
             const historySyncMs = historySyncDays * 24 * 60 * 60 * 1000;
             const cutoffTs = Math.floor((Date.now() - historySyncMs) / 1000);
 
-            // Filtrar chats recientes
+            // Filtrar chats recientes (omitir grupos y difusiones de estados)
             const filteredChats = [];
             if (Array.isArray(chats)) {
                 for (const c of chats) {
                     if (!c.id) continue;
+                    if (c.id.endsWith('@g.us') || c.id === 'status@broadcast') continue;
                     const lastTs = Number(c.conversationTimestamp) || 0;
                     if (lastTs >= cutoffTs) {
                         filteredChats.push({

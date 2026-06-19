@@ -109,6 +109,11 @@ async function ingestMessage(pool, m, opts = {}) {
     const jid = m.key?.remoteJid;
     if (!jid) return null;
 
+    // Omitir grupos y difusiones de estados
+    if (jid.endsWith('@g.us') || jid === 'status@broadcast') {
+        return null;
+    }
+
     const wa_message_id = m.key.id;
     const from_me = m.key.fromMe ? 1 : 0;
     const sender = m.key.participant || m.key.remoteJid;
@@ -211,6 +216,12 @@ async function ingestMessage(pool, m, opts = {}) {
  */
 async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', status = 'sent', ts, via = 'api', media_url = null, media_mime = null }) {
     if (!jid || !wa_message_id) return null;
+
+    // Omitir grupos y difusiones de estados
+    if (jid.endsWith('@g.us') || jid === 'status@broadcast') {
+        return null;
+    }
+
     const timestamp = Number(ts) || Math.floor(Date.now() / 1000);
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
 
