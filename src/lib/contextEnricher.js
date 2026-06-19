@@ -185,7 +185,7 @@ async function resolveGalleryFolder(idEmpresa, term, availableFolders) {
 // ---------------------------------------------------------------------------
 
 // Galería: el cliente quiere VER imágenes / modelos
-const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
+const GALLERY_RE = /foto|imagen|fotos|imágenes|galería|galeria|muestrame|muéstrame|mostrarme|muestrenme|muéstrenme|muestre|muéstreme|muestreme|quier[oa]\s+ver|quiero\s+ver|ver\s+los?\s+modelos?|ver\s+los?\s+diseños?|(ver|mostrar|muestra).{0,30}(model|diseño|estilo|ejemplo|foto)|model.{0,30}(ver|mostrar|muestra)|otro modelo|otros modelos/i;
 // Presupuesto: el cliente quiere cotizar / pedir
 const PRESUPUESTO_RE = /presupuesto|cotizaci|cotizar/i;
 // Compra directa: el cliente expresa intención de comprar/pedir con cantidad.
