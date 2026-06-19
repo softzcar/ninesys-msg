@@ -559,7 +559,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null } = {}) {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [] } = {}) {
     const startTime = Date.now();
     const sections = [];
 
@@ -648,6 +648,18 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const wantsGallery = !isCompraDirecta && (actionIntent === 'gallery' || excludeGalleryUrls.length > 0);
 
     let galleryProductTerm = wantsGallery ? resolvedProductTerm : null;
+    if (!galleryProductTerm && wantsGallery && recentUserTexts && recentUserTexts.length > 0) {
+        for (const text of [...recentUserTexts].reverse()) {
+            if (text === lastUserMessage) continue;
+            const term = await extractProductSearch(text).catch(() => null);
+            if (term) {
+                galleryProductTerm = term;
+                log.info({ idEmpresa, galleryProductTerm, sourceText: text }, 'enrichContext: término recuperado de mensajes recientes del usuario');
+                break;
+            }
+        }
+    }
+
     if (!galleryProductTerm && excludeGalleryUrls.length > 0) {
         for (const url of [...excludeGalleryUrls].reverse()) {
             let term = urlToGalleryTerm.get(url);

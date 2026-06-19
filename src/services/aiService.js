@@ -611,7 +611,7 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
             .filter((m) => !m.from_me && m.body)
             .slice(-4)
             .map((m) => m.body);
-        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid })
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid, recentUserTexts })
             .catch((err) => {
                 log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
                 return '';

@@ -400,6 +400,13 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             log.warn({ jid, galleryTerm: galleryTerm || null }, 'maybeAutoReply: texto vacío con imagen — usando texto de respaldo contextual');
         }
 
+        // RED DE SEGURIDAD: Si Gemini llamó a send_gallery_image pero la URL fue inválida
+        // y no tenemos ningún texto para enviar, forzar una respuesta para no dejar colgado el chat.
+        if (!textToSend && fcGallery?.args?.url && imgUrls.length === 0) {
+            textToSend = '¿De qué producto te gustaría ver diseños? Por ejemplo, puedes pedir franelas, gorras, buzos, joggers, etc. 😊';
+            log.warn({ jid, invalidUrl: fcGallery.args.url }, 'maybeAutoReply: URL de galería inválida y texto vacío — enviando pregunta de aclaración como fallback');
+        }
+
         if (textToSend) {
             try {
                 await sendText(idEmpresa, jid, textToSend, { via: 'ai' });
