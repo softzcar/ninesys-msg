@@ -627,6 +627,10 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
             });
         }
 
+        if (vendorId) {
+            await conversationStore.claimOwnerIfEmpty(pool, jid, vendorId).catch(() => {});
+        }
+
         // 2. Leer el modo de operación del tenant.
         //    always_ai=1: la IA sigue respondiendo; solo se notifica al vendedor.
         //    always_ai=0: comportamiento normal — la conversación pasa a human.
@@ -830,13 +834,22 @@ async function _doInit(idEmpresa) {
                         // ya tuvo un vendedor activo + en dpto 7/8, se le
                         // asigna a ese vendedor y salta la IA.
                         let autoAssigned = false;
+                        let flags = null;
+                        try {
+                            flags = await conversationStore.getConversationFlags(pool, result.jid);
+                        } catch (_) {}
+
+                        const isUnassignedNewChat = flags && flags.assignedTo === null && flags.ownerId === null;
+                        const shouldAutoAssign = (result.conversationCreated || result.restored || isUnassignedNewChat) && !result.isGroup;
+
                         log.info({
                             tenantId: id, jid: result.jid,
                             conversationCreated: !!result.conversationCreated,
                             restored: !!result.restored,
+                            isUnassignedNewChat,
                             isGroup: !!result.isGroup,
                         }, '[autoAssign] evaluando condiciones');
-                        if ((result.conversationCreated || result.restored) && !result.isGroup) {
+                        if (shouldAutoAssign) {
                             try {
                                 const resolved = await customerLookup.resolveVendorForJid(pool, result.jid, m.key);
                                 if (resolved?.vendorId) {

@@ -34,15 +34,15 @@ async function resolveDepartmentForEmployee(pool, employeeId) {
         const [rows] = await pool.query(
             `SELECT id_departamento
              FROM api_empresas.empresas_usuarios_departamentos
-             WHERE id_empleado = ? AND id_departamento IN (7, 8)
-             ORDER BY FIELD(id_departamento, 8, 7)
+             WHERE id_empleado = ? AND id_departamento IN (5, 6)
+             ORDER BY FIELD(id_departamento, 6, 5)
              LIMIT 1`,
             [employeeId]
         );
-        return rows[0]?.id_departamento || 8;
+        return rows[0]?.id_departamento || 6;
     } catch (e) {
-        log.warn({ err: e, employeeId }, 'resolveDepartmentForEmployee falló, fallback a 8');
-        return 8;
+        log.warn({ err: e, employeeId }, 'resolveDepartmentForEmployee falló, fallback a 6');
+        return 6;
     }
 }
 

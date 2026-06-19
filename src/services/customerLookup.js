@@ -72,7 +72,7 @@ async function findLastEligibleVendor(pool, customerId) {
          WHERE o.id_wp = ?
            AND o.responsable IS NOT NULL
            AND u.activo = 1
-           AND d.id_departamento IN (7, 8)
+           AND d.id_departamento IN (5, 6)
            AND (vs.allow_auto_assign IS NULL OR vs.allow_auto_assign = 1)
          GROUP BY o.responsable
          ORDER BY last_order DESC
