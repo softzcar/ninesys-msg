@@ -680,9 +680,10 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     }
 
     // Fase 2a — catálogo (secuencial: necesitamos categoryTerm antes de buscar galería)
-    const productResult = resolvedProductTerm
+    const catalogSearchTerm = resolvedProductTerm || galleryProductTerm;
+    const productResult = catalogSearchTerm
         ? await raceWithTimeout(
-            fetchProducts(idEmpresa, resolvedProductTerm),
+            fetchProducts(idEmpresa, catalogSearchTerm),
             15000,
             () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo')
         )
