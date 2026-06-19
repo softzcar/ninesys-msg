@@ -1,0 +1,97 @@
+================================================================================
+TAREA: Auditoría y Corrección del Schema SQL — Seed de catalogo_colores_tintas
+FECHA: 2026-06-12
+ESTADO: COMPLETADO
+================================================================================
+
+## CONTEXTO
+
+Tras la jornada de normalización del sistema de tintas e impresoras, se realizó
+una auditoría del archivo de schema base para verificar que todos los cambios
+implementados en base de datos estuvieran correctamente reflejados en:
+
+  ninesys-api/public/model/create_new_company_api_emp_N.sql
+
+Este archivo es el blueprint maestro que se ejecuta al crear una nueva empresa
+en el sistema. Debe estar siempre sincronizado con la base de datos real para
+garantizar que los nuevos clientes arranquen con una estructura idéntica.
+
+---
+
+## RESULTADO DE LA AUDITORÍA
+
+### ✅ Elementos verificados y correctos (sin cambios requeridos)
+
+  - Tabla `tintas`: usa id_color_tinta (FK dinámica). Sin columnas c/m/y/k/w.
+  - Tabla `tintas_recargas`: usa id_color_tinta dinámicamente.
+  - Tabla `catalogo_colores_tintas`: definición correcta con código, nombre,
+    color_hex y constraint UNIQUE en codigo.
+  - Tabla `catalogo_impresoras`: tiene id_catalogo_tintas como FK.
+  - Tabla `impresoras_colores`: tabla relacional correctamente definida con
+    PK compuesta y FKs a catalogo_impresoras y catalogo_colores_tintas.
+  - Tabla `inventario`: tiene id_color_tinta e id_catalogo_tintas con FKs.
+  - Foreign Keys: todas las FKs dinámicas de tintas, recargas, inventario e
+    impresoras_colores apuntan a catalogo_colores_tintas correctamente.
+  - Filtro `cantidad > 0`: no existe en el DDL (era lógica de PHP, ya corregida).
+
+### ❌ Gap detectado y corregido
+
+  El INSERT seed de `catalogo_colores_tintas` solo contenía 5 colores base:
+    (1, 'C', 'Cyan'), (2, 'M', 'Magenta'), (3, 'Y', 'Yellow'),
+    (4, 'K', 'Black'), (5, 'W', 'White').
+
+  Sin embargo, el color picker del frontend (ImpresoraNueva.vue, ImpresoraEditar.vue
+  y colores.vue) ya contempla 12 presets estándar. El color 'BRNZ' (Barniz),
+  implementado y validado en la orden 5514, no estaba en el seed inicial.
+
+  IMPACTO: Cualquier cliente nuevo que instalara el sistema desde cero no tendría
+  Barniz (BRNZ) ni los otros 6 colores adicionales disponibles en el catálogo,
+  generando inconsistencia entre el schema y la interfaz de usuario.
+
+---
+
+## CORRECCIÓN APLICADA
+
+  - Archivo Modificado: ninesys-api/public/model/create_new_company_api_emp_N.sql
+
+  Se ampliaron los registros seed de catalogo_colores_tintas de 5 a 12 entradas:
+
+    (1,  'C',    'Cyan',          '#00FFFF'),
+    (2,  'M',    'Magenta',       '#FF00FF'),
+    (3,  'Y',    'Yellow',        '#FFFF00'),
+    (4,  'K',    'Black',         '#343A40'),
+    (5,  'W',    'White',         '#FFFFFF'),
+    (6,  'BRNZ', 'Barniz',        '#E0F7FA'),  ← NUEVO (crítico)
+    (7,  'LC',   'Light Cyan',    '#80FFFF'),  ← NUEVO
+    (8,  'LM',   'Light Magenta', '#FF80FF'),  ← NUEVO
+    (9,  'OR',   'Orange',        '#FFA500'),  ← NUEVO
+    (10, 'GR',   'Green',         '#008000'),  ← NUEVO
+    (11, 'RD',   'Red',           '#FF0000'),  ← NUEVO
+    (12, 'BL',   'Blue',          '#0000FF');  ← NUEVO
+
+  Se actualizó el AUTO_INCREMENT de catalogo_colores_tintas a 13 para que
+  los nuevos colores creados por el usuario no colisionen con los IDs del seed.
+
+---
+
+## NOTAS IMPORTANTES
+
+  - Esta corrección SOLO afecta a instalaciones nuevas (empresas que se creen
+    a partir de ahora usando este script).
+  - La empresa 194 (VPS Hostinger, producción) ya tiene todos los colores
+    registrados en su base de datos real. NO requiere migración adicional.
+  - La auditoría confirmó que el resto del schema ya estaba alineado con todos
+    los cambios de normalización implementados anteriormente.
+
+---
+
+## COMMIT REALIZADO
+
+  Repositorio: ninesys-api — rama: refactor/modular-routes
+  Hash: 07e6bd8
+  Mensaje: fix(schema): add full color presets seed to catalogo_colores_tintas
+           (BRNZ, LC, LM, OR, GR, RD, BL)
+  Archivo: public/model/create_new_company_api_emp_N.sql
+  Cambio neto: +14 líneas / -6 líneas
+
+================================================================================

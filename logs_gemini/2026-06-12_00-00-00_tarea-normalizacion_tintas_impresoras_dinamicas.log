@@ -1,0 +1,149 @@
+================================================================================
+TAREA: Normalización y Flexibilización del Sistema de Tintas e Impresoras
+FECHA: 2026-06-12
+ESTADO: COMPLETADO
+================================================================================
+
+## LO QUE SE IMPLEMENTÓ (COMPLETO)
+
+### Parte 1 — Backend: Eliminación del Modelo CMYK Estático
+
+  El sistema originalmente dependía de columnas CMYK fijas (c, m, y, k, w) en
+  la tabla `tintas` y en múltiples endpoints PHP. Se migró completamente a un
+  modelo relacional dinámico basado en el catálogo `catalogo_colores_tintas`.
+
+  - ninesys-api/app/routes/inventory.php (MODIFICADO)
+      * Endpoint POST /insumos/recarga-tinta: se eliminó el mapeo hardcodeado
+        de colores (C→cyan, M→magenta, etc.) y se adoptó el id_color dinámico.
+      * Endpoint GET /reporte/insumos-cosumidos-por-orden/{id_orden}:
+        - Se eliminaron los filtros estáticos CMYKW (WHERE imo.canal IN ('C','M'...)).
+        - Se reemplazó substr(color, 0, 1) por el código completo del canal (BRNZ).
+        - Se añadió la clave `colores_detalles` en la respuesta para guiar al frontend.
+      * Endpoint GET /reporte/insumos-cosumidos-por-orden (rama sin ID / rango fechas):
+        - Se refactorizó completamente el pivoteo SQL estático a una consulta dinámica.
+        - Se corrigió alias de tabla de `tintas t` → `tintas imo` en usedColorsQuery
+          (bug crítico: la variable $where filtraba por imo.moment y fallaba en silencio
+           causando que solo se usara el fallback estático CMYKW).
+        - Los colores únicos consumidos se obtienen con SELECT DISTINCT y se devuelven
+          en `colores_detalles`. Los consumos se agrupan en PHP dinámicamente.
+
+  - ninesys-api/app/routes/reports.php (MODIFICADO)
+      * Endpoint GET /reportes/costos-produccion/{inicio}/{fin}:
+        - Se eliminó el SELECT de columnas estáticas c, m, y, k, w de la tabla tintas
+          (que ya no existen en el schema dinámico).
+        - Se reemplazó por un JOIN con catalogo_colores_tintas para obtener el código
+          del canal de cada consumo registrado.
+
+  - ninesys-api/app/routes/printers.php (VERIFICADO)
+      * El endpoint /impresoras para reporte de recargas y ciclos ya usaba joins
+        dinámicos con catalogo_colores_tintas. Sin cambios necesarios.
+
+---
+
+### Parte 2 — Frontend: Reporte de Insumos por Orden (/inventario/reportes/orden)
+
+  - app_multi/pages/inventario/reportes/orden/index.vue (MODIFICADO)
+      * Se eliminó la definición estática de fieldsTinta con columnas CMYKW.
+      * Se convirtieron coloresDetalles y fieldsTinta a propiedades computadas:
+        - coloresDetalles: lee los metadatos de colores del primer item de la respuesta.
+        - fieldsTinta: genera las columnas dinámicamente desde coloresDetalles con
+          formatter numérico (entero si ml es entero, decimal si no).
+      * Se añadieron safeguards en la propiedad computada `totales` para prevenir
+        errores reactivos en la carga inicial cuando los datos aún no están disponibles.
+
+---
+
+### Parte 3 — Frontend: Detalle Dinámico en Reporte de Costos de Producción
+
+  - app_multi/components/admin/ReporteCostosDeProduccionInsumos.vue (MODIFICADO)
+      * fieldsTinta convertida a computed property dinámica con fallback CMYKW.
+      * Se removieron los slots de footer estáticos y foot-clone.
+      * Se implementó #custom-foot dinámico que calcula celdas vacías según
+        la longitud de colores_detalles para alinear columnas de totales.
+      * Se implementó formatter estándar de campo (b-table formatter) para los
+        valores de ml de tinta de forma compatible con Vue 2 (evitando el uso
+        de v-slot dentro de v-for que causa warnings de compilación).
+
+  - app_multi/components/admin/ReporteCostosProduccionTintas.vue (MODIFICADO)
+      * fields convertida a computed property dinámica basada en colores_detalles.
+      * Se implementó formatter estándar de campo de forma homóloga al modal
+        de insumos para consistencia de renderizado.
+
+---
+
+### Parte 4 — Frontend: Color Picker con Presets en Catálogo de Colores
+
+  Se mejoró la UX de todos los formularios donde el usuario registra canales
+  de color para impresoras, agregando selectores rápidos de colores predefinidos.
+
+  - app_multi/components/admin/ImpresoraNueva.vue (MODIFICADO)
+      * Se añadió lista coloresPredeterminados con 12 presets estándar:
+        Cyan, Magenta, Yellow, Black, White, Barniz, Light Cyan, Light Magenta,
+        Orange, Green, Red, Blue (con código, nombre y HEX predefinidos).
+      * Se añadió sección visual de píldoras de color en el formulario de canal.
+      * Se añadió método cargarPresetColor(preset) que autocompleta el formulario.
+      * Se reemplazó <b-form-input type="color"> por <input type="color"> nativo
+        con estilos específicos (ancho/alto fijo, borde gris, sin padding de texto)
+        para que se vea como bloque de color sólido clicable en lugar de caja rota.
+
+  - app_multi/components/admin/ImpresoraEditar.vue (MODIFICADO)
+      * Idénticos cambios aplicados al formulario de edición de canal de color.
+
+  - app_multi/pages/impresoras/colores.vue (MODIFICADO)
+      * Se añadió la misma fila de presets al modal modal-add-color con el
+        método cargarPresetColor.
+      * Se añadió la misma fila de presets al modal modal-edit-color con el
+        método cargarPresetColorEdit (handlers separados para no cruzar estados).
+      * Se aplicó la misma estilización al color picker nativo en ambos modales.
+
+---
+
+## AJUSTE ADICIONAL — Insumos con Cantidad = 0
+
+  - ninesys-api/app/routes/inventory.php (MODIFICADO)
+      * El listado /inventario/{departamento} filtraba con i.cantidad > 0,
+        ocultando insumos agotados al completar una botella. Se removió este
+        filtro para permitir que los administradores vean, busquen y editen
+        insumos con stock en 0.
+
+---
+
+## COMMITS REALIZADOS
+
+  Frontend (app_multi) — rama: refactor/modular-routes
+    - feat(frontend): refactor ink cost tables to dynamically render colors
+      using field formatters
+    - feat(frontend): add color presets selector UI to color channel forms
+    - style(frontend): replace b-form-input[type=color] with native input
+      styled as solid color block + add edit modal presets
+
+  Backend (ninesys-api) — rama: main (o rama de deploy activa)
+    - fix(backend): normalize ink report to dynamic color columns
+    - fix(backend): correct table alias in usedColorsQuery (imo instead of t)
+    - fix(inventory): remove cantidad > 0 filter to show depleted supplies
+
+---
+
+## PRUEBAS REALIZADAS
+
+  - Verificado endpoint /reporte/insumos-cosumidos-por-orden/5514 devuelve
+    colores_detalles con {key: 'BRNZ', label: 'Barniz', color: '#...'}.
+  - Verificado visualmente que la orden 5514 (impresora barniz) muestra 26ml
+    en la columna BRNZ en /inventario/reportes/orden.
+  - Verificado que el modal de Detalle de Insumos en costos de producción
+    muestra la columna Barniz con valor correcto en lugar de CMYKW fijo.
+  - Verificado que los presets de color funcionan en formularios de nueva
+    impresora, editar impresora y catálogo de colores.
+
+---
+
+## NOTAS PARA SIGUIENTE SESIÓN
+
+  - El SseOrdenesAsignadasModalExtra.vue ya fue verificado y usa lógica
+    dinámica de canales (sin cambios pendientes).
+  - El FinalizarLoteModal.vue fue corregido previamente para usar colores
+    dinámicos desde la impresora seleccionada.
+  - Al desplegar al VPS, recordar sincronizar ninesys-api (git pull en el VPS)
+    dado que el deploy del frontend ya es automático vía CI/CD o rsync.
+
+================================================================================

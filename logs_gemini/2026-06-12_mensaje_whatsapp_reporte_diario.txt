@@ -1,0 +1,36 @@
+📋 *REPORTE DE TAREAS — NieSys*
+🗓️ *Jueves, 12 de Junio de 2026*
+━━━━━━━━━━━━━━━━━━━━━━
+
+✅ *1. Normalización del módulo de impresoras y tintas*
+Se eliminó completamente el modelo rígido CMYK (columnas c/m/y/k/w fijas) del backend. Ahora todo el sistema de consumo y recarga de tinta funciona de forma dinámica basado en el catálogo de canales de color. Esto permite registrar impresoras con cualquier tipo de tinta (incluyendo Barniz, UV, Light, etc.) sin modificar el código.
+
+✅ *2. Reporte de insumos por orden (/inventario/reportes/orden)*
+Se corrigió un bug crítico en el alias de tabla SQL que causaba que la columna de nuevas tintas (ej. Barniz) nunca apareciera. Las columnas de colores ahora se generan dinámicamente según los canales realmente consumidos en cada orden. Se verificó con la orden 5514 (Barniz → 26ml correctos).
+
+✅ *3. Reporte de costos de producción — Detalle de insumos*
+Se actualizaron los modales de "Detalle de insumos" y "Detalle de tintas" en el reporte de costos para mostrar dinámicamente las columnas de color consumidas por cada orden, en lugar de las columnas CMYKW estáticas anteriores.
+
+✅ *4. Color Picker con Presets en catálogo de colores*
+Se mejoró la experiencia de usuario en todos los formularios de canales de color de impresoras. Ahora hay botones de selección rápida (Cyan, Magenta, Yellow, Black, White, Barniz, Orange, etc.) que precargan automáticamente el código, nombre y color HEX del canal. Además se rediseñó el selector de color para que se vea como un bloque sólido clicable en lugar de un cuadro de texto roto.
+
+✅ *5. Insumos agotados ahora visibles*
+Se eliminó el filtro que ocultaba insumos con cantidad = 0 en la Gestión de Inventario. Ahora los administradores pueden ver, buscar y editar insumos que llegaron a cero stock.
+
+━━━━━━━━━━━━━━━━━━━━━━
+🔧 *Archivos modificados:*
+• `ninesys-api/app/routes/inventory.php`
+• `ninesys-api/app/routes/reports.php`
+• `app_multi/pages/inventario/reportes/orden/index.vue`
+• `app_multi/components/admin/ReporteCostosDeProduccionInsumos.vue`
+• `app_multi/components/admin/ReporteCostosProduccionTintas.vue`
+• `app_multi/components/admin/ImpresoraNueva.vue`
+• `app_multi/components/admin/ImpresoraEditar.vue`
+• `app_multi/pages/impresoras/colores.vue`
+
+📌 *Commits pusheados a:*
+• Frontend → rama `refactor/modular-routes`
+• Backend → rama principal
+
+⚠️ *Pendiente del usuario:*
+Verificar visualmente en el navegador los cambios en producción/dev una vez sincronizado el backend al VPS.

@@ -985,9 +985,112 @@ async function _doInit(idEmpresa) {
     sock.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
         await lidMapping.upsertMapping(pool, { lid, phoneJid: jid });
     });
-    sock.ev.on('messaging-history.set', async ({ contacts }) => {
+    sock.ev.on('messaging-history.set', async ({ contacts, chats, messages }) => {
         if (Array.isArray(contacts) && contacts.length) {
-            await lidMapping.upsertFromContacts(pool, contacts);
+            await lidMapping.upsertFromContacts(pool, contacts).catch(() => {});
+        }
+
+        // Capa 2: Sincronización controlada de historial
+        try {
+            const historySyncDays = Number(process.env.HISTORY_SYNC_DAYS) || 14;
+            const historySyncMs = historySyncDays * 24 * 60 * 60 * 1000;
+            const cutoffTs = Math.floor((Date.now() - historySyncMs) / 1000);
+
+            // Filtrar chats recientes
+            const filteredChats = [];
+            if (Array.isArray(chats)) {
+                for (const c of chats) {
+                    if (!c.id) continue;
+                    const lastTs = Number(c.conversationTimestamp) || 0;
+                    if (lastTs >= cutoffTs) {
+                        filteredChats.push({
+                            jid: c.id,
+                            name: c.name || null,
+                            unreadCount: c.unreadCount || 0,
+                            lastTs: lastTs || null
+                        });
+                    }
+                }
+            }
+
+            if (filteredChats.length) {
+                log.info({ tenantId: id, count: filteredChats.length }, '[historySync] Inserción masiva de chats recientes');
+                await conversationStore.bulkUpsertConversations(pool, filteredChats);
+
+                // Filtrar mensajes que pertenecen a estos chats y sean recientes
+                if (Array.isArray(messages) && messages.length) {
+                    const eligibleJids = new Set(filteredChats.map(c => c.jid));
+                    const jidMessagesMap = new Map();
+
+                    for (const m of messages) {
+                        const jid = m.key?.remoteJid;
+                        if (!jid || !eligibleJids.has(jid)) continue;
+                        const ts = Number(m.messageTimestamp) || 0;
+                        if (ts < cutoffTs) continue;
+
+                        if (!jidMessagesMap.has(jid)) {
+                            jidMessagesMap.set(jid, []);
+                        }
+                        jidMessagesMap.get(jid).push(m);
+                    }
+
+                    const finalMessages = [];
+                    for (const [jid, msgs] of jidMessagesMap.entries()) {
+                        // Ordenar por timestamp desc y tomar máximo 20 por chat
+                        msgs.sort((a, b) => (Number(b.messageTimestamp) || 0) - (Number(a.messageTimestamp) || 0));
+                        finalMessages.push(...msgs.slice(0, 20));
+                    }
+
+                    if (finalMessages.length) {
+                        log.info({ tenantId: id, count: finalMessages.length }, '[historySync] Inserción masiva de mensajes recientes');
+                        await conversationStore.bulkUpsertMessages(pool, finalMessages);
+                    }
+                }
+            }
+        } catch (e) {
+            log.error({ err: e, tenantId: id }, 'messaging-history.set: falló importación de historial');
+        }
+    });
+
+    sock.ev.on('chats.delete', async (deletedJids) => {
+        try {
+            log.info({ tenantId: id, deletedJids }, 'chats.delete recibido desde WhatsApp');
+            for (const jid of deletedJids) {
+                await conversationStore.softDeleteConversation(pool, jid);
+                emit(id, 'conversation:deleted', { companyId: id, jid });
+            }
+        } catch (e) {
+            log.error({ err: e, tenantId: id }, 'chats.delete handler falló');
+        }
+    });
+
+    sock.ev.on('messages.delete', async (item) => {
+        try {
+            if (item && Array.isArray(item.keys)) {
+                log.info({ tenantId: id, count: item.keys.length }, 'messages.delete recibido desde WhatsApp');
+                await conversationStore.markMessagesAsDeleted(pool, item.keys);
+                for (const key of item.keys) {
+                    emit(id, 'message:deleted', { companyId: id, waMessageId: key.id, jid: key.remoteJid });
+                }
+            }
+        } catch (e) {
+            log.error({ err: e, tenantId: id }, 'messages.delete handler falló');
+        }
+    });
+
+    sock.ev.on('chats.update', async (updates) => {
+        try {
+            if (Array.isArray(updates)) {
+                for (const u of updates) {
+                    if (u.id && u.unreadCount !== undefined && u.unreadCount !== null) {
+                        log.debug({ tenantId: id, jid: u.id, unreadCount: u.unreadCount }, 'chats.update: actualizando contador de no leídos');
+                        await conversationStore.updateUnreadCount(pool, u.id, u.unreadCount);
+                        emit(id, 'conversation:updated', { companyId: id, jid: u.id, unread_delta: 0 });
+                    }
+                }
+            }
+        } catch (e) {
+            log.error({ err: e, tenantId: id }, 'chats.update handler falló');
         }
     });
 
@@ -1221,6 +1324,10 @@ async function disconnect(idEmpresa) {
     sessions.delete(id);
     const pool = await tenantResolver.getPool(id);
     await persistState(pool, { status: 'NOT_REGISTERED', last_error: null });
+    // Limpieza total de chats y mensajes de la base de datos para esta empresa
+    await conversationStore.clearAllConversationsAndMessages(pool).catch((e) => {
+        log.error({ err: e, tenantId: id }, 'Error al limpiar chats/mensajes al desvincular');
+    });
     return { ok: true, message: 'Sesión cerrada.' };
 }
 

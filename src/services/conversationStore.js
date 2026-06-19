@@ -742,6 +742,113 @@ async function listDeletedJids(pool) {
     return rows.map((r) => r.jid);
 }
 
+async function bulkUpsertConversations(pool, chats) {
+    if (!chats || !chats.length) return;
+    const query = `
+        INSERT INTO wa_conversations (jid, name, is_group, unread_count, last_ts)
+        VALUES ?
+        ON DUPLICATE KEY UPDATE
+            unread_count = VALUES(unread_count),
+            last_ts = COALESCE(VALUES(last_ts), last_ts),
+            name = COALESCE(VALUES(name), name),
+            updated_at = CURRENT_TIMESTAMP
+    `;
+    const values = chats.map(c => [
+        c.jid,
+        c.name || null,
+        c.jid.endsWith('@g.us') ? 1 : 0,
+        c.unreadCount || 0,
+        c.lastTs || null
+    ]);
+    await pool.query(query, [values]);
+}
+
+async function bulkUpsertMessages(pool, messages) {
+    if (!messages || !messages.length) return;
+    const query = `
+        INSERT IGNORE INTO wa_messages
+            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+        VALUES ?
+    `;
+    const chunkSize = 500;
+    for (let i = 0; i < messages.length; i += chunkSize) {
+        const chunk = messages.slice(i, i + chunkSize);
+        const values = chunk.map(m => {
+            const jid = m.key.remoteJid;
+            const wa_message_id = m.key.id;
+            const from_me = m.key.fromMe ? 1 : 0;
+            const sender = m.key.participant || m.key.remoteJid;
+            const ts = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000);
+            const type = extractType(m.message);
+            const body = extractBody(m.message);
+            const media_mime = extractMime(m.message);
+            
+            return [
+                jid,
+                wa_message_id,
+                from_me,
+                sender,
+                type,
+                body,
+                null, // media_url
+                media_mime,
+                from_me ? 'api' : 'human',
+                'delivered',
+                ts
+            ];
+        }).filter(row => {
+            const [,,,type,body] = row;
+            if (type === 'system' && !body) return false;
+            return true;
+        });
+        
+        if (values.length) {
+            await pool.query(query, [values]);
+        }
+    }
+}
+
+async function markMessagesAsDeleted(pool, keys) {
+    if (!keys || !keys.length) return false;
+    await Promise.all(keys.map(async (key) => {
+        await pool.query(
+            `UPDATE wa_messages SET deleted_at = CURRENT_TIMESTAMP
+             WHERE wa_message_id = ? AND jid = ?`,
+            [key.id, key.remoteJid]
+        );
+    }));
+    return true;
+}
+
+async function updateUnreadCount(pool, jid, count) {
+    if (!jid) return false;
+    const [r] = await pool.query(
+        `UPDATE wa_conversations SET unread_count = ? WHERE jid = ?`,
+        [Number(count), jid]
+    );
+    return r.affectedRows > 0;
+}
+
+async function purgeOldMessages(pool, retentionDays) {
+    const cutoffTs = Math.floor((Date.now() - retentionDays * 24 * 60 * 60 * 1000) / 1000);
+    const [r] = await pool.query(
+        `DELETE FROM wa_messages WHERE ts < ?`,
+        [cutoffTs]
+    );
+    return r.affectedRows;
+}
+
+async function clearAllConversationsAndMessages(pool) {
+    await pool.query(`SET FOREIGN_KEY_CHECKS=0`);
+    try {
+        await pool.query(`DELETE FROM wa_messages`);
+        await pool.query(`DELETE FROM wa_conversations`);
+    } finally {
+        await pool.query(`SET FOREIGN_KEY_CHECKS=1`);
+    }
+    return true;
+}
+
 module.exports = {
     ingestMessage,
     recordOutbound,
@@ -770,4 +877,10 @@ module.exports = {
     listDeletedConversations,
     listDeletedJids,
     listMediaPathsForJid,
+    bulkUpsertConversations,
+    bulkUpsertMessages,
+    markMessagesAsDeleted,
+    updateUnreadCount,
+    purgeOldMessages,
+    clearAllConversationsAndMessages,
 };

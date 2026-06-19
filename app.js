@@ -54,6 +54,10 @@ const startApplication = async () => {
     const assignmentTimeout = require('./src/services/assignmentTimeout');
     assignmentTimeout.start();
 
+    // Servicio de retención y limpieza periódica (mensajes antiguos y multimedia)
+    const retentionService = require('./src/services/retentionService');
+    retentionService.start();
+
     // Iniciar el servidor HTTP (ahora con WebSocket)
     server.listen(PORT, () => {
         logger.info({ port: PORT }, "Servidor corriendo (HTTP + WebSocket)");
@@ -96,6 +100,12 @@ async function gracefulShutdown(signal) {
             await assignmentTimeout.stop();
         } catch (e) {
             logger.warn({ err: e }, 'error parando assignmentTimeout');
+        }
+        try {
+            const retentionService = require('./src/services/retentionService');
+            retentionService.stop();
+        } catch (e) {
+            logger.warn({ err: e }, 'error parando retentionService');
         }
         // 4. Cerrar sesiones Baileys
         await waManager.shutdown({ timeoutMs: 4000 });
