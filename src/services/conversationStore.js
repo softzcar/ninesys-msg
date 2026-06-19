@@ -179,12 +179,12 @@ async function ingestMessage(pool, m, opts = {}) {
         `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
          VALUES (?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
-            name         = COALESCE(VALUES(name), name),
+            name         = COALESCE(name, VALUES(name)),
             last_message = VALUES(last_message),
             last_ts      = VALUES(last_ts),
             unread_count = unread_count + VALUES(unread_count),
             updated_at   = CURRENT_TIMESTAMP`,
-        [jid, pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
+        [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
     );
     const conversationCreated = upsertRes.affectedRows === 1;
 
