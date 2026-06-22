@@ -1,0 +1,23 @@
+- **Solicitud del Usuario:** Implementar la funcionalidad de Opt-out/Opt-in para mensajes automáticos en la empresa 194. Los clientes pueden darse de baja respondiendo "BAJA" o "NO" (o STOP/SALIR) y reactivarse con "ALTA", "ACTIVAR" o "START".
+- **Fecha y Hora:** 2026-06-22 20:00:00
+- **Proyecto(s):** Backend (msg_ninesys, ninesys-api)
+- **Archivos Involucrados:**
+    - ninesys-api/public/model/create_new_company_api_emp_N.sql
+    - ninesys-api/app/lib/whatsapp.php
+    - ninesys-api/app/routes/communications.php
+    - ninesys-api/app/routes/orders.php
+    - msg_ninesys/src/services/waManager.js
+- **Commits Relacionados:** Pendiente (esperando aprobación del usuario para despliegue).
+- **Acción Realizada:**
+    1. **Base de Datos (Esquema)**: Modificado `create_new_company_api_emp_N.sql` para añadir la columna `recibir_notificaciones tinyint(1) NOT NULL DEFAULT 1` a la tabla `customers`.
+    2. **Backend API (Slim)**:
+        - Implementado método `shouldSend` en `whatsapp.php` para validar si el destinatario tiene habilitadas las notificaciones automáticas.
+        - Envuelta lógica de envío (`sendMessage`, `sendMessageCustom`, `sendDirectMessageToNode`) para interceptar y cancelar el envío a nivel API cuando se detecte un opt-out.
+        - Configurado envío manual (`communications.php`) para pasar `$isAutomatic = false` y evitar bloqueos en chats individuales de asesores.
+        - Refactorizado mensaje de bienvenida (`orders.php`) para utilizar la clase unificada cliente en lugar de cURL crudo, integrándolo con el validador de opt-out.
+    3. **Microservicio Node.js**:
+        - En `sendText`, si `via === 'api'` (mensaje automático), se concatena el pie de página informativo en cursiva: `\n\n_Si deseas dejar de recibir notificaciones automáticas, responde "BAJA" o "NO"_*`.
+        - En `messages.upsert` de Baileys, se interceptan comandos en chats individuales (`BAJA`/`NO`/`STOP`/`SALIR` y `ALTA`/`ACTIVAR`/`START`). Al detectarlos, actualiza la base de datos de la empresa correspondiente con la preferencia del cliente, envía la confirmación de suscripción inmediata e interrumpe el loop (`continue`) previniendo respuestas incorrectas del bot de IA.
+- **Herramienta(s) Utilizada(s):** multi_replace_file_content, run_command, write_to_file.
+- **Resultado:** Archivos locales editados de forma limpia. Análisis de sintaxis PHP y Node pasaron con éxito.
+- **Verificación:** Sintaxis validada vía PHP y Node CLI sin errores detectados. Despliegue en producción pendiente de aprobación del usuario.

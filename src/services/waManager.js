@@ -828,6 +828,59 @@ async function _doInit(idEmpresa) {
                     emit(id, 'conversation:updated', { companyId: id, ...result.conversation });
                     // Fase 8: auto-respuesta IA (best-effort, no bloquea el ingest)
                     if (!result.message.from_me) {
+                        // Procesamiento de comandos Opt-out / Opt-in
+                        if (!result.isGroup && result.message?.body) {
+                            const cleanText = result.message.body.trim().toUpperCase();
+                            const optOutCommands = ['BAJA', 'NO', 'STOP', 'SALIR'];
+                            const optInCommands = ['ALTA', 'ACTIVAR', 'START'];
+                            const isOptOut = optOutCommands.includes(cleanText);
+                            const isOptIn = optInCommands.includes(cleanText);
+
+                            if (isOptOut || isOptIn) {
+                                log.info({ tenantId: id, jid: result.jid, command: cleanText }, 'Comando de suscripción detectado');
+                                
+                                // Resolver teléfono del cliente desde el JID
+                                let clientPhone = '';
+                                if (result.jid.includes('@s.whatsapp.net')) {
+                                    clientPhone = result.jid.replace('@s.whatsapp.net', '');
+                                } else {
+                                    const senderPn = m.key?.senderPn;
+                                    if (senderPn?.includes('@s.whatsapp.net')) {
+                                        clientPhone = senderPn.replace('@s.whatsapp.net', '');
+                                    } else {
+                                        const phoneJid = await lidMapping.resolvePhoneJid(pool, result.jid).catch(() => null);
+                                        if (phoneJid) clientPhone = phoneJid.replace('@s.whatsapp.net', '');
+                                    }
+                                }
+                                
+                                const cleanPhone = clientPhone.replace(/[^0-9]/g, '');
+                                const phoneSuffix = cleanPhone.slice(-9);
+                                
+                                if (phoneSuffix) {
+                                    const val = isOptOut ? 0 : 1;
+                                    try {
+                                        await pool.query(
+                                            "UPDATE customers SET recibir_notificaciones = ? WHERE phone LIKE ?",
+                                            [val, '%' + phoneSuffix]
+                                        );
+                                        log.info({ tenantId: id, phoneSuffix, val }, 'Estado de recibir_notificaciones actualizado en DB');
+                                    } catch (dbErr) {
+                                        log.error({ err: dbErr, tenantId: id, phoneSuffix }, 'Error al actualizar recibir_notificaciones en DB');
+                                    }
+                                }
+                                
+                                const replyMsg = isOptOut
+                                    ? "Has sido dado de baja de los mensajes automáticos del sistema. Seguirás recibiendo atención personalizada. Si deseas reactivarlos, escribe ALTA en cualquier momento."
+                                    : "Mensajes automáticos reactivados. Seguirás recibiendo las actualizaciones de tus órdenes y notificaciones de forma habitual.";
+                                
+                                await sendText(id, result.jid, replyMsg, { via: 'api' }).catch((sendErr) => {
+                                    log.error({ err: sendErr, tenantId: id, jid: result.jid }, 'Error al enviar confirmación de suscripción');
+                                });
+                                
+                                continue;
+                            }
+                        }
+
                         // Auto-asignación a vendedor histórico: al crear la
                         // conversación por primera vez, o al restaurarla
                         // desde papelera. Nunca para grupos. Si el cliente
@@ -1398,6 +1451,12 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
     const id = parseInt(idEmpresa, 10);
     const via = opts.via || 'api';
     const sentByUser = opts.sentByUser || null;
+
+    let finalBody = body;
+    if (via === 'api') {
+        finalBody = body + '\n\n_Si deseas dejar de recibir notificaciones automáticas, responde "BAJA" o "NO"_*';
+    }
+
     const s = sessions.get(id);
     if (!s || s.status !== 'READY') {
         const err = new Error(`Sesión de empresa ${id} no está READY (estado=${s?.status || 'NONE'}).`);
@@ -1406,7 +1465,7 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
             await conversationStore.recordOutbound(pool, {
                 jid,
                 wa_message_id: `FAIL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                body,
+                body: finalBody,
                 status: 'failed',
                 ts: Math.floor(Date.now() / 1000),
                 via,
@@ -1416,12 +1475,12 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
     }
 
     try {
-        const sent = await s.sock.sendMessage(jid, { text: body });
+        const sent = await s.sock.sendMessage(jid, { text: finalBody });
         const wa_message_id = sent?.key?.id;
         const ts = Number(sent?.messageTimestamp) || Math.floor(Date.now() / 1000);
         const pool = await tenantResolver.getPool(id);
         const result = await conversationStore.recordOutbound(pool, {
-            jid, wa_message_id, body, status: 'sent', ts, via,
+            jid, wa_message_id, body: finalBody, status: 'sent', ts, via,
         });
         if (result) {
             emit(id, 'message:new', { companyId: id, ...result.message, jid: result.jid });
@@ -1449,14 +1508,14 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
                 log.error({ err: e, tenantId: id, jid }, 'handoff manual falló');
             }
         }
-        return { wa_message_id, ts, jid, body, status: 'sent' };
+        return { wa_message_id, ts, jid, body: finalBody, status: 'sent' };
     } catch (e) {
         try {
             const pool = await tenantResolver.getPool(id);
             await conversationStore.recordOutbound(pool, {
                 jid,
                 wa_message_id: `FAIL-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                body,
+                body: finalBody,
                 status: 'failed',
                 ts: Math.floor(Date.now() / 1000),
                 via,
