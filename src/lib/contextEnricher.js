@@ -305,6 +305,107 @@ async function fetchSchedule(idEmpresa) {
 // Telas disponibles
 // ---------------------------------------------------------------------------
 
+function toTitleCase(str) {
+    if (!str) return '';
+    return str.split(/\s+/).map(word => {
+        if (!word) return '';
+        if (/^(dtf|dtfuv)$/i.test(word)) return word.toUpperCase();
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    }).join(' ');
+}
+
+function formatTelasCategorized(telas) {
+    const categories = {
+        casual: {
+            title: "Línea Casual / Algodón",
+            emoji: "👕",
+            match: (name) => /algod[oó]n|piqu[eé]|chemise/i.test(name),
+            items: []
+        },
+        deportiva: {
+            title: "Línea Deportiva / Dry Fit",
+            emoji: "⚡",
+            match: (name) => /dry\s*fit|atl[eé]tica|f[uú]tbol|deportiv/i.test(name),
+            items: []
+        },
+        elastica: {
+            title: "Línea Elástica (Licra)",
+            emoji: "🧘",
+            match: (name) => /licra|azuna|estefan[ií]a|eternity|sport\s*lat|sprint|el[aá]stic/i.test(name),
+            items: []
+        },
+        accesorios: {
+            title: "Accesorios y Otros",
+            emoji: "🎗️",
+            match: (name) => /cinta|razo|lanyard|dtf|cliente/i.test(name),
+            items: []
+        },
+        otras: {
+            title: "Otras Telas y Especialidades",
+            emoji: "🧥",
+            match: () => true,
+            items: []
+        }
+    };
+
+    for (const t of telas) {
+        let matched = false;
+        for (const catKey of ['casual', 'deportiva', 'elastica', 'accesorios']) {
+            if (categories[catKey].match(t.nombre)) {
+                categories[catKey].items.push(t);
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            categories['otras'].items.push(t);
+        }
+    }
+
+    const lines = [
+        "¿Qué tipo de tela prefieres para tu pedido? 👕",
+        "Estas son nuestras opciones organizadas para facilitarte la elección:\n"
+    ];
+
+    for (const catKey of ['casual', 'deportiva', 'elastica', 'otras', 'accesorios']) {
+        const cat = categories[catKey];
+        if (cat.items.length > 0) {
+            lines.push(`${cat.emoji} *${cat.title}:*`);
+            
+            if (catKey === 'elastica') {
+                const licras = [];
+                const nonLicras = [];
+                for (const item of cat.items) {
+                    if (/^licra/i.test(item.nombre)) {
+                        const subtype = item.nombre.replace(/^licra\s*\(?/i, '').replace(/\)?$/, '').trim();
+                        if (subtype) {
+                            licras.push(toTitleCase(subtype));
+                        } else {
+                            licras.push("Estándar");
+                        }
+                    } else {
+                        nonLicras.push(item.nombre);
+                    }
+                }
+                
+                if (licras.length > 0) {
+                    lines.push(`• Licra (${licras.join(', ')})`);
+                }
+                for (const nl of nonLicras) {
+                    lines.push(`• ${toTitleCase(nl)}`);
+                }
+            } else {
+                for (const item of cat.items) {
+                    lines.push(`• ${toTitleCase(item.nombre)}`);
+                }
+            }
+            lines.push(""); // empty line
+        }
+    }
+
+    return lines.join("\n").trim();
+}
+
 /**
  * Obtiene el catálogo de telas con su _id y lo formatea como texto para
  * que la IA use el _id (no el nombre) al completar el marker PRESUPUESTO_DATA.
@@ -316,11 +417,15 @@ async function fetchTelasContext(idEmpresa) {
     try {
         const telas = await telasClient.fetchTelasArray(idEmpresa);
         if (!telas.length) return null;
-        const lines = ['Telas disponibles (usar el _id numérico en el campo "tela" del bloque PRESUPUESTO_DATA, nunca el nombre):'];
+        
+        const formattedList = formatTelasCategorized(telas);
+        
+        const mappingLines = ['\n\nMapeo interno de _id (usar para submit_presupuesto, no mostrar al cliente):'];
         for (const t of telas) {
-            lines.push(`• _id:${t._id} — ${t.nombre}`);
+            mappingLines.push(`• ${t.nombre} -> _id: ${t._id}`);
         }
-        return lines.join('\n');
+        
+        return `${formattedList}${mappingLines.join('\n')}`;
     } catch (err) {
         log.warn({ err: err.message, idEmpresa }, 'fetchTelasContext: falló (no crítico)');
         return null;
@@ -496,6 +601,65 @@ async function fetchOrderContext(idEmpresa, phone) {
 // Punto de entrada público
 // ---------------------------------------------------------------------------
 
+function getProductEmoji(name) {
+    const n = name.toLowerCase();
+    if (/\b(franela|chemise|polo|camiseta|t-shirt|remera)\b/i.test(n)) return '👕';
+    if (/\b(gorra|cachucha|sombrero|cap)\b/i.test(n)) return '🧢';
+    if (/\b(su[eé]ter|sweater|buzo|chompa|chaqueta|abrigo|hoodie)\b/i.test(n)) return '🧥';
+    if (/\b(pantal[oó]n|jean|pants|jogger)\b/i.test(n)) return '👖';
+    if (/\b(bermuda|short)\b/i.test(n)) return '🩳';
+    return '✨';
+}
+
+function formatCatalogProducts(products) {
+    const formattedProducts = [];
+    for (const p of products) {
+        const emoji = getProductEmoji(p.name);
+        const nameCap = toTitleCase(p.name);
+        
+        let block = `${emoji} *${nameCap}:* [cod:${p.id}][idCat:${p.category_id || 0}]`;
+        if (p.description) {
+            block += ` (${p.description})`;
+        }
+        
+        const priceLines = [];
+        if (p.is_design) {
+            priceLines.push(`  • (diseño personalizado — solicita cotización)`);
+        } else if (p.prices && p.prices.length > 0) {
+            const sortedPrices = [...p.prices].sort((a, b) => {
+                const qtyA = parseInt((a.descripcion || '').match(/\d+/)?.[0] || '1', 10);
+                const qtyB = parseInt((b.descripcion || '').match(/\d+/)?.[0] || '1', 10);
+                return qtyA - qtyB;
+            });
+            
+            sortedPrices.forEach((pr, i) => {
+                const thisQty = parseInt((pr.descripcion || '').match(/\d+/)?.[0] || '1', 10);
+                const next = sortedPrices[i + 1];
+                const nextQty = next ? parseInt((next.descripcion || '').match(/\d+/)?.[0] || '99999', 10) : null;
+                
+                let rangeText = '';
+                if (nextQty) {
+                    const maxQty = nextQty - 1;
+                    if (thisQty === maxQty) {
+                        rangeText = `De ${thisQty} unidad`;
+                    } else {
+                        rangeText = `De ${thisQty} a ${maxQty} unidades`;
+                    }
+                } else {
+                    rangeText = `${thisQty} unidades o más`;
+                }
+                priceLines.push(`  • ${rangeText}: *$${pr.price.toFixed(2)}* c/u`);
+            });
+        } else {
+            priceLines.push(`  • Precio no especificado`);
+        }
+        
+        block += '\n' + priceLines.join('\n');
+        formattedProducts.push(block);
+    }
+    return formattedProducts.join('\n\n');
+}
+
 /**
  * Formatea el catálogo de productos para inyectar en el prompt.
  * Retorna null si no hay productos o hay error.
@@ -517,32 +681,13 @@ async function fetchProducts(idEmpresa, searchTerm) {
         const categoryTerm = catalog.products[0]?.categories?.[0]?.toLowerCase().trim() || null;
         log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length, categoryTerm }, 'fetchProducts: productos encontrados');
 
+        const formattedCatalog = formatCatalogProducts(catalog.products.slice(0, 10));
+
         const lines = [
             '⚠️ INSTRUCCIÓN INTERNA — NO MOSTRAR AL CLIENTE: Los marcadores [cod:X][idCat:X] son referencias para la función submit_presupuesto. Jamás los incluyas en tu respuesta al cliente.',
-            'Productos disponibles (precios UNITARIOS por tramo de cantidad):',
+            'Productos encontrados:',
+            formattedCatalog,
         ];
-        for (const p of catalog.products.slice(0, 10)) {
-            let line = `• ${p.name} [cod:${p.id}][idCat:${p.category_id || 0}]`;
-            if (p.is_design) {
-                line += ' (diseño personalizado — solicita cotización)';
-            } else if (p.prices && p.prices.length > 0) {
-                const priceStrings = p.prices.map((pr, i) => {
-                    const thisQty = parseInt((pr.descripcion || '').match(/\d+/)?.[0] || '1', 10);
-                    const next = p.prices[i + 1];
-                    const nextQty = next ? parseInt((next.descripcion || '').match(/\d+/)?.[0] || '99999', 10) : null;
-                    const range = nextQty ? `${thisQty}–${nextQty - 1} uds` : `${thisQty}+ uds`;
-                    return `$${pr.price.toFixed(2)}/unid (${range})`;
-                });
-                line += ` — ${priceStrings.join(', ')}`;
-            }
-            if (p.description) {
-                line += ` (${p.description})`;
-            }
-            if (p.categories && p.categories.length) {
-                line += ` [cats:${p.categories.join(', ')}]`;
-            }
-            lines.push(line);
-        }
         return { text: lines.join('\n'), categoryTerm };
     } catch (err) {
         log.error({
