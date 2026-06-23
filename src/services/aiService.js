@@ -564,7 +564,7 @@ function buildSystemInstruction(settings, dynamicContext = '', extraSystemContex
  *          null si IA está deshabilitada en el tenant o si el modelo no
  *          devolvió texto.
  */
-async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa, extraSystemContext = '', excludeGalleryUrls = [] }) {
+async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa, extraSystemContext = '', excludeGalleryUrls = [], registeredPhone = null }) {
     const settings = await loadSettings(pool);
     if (!settings || !settings.enabled) return null;
 
@@ -611,7 +611,7 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
             .filter((m) => !m.from_me && m.body)
             .slice(-4)
             .map((m) => m.body);
-        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid, recentUserTexts })
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid, recentUserTexts, registeredPhone })
             .catch((err) => {
                 log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
                 return '';

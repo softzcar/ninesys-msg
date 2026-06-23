@@ -196,7 +196,7 @@ const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisi
 // IMPORTANTE: los sub-patrones que terminan en palabras completas (ordenes?, pedido) pueden usar \b.
 // Los que terminan en prefijos (ord) causaban falsos negativos — se reemplazaron por palabras completas.
 // (?<!\w) en vez de \b: los acentuados (ó, é) son \W en JS y nunca forman \b
-const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*|mi\s+deuda|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
+const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*|(?:les?|te|le)\s+deb[oe]\w*|\bdeuda\b|\badeud\w*|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
 // Diseño gráfico: el cliente quiere AGREGAR un servicio de diseño (logo, dibujo,
 // arte gráfico) a su pedido, o pregunta qué servicios de diseño ofrecen.
 // DISTINTO de GALLERY_RE: "ver diseños" = ver fotos/modelos existentes (galería);
@@ -775,7 +775,7 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [] } = {}) {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [], registeredPhone = null } = {}) {
     const startTime = Date.now();
     const sections = [];
 
@@ -783,7 +783,11 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const isCompraDirecta = COMPRA_RE.test(lastUserMessage || '');
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
     const isOrderRequest = ORDER_RE.test(lastUserMessage || '');
-    const clientPhone = isOrderRequest ? extractPhoneFromJid(jid) : null;
+    // extractPhoneFromJid falla para JIDs @lid sin mapeo en wa_lid_phone_map.
+    // registeredPhone es el teléfono ya conocido vía customerLookup (tabla
+    // customers) cuando el cliente está registrado — sirve de respaldo para
+    // que la consulta de órdenes funcione también en esos casos.
+    const clientPhone = isOrderRequest ? (extractPhoneFromJid(jid) || (registeredPhone ? String(registeredPhone) : null)) : null;
     const isDesignRequest = DESIGN_RE.test(lastUserMessage || '');
 
     log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, isCompraDirecta, isDesignRequest, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');

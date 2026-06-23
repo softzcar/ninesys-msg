@@ -208,6 +208,10 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // Si el JID es @lid se resuelve primero el teléfono real vía wa_lid_phone_map.
         let resolvedJid = jid; // se sobreescribe si @lid → phone JID resuelto con éxito
         let clienteRegistradoCtx = '';
+        // Teléfono del cliente registrado (tabla customers), usado como respaldo
+        // para consultar órdenes/deuda cuando el JID es @lid y extractPhoneFromJid
+        // no puede resolver el teléfono real (sin mapeo en wa_lid_phone_map).
+        let registeredPhone = null;
         try {
             if (lidMapping.isLidJid(jid)) {
                 const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
@@ -223,6 +227,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 const cedula  = clienteRegistrado.cedula     || '';
                 const address = clienteRegistrado.address    || '';
                 const email   = clienteRegistrado.email      || '';
+                registeredPhone = phone || null;
                 clienteRegistradoCtx =
                     `\n=== CLIENTE REGISTRADO EN EL SISTEMA ===` +
                     `\nNombre: ${nombre}` +
@@ -285,6 +290,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 idEmpresa,
                 extraSystemContext: fullExtraContext,
                 excludeGalleryUrls: combinedExcludeUrls,
+                registeredPhone,
             }),
         ]);
 
