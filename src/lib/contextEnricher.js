@@ -595,7 +595,7 @@ const urlToGalleryTerm = new Map();
  * @returns {Promise<string|null>}
  */
 async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
-    if (!productTerm || productTerm.length < 2) return null;
+    if (!productTerm || productTerm.length < 2) return { instruction: null, totalImages: 0 };
 
     // Conservar el término original del usuario para la instrucción a Gemini.
     // El CDN puede tener la carpeta con un nombre diferente ("camiseta" para "franela"),
@@ -623,13 +623,13 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
 
     if (!images.length) {
         log.info({ idEmpresa, productTerm }, 'fetchGallery: carpeta vacía o inexistente');
-        return null;
+        return { instruction: null, totalImages: 0 };
     }
 
     const next = images.find((u) => !excludeUrls.includes(u));
     if (!next) {
         log.info({ idEmpresa, productTerm, shown: excludeUrls.length }, 'fetchGallery: todas las imágenes ya fueron enviadas');
-        return null;
+        return { instruction: null, totalImages: images.length };
     }
 
     // Guardar displayTerm (término del usuario, ej "franela") no productTerm
@@ -652,7 +652,7 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
     const afterNote = remaining > 0
         ? `Después de enviar esta quedarán ${remaining} imagen(es) más de "${displayTerm}" disponibles.`
         : `Esta es la última imagen de "${displayTerm}" disponible — todavía NO enviada al cliente.`;
-    return [
+    const instruction = [
         `=== INSTRUCCIÓN OBLIGATORIA DE IMAGEN ===`,
         `El cliente pidió ver "${displayTerm}". La siguiente imagen AÚN NO ha sido enviada.`,
         `URL a enviar AHORA: ${next}`,
@@ -662,6 +662,7 @@ async function fetchGallery(idEmpresa, productTerm, excludeUrls = []) {
         afterNote,
         `=== FIN INSTRUCCIÓN IMAGEN ===`,
     ].filter(Boolean).join('\n');
+    return { instruction, totalImages: images.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,22 +1094,30 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // Fase 2b — galería: fetchGallery resuelve automáticamente el nombre de carpeta CDN.
     // Paso 1: intento directo (CDN hace prefix matching). Paso 2 si vacío: lista carpetas
     // + Gemini Flash elige la más cercana semánticamente (franela → camiseta, etc.).
-    const gallery = (wantsGallery && galleryProductTerm)
+    const galleryResult = (wantsGallery && galleryProductTerm)
         ? await raceWithTimeout(
             fetchGallery(idEmpresa, galleryProductTerm, excludeGalleryUrls),
             12000,
             () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando galería')
         )
         : null;
+    const gallery = galleryResult?.instruction || null;
 
     const elapsed = Date.now() - startTime;
 
     // La instrucción de galería va PRIMERO para que Gemini no la ignore por ruido de
     // otras secciones. Las demás secciones (horario, telas, catálogo) van después.
+    //
+    // IMPORTANTE: la nota de "ya se mostraron todas" vs. "no hay imágenes" se decide
+    // con galleryResult.totalImages (específico de ESTE producto), NO con
+    // excludeGalleryUrls.length (global a toda la conversación) — antes se usaba el
+    // global como proxy, lo cual le decía a Gemini "ya viste todas las fotos de X"
+    // incluso cuando X nunca tuvo ninguna foto (solo se habían mostrado fotos de OTRO
+    // producto antes), y Gemini terminaba inventando una URL para "cumplir".
     if (gallery) {
         sections.unshift(gallery); // al inicio, máxima prioridad
         log.debug({ idEmpresa }, 'contextEnricher: galería inyectada (primero)');
-    } else if (wantsGallery && galleryProductTerm && excludeGalleryUrls.length > 0) {
+    } else if (wantsGallery && galleryProductTerm && galleryResult && galleryResult.totalImages > 0) {
         sections.unshift(`NOTA INTERNA: Ya se enviaron todas las fotos disponibles de "${galleryProductTerm}" en esta conversación. Si el cliente pide más, dile que ya le mostraste todas las que tienes. NO digas que no tienes imágenes — sí las tienes, pero ya las mostraste todas.`);
         log.debug({ idEmpresa, galleryProductTerm }, 'contextEnricher: nota "galería agotada" inyectada');
     } else if (wantsGallery && galleryProductTerm) {

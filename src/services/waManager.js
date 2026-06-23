@@ -446,6 +446,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         }
 
         // Enviar imágenes de galería (serial, skip silencioso por imagen).
+        let anyImageSent = false;
         for (const url of imgUrls) {
             const downloaded = await downloadImageBuffer(url);
             if (!downloaded) continue;
@@ -457,12 +458,25 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                     caption: '',
                     bodyForDb: url,
                 }, { via: 'ai' });
+                anyImageSent = true;
                 // Registrar URL como enviada para no repetirla en el siguiente turno.
                 if (!_sentGalleryUrls.has(jid)) _sentGalleryUrls.set(jid, new Set());
                 _sentGalleryUrls.get(jid).add(url);
             } catch (e) {
                 log.warn({ jid, url, err: e.message }, 'maybeAutoReply: skip imagen — fallo de envío');
             }
+        }
+
+        // RED DE SEGURIDAD: si se prometió una imagen (texto tipo "¡Aquí te
+        // muestro!") pero ninguna pudo descargarse/enviarse (ej. URL inventada
+        // por Gemini que pasó el whitelist de dominio pero no existe, 404), no
+        // dejar al cliente esperando una foto que nunca llega — avisar.
+        if (imgUrls.length > 0 && !anyImageSent) {
+            log.warn({ jid, imgUrls }, 'maybeAutoReply: ninguna imagen de galería pudo enviarse — notificando al cliente');
+            sendText(idEmpresa, jid,
+                'Disculpa, tuve un problema técnico al enviarte esa foto. ¿Puedes decirme de nuevo qué producto quieres ver, o prefieres que te ayude con otra cosa? 🙏',
+                { via: 'ai' }
+            ).catch(() => {});
         }
 
         // ── Escenario 1: IA no puede resolver / cliente frustrado ─────────────
