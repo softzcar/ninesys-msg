@@ -573,27 +573,31 @@ async function fetchOrderContext(idEmpresa, phone) {
             `1. Ya tienes TODAS las órdenes de ${result.customer_name || 'este cliente'} — NO pidas número de orden, NO digas que no tienes información.`,
             `2. Responde directamente usando los datos de abajo: saldo, productos, estado, fecha de entrega.`,
             `3. Esta consulta NO requiere asesor humano — NO incluyas [HANDOFF_IA].`,
+            `4. Presenta cada orden EXACTAMENTE como está estructurada abajo, en líneas separadas — NUNCA la condenses en una sola línea de texto corrido ni uses "|" como separador.`,
         ];
         let totalDeuda = 0;
         for (const o of result.ordenes) {
             const deuda = Number(o.saldo_pendiente);
             totalDeuda += deuda;
-            lines.push(
-                `• Orden #${o.id_orden} | Estado: ${fmtStatus(o.status)} | ` +
-                `Entrega estimada: ${fmtDate(o.fecha_entrega)} | ` +
-                `Total: ${fmt(o.pago_total)} | ` +
-                `Abonos: ${fmt(o.total_abonos)} | ` +
-                (o.total_descuentos > 0 ? `Descuentos: ${fmt(o.total_descuentos)} | ` : '') +
-                `Saldo pendiente: ${fmt(deuda)}`
-            );
+            lines.push('');
+            lines.push(`📄 *Orden #${o.id_orden}*`);
+            lines.push(`• Estado: ${fmtStatus(o.status)}`);
+            lines.push(`• 📅 Entrega estimada: ${fmtDate(o.fecha_entrega)}`);
+            lines.push(`• Total: ${fmt(o.pago_total)}`);
+            lines.push(`• Abonos: ${fmt(o.total_abonos)}`);
+            if (o.total_descuentos > 0) {
+                lines.push(`• Descuentos: ${fmt(o.total_descuentos)}`);
+            }
+            lines.push(`• 💰 Saldo pendiente: ${fmt(deuda)}`);
             if (Array.isArray(o.productos) && o.productos.length) {
                 for (const p of o.productos) {
-                    lines.push(`  - ${p.name} × ${p.cantidad}${p.detalle_tallas ? ` (${p.detalle_tallas})` : ''}`);
+                    lines.push(`   - ${p.name} × ${p.cantidad}${p.detalle_tallas ? ` (${p.detalle_tallas})` : ''}`);
                 }
             }
         }
         if (result.ordenes.length > 1) {
-            lines.push(`Total adeudado (todas las órdenes): ${fmt(totalDeuda)}`);
+            lines.push('');
+            lines.push(`💰 *Total adeudado (todas las órdenes): ${fmt(totalDeuda)}*`);
         }
 
         log.info({ idEmpresa, phone, ordenes: result.ordenes.length, totalDeuda }, 'fetchOrderContext: inyectando');
