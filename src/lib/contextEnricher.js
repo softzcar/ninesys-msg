@@ -196,7 +196,10 @@ const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisi
 // IMPORTANTE: los sub-patrones que terminan en palabras completas (ordenes?, pedido) pueden usar \b.
 // Los que terminan en prefijos (ord) causaban falsos negativos — se reemplazaron por palabras completas.
 // (?<!\w) en vez de \b: los acentuados (ó, é) son \W en JS y nunca forman \b
-const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*|(?:les?|te|le)\s+deb[oe]\w*|\bdeuda\b|\badeud\w*|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
+// "cuánto...deb*" y "les/te/le...deb*" toleran hasta 2-3 palabras intermedias
+// (ej. "cuánto DINERO les ESTOY debiendo") — la gente no escribe estas frases
+// "pegadas"; exigir adyacencia exacta causa falsos negativos recurrentes.
+const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto(?:\s+\w+){0,3}?\s+deb\w*|(?:les?|te|le)(?:\s+\w+){0,2}?\s+deb\w*|\bdeuda\b|\badeud\w*|\bdebiendo\b|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
 // Diseño gráfico: el cliente quiere AGREGAR un servicio de diseño (logo, dibujo,
 // arte gráfico) a su pedido, o pregunta qué servicios de diseño ofrecen.
 // DISTINTO de GALLERY_RE: "ver diseños" = ver fotos/modelos existentes (galería);
