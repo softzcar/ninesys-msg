@@ -779,9 +779,11 @@ async function fetchOrderContext(idEmpresa, phone) {
  * decidir cuál servicio agregar como ítem adicional del presupuesto.
  *
  * @param {number} idEmpresa
+ * @param {string} [jid] - si se provee, memoriza los servicios encontrados
+ *                         en shownProductsByJid para esta conversación.
  * @returns {Promise<string|null>}
  */
-async function fetchDesignServices(idEmpresa) {
+async function fetchDesignServices(idEmpresa, jid = null) {
     try {
         const payload = await catalogClient.fetchDesignCatalog(idEmpresa);
         const products = payload?.products;
@@ -799,6 +801,8 @@ async function fetchDesignServices(idEmpresa) {
             log.warn({ idEmpresa }, 'fetchDesignServices: productos de diseño sin precio usable');
             return null;
         }
+
+        rememberShownProducts(jid, usable);
 
         const lines = [
             `=== SERVICIOS DE DISEÑO GRÁFICO DISPONIBLES ===`,
@@ -889,15 +893,69 @@ function formatCatalogProducts(products) {
     return formattedProducts.join('\n\n');
 }
 
+// ---------------------------------------------------------------------------
+// Memoria persistente de productos cotizados — sobrevive entre turnos
+// ---------------------------------------------------------------------------
+//
+// El marcador [cod:X][idCat:X] de un producto solo aparecía en el contexto del
+// turno exacto en que ese producto se buscaba, y se le instruye a la IA NUNCA
+// mostrarlo en su respuesta visible (por lo que tampoco queda en el historial
+// de mensajes). En presupuestos de varios productos discutidos a lo largo de
+// muchos turnos (ej. chaqueta → gorra → franela → diseño de logo), para el
+// momento de la confirmación final la IA ya no tenía cod/idCategory de los
+// productos más antiguos — y, siguiendo la regla de "nunca uses cod=0",
+// terminaba abortando el presupuesto COMPLETO aunque los productos sí existen
+// en el catálogo. Este mapa acumula cada producto mostrado por jid y se
+// reinyecta SIEMPRE (no solo cuando vuelve a buscarse), hasta que el
+// presupuesto se confirma con éxito (clearShownProducts, llamado desde
+// waManager.js).
+const shownProductsByJid = new Map(); // jid -> Map<nameLower, {name, cod, idCategory}>
+
+function rememberShownProducts(jid, products) {
+    if (!jid || !Array.isArray(products)) return;
+    let memo = shownProductsByJid.get(jid);
+    for (const p of products) {
+        if (!p?.id || !p?.category_id) continue; // no memorizar entradas incompletas
+        if (!memo) {
+            memo = new Map();
+            shownProductsByJid.set(jid, memo);
+        }
+        memo.set(String(p.name).toLowerCase(), { name: p.name, cod: p.id, idCategory: p.category_id });
+    }
+}
+
+function formatShownProductsMemo(jid) {
+    const memo = jid ? shownProductsByJid.get(jid) : null;
+    if (!memo || !memo.size) return null;
+    const lines = [
+        `=== PRODUCTOS YA COTIZADOS EN ESTA CONVERSACIÓN (memoria persistente) ===`,
+        `INSTRUCCIÓN CRÍTICA: Si necesitas el cod/idCategory de un producto que el cliente mencionó hace varios turnos (ej. al confirmar el presupuesto final con submit_presupuesto), búscalo AQUÍ — esta lista no se borra durante la conversación, a diferencia del catálogo de "Productos encontrados" que solo aparece en el turno en que se buscó.`,
+    ];
+    for (const { name, cod, idCategory } of memo.values()) {
+        lines.push(`• ${name}: [cod:${cod}][idCat:${idCategory}]`);
+    }
+    return lines.join('\n');
+}
+
+/**
+ * Limpia la memoria de productos cotizados de una conversación. Llamar tras
+ * confirmar exitosamente un presupuesto (el carrito de esa cotización ya cerró).
+ */
+function clearShownProducts(jid) {
+    if (jid) shownProductsByJid.delete(jid);
+}
+
 /**
  * Formatea el catálogo de productos para inyectar en el prompt.
  * Retorna null si no hay productos o hay error.
  *
  * @param {number} idEmpresa
  * @param {string} searchTerm
+ * @param {string} [jid] - si se provee, memoriza los productos encontrados
+ *                         en shownProductsByJid para esta conversación.
  * @returns {Promise<string|null>}
  */
-async function fetchProducts(idEmpresa, searchTerm) {
+async function fetchProducts(idEmpresa, searchTerm, jid = null) {
     if (!searchTerm || searchTerm.length < 2) return null;
 
     try {
@@ -909,6 +967,8 @@ async function fetchProducts(idEmpresa, searchTerm) {
         }
         const categoryTerm = catalog.products[0]?.categories?.[0]?.toLowerCase().trim() || null;
         log.info({ idEmpresa, finalSearch: searchTerm, productCount: catalog.products.length, categoryTerm }, 'fetchProducts: productos encontrados');
+
+        rememberShownProducts(jid, catalog.products);
 
         const formattedCatalog = formatCatalogProducts(catalog.products.slice(0, 10));
 
@@ -1018,7 +1078,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         // Servicios de diseño gráfico — solo si el cliente menciona logo/dibujo/arte personalizado
         isDesignRequest
             ? raceWithTimeout(
-                fetchDesignServices(idEmpresa),
+                fetchDesignServices(idEmpresa, jid),
                 8000,
                 () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando servicios de diseño')
             )
@@ -1080,7 +1140,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const catalogSearchTerm = resolvedProductTerm || galleryProductTerm;
     const productResult = catalogSearchTerm
         ? await raceWithTimeout(
-            fetchProducts(idEmpresa, catalogSearchTerm),
+            fetchProducts(idEmpresa, catalogSearchTerm, jid),
             15000,
             () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando catálogo')
         )
@@ -1089,6 +1149,16 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     if (productResult?.text) {
         sections.push(productResult.text);
         log.debug({ idEmpresa }, 'contextEnricher: catálogo inyectado');
+    }
+
+    // Memoria persistente de productos ya cotizados — se inyecta SIEMPRE
+    // (incluso si este turno no buscó ningún producto nuevo), para que la IA
+    // siga teniendo el cod/idCategory de ítems mencionados muchos turnos atrás
+    // al momento de armar el array "items" de submit_presupuesto.
+    const shownMemo = formatShownProductsMemo(jid);
+    if (shownMemo) {
+        sections.push(shownMemo);
+        log.debug({ idEmpresa }, 'contextEnricher: memoria de productos cotizados inyectada');
     }
 
     // Fase 2b — galería: fetchGallery resuelve automáticamente el nombre de carpeta CDN.
@@ -1154,4 +1224,6 @@ module.exports = {
     _urlToGalleryTerm: urlToGalleryTerm,
     _classifyMessage: classifyMessage,
     _extractProductTerm: extractProductTerm,
+    _formatShownProductsMemo: formatShownProductsMemo,
+    clearShownProducts,
 };

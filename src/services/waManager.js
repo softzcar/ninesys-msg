@@ -43,7 +43,7 @@ const customerLookup = require('./customerLookup');
 const lidMapping = require('./lidMapping');
 const presupuestoService = require('./presupuestoService');
 const { classifyHandoffIntent } = require('../lib/intentClassifier');
-const { _urlToGalleryTerm } = require('../lib/contextEnricher');
+const { _urlToGalleryTerm, clearShownProducts } = require('../lib/contextEnricher');
 const log = require('../lib/logger').createLogger('waManager');
 
 // Throttle anti-loop por jid: máximo 1 auto-respuesta IA cada N ms.
@@ -998,6 +998,8 @@ async function _doInit(idEmpresa) {
                                         let msg;
                                         if (ok) {
                                             msg = `Tu presupuesto #${id_presupuesto} ha sido generado. Un asesor revisará tu pedido y te contactará en breve.`;
+                                            // Carrito cerrado: limpiar memoria de productos cotizados de esta conversación.
+                                            clearShownProducts(result.jid);
                                         } else if (reason === 'invalid_catalog') {
                                             msg = 'No pude generar el presupuesto porque uno o más productos no están en nuestro catálogo. Un asesor te contactará para ayudarte directamente.';
                                         } else {
