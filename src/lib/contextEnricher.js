@@ -20,7 +20,7 @@
  *   Si no hay resultados, simplemente no contamina el contexto.
  */
 
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenAI, Type } = require('@google/genai');
 const businessHoursClient = require('./businessHoursClient');
 const businessHours = require('./businessHours');
 const catalogClient = require('./catalogClient');
@@ -126,30 +126,30 @@ const SAFE_FALLBACK = Object.freeze({
 });
 
 const CLASSIFY_SCHEMA = {
-    type: 'object',
+    type: Type.OBJECT,
     properties: {
         productTerm: {
-            type: 'string',
+            type: Type.STRING,
             description: 'Término de prenda normalizado en singular y minúsculas, o la cadena "null" (como texto) si no se menciona ninguna prenda/producto.',
         },
         wantsGallery: {
-            type: 'boolean',
+            type: Type.BOOLEAN,
             description: 'true si el cliente quiere VER fotos/imágenes/modelos/diseños existentes del producto.',
         },
         wantsQuote: {
-            type: 'boolean',
+            type: Type.BOOLEAN,
             description: 'true si el cliente pide presupuesto, cotización o quiere cotizar.',
         },
         wantsOrderInfo: {
-            type: 'boolean',
+            type: Type.BOOLEAN,
             description: 'true si el cliente pregunta por sus pedidos, órdenes, saldo, deuda, abonos, estado de entrega o qué compró antes.',
         },
         wantsDesignInfo: {
-            type: 'boolean',
+            type: Type.BOOLEAN,
             description: 'true si el cliente quiere agregar/cotizar un servicio de diseño gráfico (logo, dibujo, arte, redibujo) a su pedido.',
         },
         isCompraDirecta: {
-            type: 'boolean',
+            type: Type.BOOLEAN,
             description: 'true si el cliente expresa intención de comprar/pedir ahora, con cantidad o verbo de compra explícito.',
         },
     },
@@ -256,6 +256,11 @@ async function classifyMessage(message, context = {}) {
                     maxOutputTokens: 256,
                     responseMimeType: 'application/json',
                     responseSchema: CLASSIFY_SCHEMA,
+                    // Sin esto, el modelo puede gastar el presupuesto de
+                    // maxOutputTokens en razonamiento interno antes de emitir
+                    // el JSON, truncándolo (mismo problema ya resuelto para
+                    // generateReply en aiService.js).
+                    thinkingConfig: { thinkingBudget: 0 },
                 },
             });
             const raw = JSON.parse(res?.text || '{}');
