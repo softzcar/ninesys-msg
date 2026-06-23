@@ -32,7 +32,14 @@ const contextEnricher = require('../lib/contextEnricher');
 
 // Cuántos mensajes de historial inyectamos al prompt. Suficiente para
 // continuidad conversacional sin disparar tokens.
-const DEFAULT_HISTORY_LIMIT = 12;
+// Subido de 12 a 30: con 12, browsear 2-3 fotos de un segundo producto
+// (cada foto = 3 mensajes: pregunta + texto + imagen) ya bastaba para
+// expulsar de la ventana los datos de un producto cotizado previamente
+// en el mismo presupuesto (cantidades, tela, diseño), causando que el
+// agente "olvidara" un pedido ya confirmado. Esto es un alivio inmediato;
+// la solución de fondo es mantener un resumen persistente del presupuesto
+// en curso que no dependa de la ventana de historial (ver nota de tarea).
+const DEFAULT_HISTORY_LIMIT = 30;
 
 // ---------- Hardening Gemini (Fase 9.2) ----------
 // Timeout duro por intento. Gemini-flash promedia 1-3s; 8s deja margen
