@@ -101,6 +101,65 @@ async function fetchCatalog(idEmpresa, searchTerm) {
 }
 
 /**
+ * Obtiene el catálogo de SOLO productos de diseño gráfico (es_diseno=1) de una
+ * empresa, vía el endpoint de catálogo con only_design=1. No lanza excepciones.
+ * Usa la misma cache que fetchCatalog (clave fija, no depende de searchTerm).
+ *
+ * @param {number} idEmpresa
+ * @returns {Promise<object|null>} respuesta del endpoint o null si falla
+ */
+async function fetchDesignCatalog(idEmpresa) {
+    const id = parseInt(idEmpresa, 10);
+    if (!Number.isInteger(id) || id <= 0) {
+        log.warn({ idEmpresa }, 'id_empresa inválido — no se consulta catálogo de diseño');
+        return null;
+    }
+
+    const cacheKey = '__only_design__';
+
+    // Cache hit fresco
+    const companyCache = cache.get(id);
+    if (companyCache) {
+        const entry = companyCache.get(cacheKey);
+        const now = Date.now();
+        if (entry && now - entry.fetchedAt < CACHE_TTL_MS) {
+            return entry.value;
+        }
+    }
+
+    try {
+        log.info({ id }, 'catalogClient: solicitando catálogo de diseño (only_design=1)');
+
+        const res = await http.get(`/internal/catalog/${id}`, {
+            params: { only_design: 1 },
+            headers: { Authorization: String(id) },
+        });
+
+        log.info({ id, status: res.status }, 'catalogClient: respuesta de diseño recibida');
+
+        const payload = res.data;
+        if (!payload || typeof payload !== 'object') {
+            log.warn({ tenantId: id }, 'fetchDesignCatalog: respuesta 200 pero payload inválido');
+            return null;
+        }
+
+        const now = Date.now();
+        if (!cache.has(id)) cache.set(id, new Map());
+        cache.get(id).set(cacheKey, { value: payload, fetchedAt: now });
+
+        return payload;
+    } catch (err) {
+        const status = err.response?.status;
+        const reason = err.response?.data?.error || err.code || err.message;
+        log.error(
+            { tenantId: id, status, reason, message: err.message, code: err.code },
+            'fetchDesignCatalog falló'
+        );
+        return null;
+    }
+}
+
+/**
  * Invalida el cache del catálogo para una empresa (o todo si se omite).
  * Útil cuando se actualiza el catálogo.
  */
@@ -115,6 +174,7 @@ function invalidate(idEmpresa) {
 
 module.exports = {
     fetchCatalog,
+    fetchDesignCatalog,
     invalidate,
     _state: { cache },
 };

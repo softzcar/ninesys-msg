@@ -197,6 +197,13 @@ const COMPRA_RE = /\b(quiero\s+(comprar|pedir|ordenar|hacer\s+un\s+pedido)|quisi
 // Los que terminan en prefijos (ord) causaban falsos negativos — se reemplazaron por palabras completas.
 // (?<!\w) en vez de \b: los acentuados (ó, é) son \W en JS y nunca forman \b
 const ORDER_RE = /(?<!\w)(pedidos?|mis?\s+[oó]rdenes?|mi\s+[oó]rdene?|[oó]rdenes|tengo\s+\w+\s*[oó]rdenes?|la\s+orden\b|orden\s+#?\d|cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*|mi\s+deuda|saldo|abonos?|cu[aá]ndo\s+(?:me\s+)?entreg|estado\s+de\s+mi|falta\s+(?:por\s+)?pagar|cu[aá]nto\s+(?:me\s+)?falt\w*|cu[aá]nto\s+queda|pagu[eé]|pague|ya\s+pagu[eé]|pagado|mis?\s+compras?|product[oa]s?\s+de\s+(?:la\s+|esa\s+|mi\s+)?[oó]rdenes?|product[oa]s?\s+del?\s+pedido|qu[eé]\s+(?:ped[íi]|compr[eé])|detalle\s+de\s+(?:la\s+|mi\s+|esa\s+)?[oó]rdenes?|items?\s+de\s+(?:la\s+|mi\s+))/i;
+// Diseño gráfico: el cliente quiere AGREGAR un servicio de diseño (logo, dibujo,
+// arte gráfico) a su pedido, o pregunta qué servicios de diseño ofrecen.
+// DISTINTO de GALLERY_RE: "ver diseños" = ver fotos/modelos existentes (galería);
+// esto es sobre crear/redibujar un logo o arte para imprimir/estampar en la prenda.
+// No incluye la palabra suelta "diseño"/"diseños" (eso es dominio de GALLERY_RE),
+// solo frases específicas de servicio, para evitar falsos positivos cruzados.
+const DESIGN_RE = /\b(logo|logotipo|dibujo|arte\s+gr[aá]fico|ilustraci[oó]n|estampado\s+personalizado|mockup|bordado\s+personalizado|dise[ñn]o\s+gr[aá]fico|redibuj\w*|servicios?\s+de\s+dise[ñn]o)\b/i;
 
 /**
  * Extrae el número de teléfono de un JID de WhatsApp.
@@ -598,6 +605,63 @@ async function fetchOrderContext(idEmpresa, phone) {
 }
 
 // ---------------------------------------------------------------------------
+// Servicios de diseño gráfico (logo, dibujo, arte personalizado)
+// ---------------------------------------------------------------------------
+
+/**
+ * Obtiene el catálogo de servicios de diseño gráfico (es_diseno=1) de la
+ * empresa y lo formatea con instrucciones explícitas para que Gemini pueda
+ * decidir cuál servicio agregar como ítem adicional del presupuesto.
+ *
+ * @param {number} idEmpresa
+ * @returns {Promise<string|null>}
+ */
+async function fetchDesignServices(idEmpresa) {
+    try {
+        const payload = await catalogClient.fetchDesignCatalog(idEmpresa);
+        const products = payload?.products;
+        if (!Array.isArray(products) || !products.length) {
+            log.info({ idEmpresa }, 'fetchDesignServices: sin productos de diseño');
+            return null;
+        }
+
+        // Solo productos con precio plano real (excluye servicios sin tramo de
+        // precio configurado, ej. modificadores a $0 que no son facturables).
+        const usable = products.filter(
+            (p) => Array.isArray(p.prices) && p.prices.length > 0 && Number(p.prices[0].price) > 0
+        );
+        if (!usable.length) {
+            log.warn({ idEmpresa }, 'fetchDesignServices: productos de diseño sin precio usable');
+            return null;
+        }
+
+        const lines = [
+            `=== SERVICIOS DE DISEÑO GRÁFICO DISPONIBLES ===`,
+            `INSTRUCCIONES CRÍTICAS:`,
+            `1. Si el cliente, durante una cotización, menciona que quiere agregar un logotipo, dibujo u otro arte gráfico a su pedido, agrega UNO de los servicios de abajo como ÍTEM ADICIONAL en el array "items" de submit_presupuesto (además del producto principal). NO lo pongas solo en "obs": debe ir como ítem real con su propio cod/idCategory/precio.`,
+            `2. Regla de inferencia — cuál servicio usar según lo que diga el cliente:`,
+            `   - Logo NUEVO (no tiene uno) → "Diseño de Logo".`,
+            `   - Ya tiene un logo y solo pide ajustarlo/redibujarlo/adaptarlo → "Redibujo de Logo".`,
+            `   - Ambiguo, o cualquier otro arte gráfico (dibujo, ilustración, estampado personalizado, etc.) → "Diseño Gráfico" (genérico).`,
+            `3. Usa EXACTAMENTE el cod, idCategory y precio de abajo — NUNCA inventes otro precio ni otro servicio.`,
+            `4. La "cantidad" de este ítem SIEMPRE es 1, sin importar cuántas unidades del producto principal pida el cliente — es una tarifa única por presupuesto, NO se multiplica.`,
+            `5. Informa el precio de este servicio al cliente como parte del resumen del presupuesto, igual que los demás ítems.`,
+        ];
+
+        for (const p of usable) {
+            const price = Number(p.prices[0].price);
+            lines.push(`• ${p.name}: [cod:${p.id}][idCat:${p.category_id || 0}] — $${price.toFixed(2)} (tarifa única)`);
+        }
+
+        log.info({ idEmpresa, count: usable.length }, 'fetchDesignServices: inyectando');
+        return lines.join('\n');
+    } catch (err) {
+        log.warn({ err: err.message, idEmpresa }, 'fetchDesignServices: falló (no crítico)');
+        return null;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Punto de entrada público
 // ---------------------------------------------------------------------------
 
@@ -720,8 +784,9 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
     const isOrderRequest = ORDER_RE.test(lastUserMessage || '');
     const clientPhone = isOrderRequest ? extractPhoneFromJid(jid) : null;
+    const isDesignRequest = DESIGN_RE.test(lastUserMessage || '');
 
-    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, isCompraDirecta, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');
+    log.info({ idEmpresa, message: lastUserMessage, intent: actionIntent, isOrderRequest, isCompraDirecta, isDesignRequest, hasPhone: !!clientPhone }, 'enrichContext: INICIANDO');
 
     // Helper para crear un Promise.race con clearTimeout automático.
     function raceWithTimeout(promise, ms, onTimeout) {
@@ -738,7 +803,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     // Fase 1 — todo lo independiente corre en paralelo.
     // Schedule y telas se saltan en solicitudes de galería: son irrelevantes y
     // solo añaden ruido que interfiere con la instrucción de imagen.
-    const [resolvedProductTerm, schedule, telas, orderCtx] = await Promise.all([
+    const [resolvedProductTerm, schedule, telas, orderCtx, designCtx] = await Promise.all([
         // Extraer término de producto del mensaje (Gemini Flash, temperatura 0)
         (lastUserMessage && lastUserMessage.length >= 2)
             ? raceWithTimeout(
@@ -774,6 +839,15 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
                 () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando órdenes')
             )
             : Promise.resolve(null),
+
+        // Servicios de diseño gráfico — solo si el cliente menciona logo/dibujo/arte personalizado
+        isDesignRequest
+            ? raceWithTimeout(
+                fetchDesignServices(idEmpresa),
+                8000,
+                () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando servicios de diseño')
+            )
+            : Promise.resolve(null),
     ]);
 
     if (schedule) {
@@ -791,6 +865,10 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
         log.debug({ idEmpresa }, 'contextEnricher: órdenes inyectadas');
     } else if (isOrderRequest && !clientPhone) {
         log.info({ idEmpresa, jid }, 'contextEnricher: pregunta de orden pero sin teléfono en JID — omitido');
+    }
+    if (designCtx) {
+        sections.push(designCtx);
+        log.debug({ idEmpresa }, 'contextEnricher: servicios de diseño inyectados');
     }
 
     // No queremos forzar una nueva imagen de galería si el cliente está haciendo una
@@ -896,6 +974,7 @@ module.exports = {
     _fetchProducts: fetchProducts,
     _fetchGallery: fetchGallery,
     _fetchOrderContext: fetchOrderContext,
+    _fetchDesignServices: fetchDesignServices,
     _extractPhoneFromJid: extractPhoneFromJid,
     _decimalToHHMM: decimalToHHMM,
     _urlToGalleryTerm: urlToGalleryTerm,
