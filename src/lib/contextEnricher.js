@@ -567,40 +567,67 @@ async function fetchOrderContext(idEmpresa, phone) {
             return map[s] || s || '-';
         };
 
+        // Separar órdenes con saldo pendiente real de las ya pagadas/sin deuda.
+        // Las preguntas de "cuánto debo/saldo" deben responderse SOLO con las
+        // primeras; las segundas solo sirven para consultas de estado de un
+        // pedido puntual (ver instrucciones inyectadas abajo).
+        const conDeuda = result.ordenes.filter((o) => Number(o.saldo_pendiente) > 0);
+        const sinDeuda = result.ordenes.filter((o) => Number(o.saldo_pendiente) <= 0);
+
         const lines = [
             `=== ÓRDENES DEL CLIENTE (datos en tiempo real) ===`,
             `INSTRUCCIONES CRÍTICAS:`,
             `1. Ya tienes TODAS las órdenes de ${result.customer_name || 'este cliente'} — NO pidas número de orden, NO digas que no tienes información.`,
-            `2. Responde directamente usando los datos de abajo: saldo, productos, estado, fecha de entrega.`,
+            `2. Si el cliente pregunta cuánto debe / su saldo / su deuda: responde ÚNICAMENTE con las órdenes de la sección "CON SALDO PENDIENTE" de abajo. NUNCA menciones ni cuentes las órdenes de la sección "YA PAGADAS / SIN DEUDA" en una respuesta de saldo o deuda — esa sección es solo para responder si el cliente pregunta por el estado de un pedido específico.`,
             `3. Esta consulta NO requiere asesor humano — NO incluyas [HANDOFF_IA].`,
             `4. Presenta cada orden EXACTAMENTE como está estructurada abajo, en líneas separadas — NUNCA la condenses en una sola línea de texto corrido ni uses "|" como separador.`,
         ];
-        let totalDeuda = 0;
-        for (const o of result.ordenes) {
-            const deuda = Number(o.saldo_pendiente);
-            totalDeuda += deuda;
+
+        const pushOrden = (o, conDetalle = true) => {
             lines.push('');
             lines.push(`📄 *Orden #${o.id_orden}*`);
             lines.push(`• Estado: ${fmtStatus(o.status)}`);
             lines.push(`• 📅 Entrega estimada: ${fmtDate(o.fecha_entrega)}`);
-            lines.push(`• Total: ${fmt(o.pago_total)}`);
-            lines.push(`• Abonos: ${fmt(o.total_abonos)}`);
-            if (o.total_descuentos > 0) {
-                lines.push(`• Descuentos: ${fmt(o.total_descuentos)}`);
+            if (conDetalle) {
+                lines.push(`• Total: ${fmt(o.pago_total)}`);
+                lines.push(`• Abonos: ${fmt(o.total_abonos)}`);
+                if (o.total_descuentos > 0) {
+                    lines.push(`• Descuentos: ${fmt(o.total_descuentos)}`);
+                }
             }
-            lines.push(`• 💰 Saldo pendiente: ${fmt(deuda)}`);
+            lines.push(`• 💰 Saldo pendiente: ${fmt(Number(o.saldo_pendiente))}`);
             if (Array.isArray(o.productos) && o.productos.length) {
                 for (const p of o.productos) {
                     lines.push(`   - ${p.name} × ${p.cantidad}${p.detalle_tallas ? ` (${p.detalle_tallas})` : ''}`);
                 }
             }
-        }
-        if (result.ordenes.length > 1) {
-            lines.push('');
-            lines.push(`💰 *Total adeudado (todas las órdenes): ${fmt(totalDeuda)}*`);
+        };
+
+        let totalDeuda = 0;
+        lines.push('');
+        lines.push('--- CON SALDO PENDIENTE (usar para preguntas de deuda/saldo) ---');
+        if (conDeuda.length) {
+            for (const o of conDeuda) {
+                totalDeuda += Number(o.saldo_pendiente);
+                pushOrden(o, true);
+            }
+            if (conDeuda.length > 1) {
+                lines.push('');
+                lines.push(`💰 *Total adeudado (todas las órdenes con saldo pendiente): ${fmt(totalDeuda)}*`);
+            }
+        } else {
+            lines.push('(El cliente no tiene ninguna orden con saldo pendiente en este momento.)');
         }
 
-        log.info({ idEmpresa, phone, ordenes: result.ordenes.length, totalDeuda }, 'fetchOrderContext: inyectando');
+        if (sinDeuda.length) {
+            lines.push('');
+            lines.push('--- YA PAGADAS / SIN DEUDA (NO usar para preguntas de saldo/deuda, solo para estado de un pedido puntual) ---');
+            for (const o of sinDeuda) {
+                pushOrden(o, false);
+            }
+        }
+
+        log.info({ idEmpresa, phone, ordenes: result.ordenes.length, conDeuda: conDeuda.length, sinDeuda: sinDeuda.length, totalDeuda }, 'fetchOrderContext: inyectando');
         return lines.join('\n');
     } catch (err) {
         log.warn({ err: err.message, idEmpresa, phone }, 'fetchOrderContext: falló (no crítico)');
