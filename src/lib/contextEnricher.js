@@ -779,11 +779,20 @@ async function fetchProducts(idEmpresa, searchTerm) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [], registeredPhone = null } = {}) {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [], registeredPhone = null, forceGallery = false } = {}) {
     const startTime = Date.now();
     const sections = [];
 
-    const actionIntent = detectActionIntent(lastUserMessage, excludeGalleryUrls.length > 0);
+    let actionIntent = detectActionIntent(lastUserMessage, excludeGalleryUrls.length > 0);
+    // forceGallery: el turno anterior preguntó "¿de qué producto quieres ver
+    // diseños?" (red de seguridad de galería). Respuestas cortas como "de
+    // franelas" no matchean GALLERY_RE (sin verbo "ver/mostrar"), cayendo en
+    // 'catalog' por defecto — sin esto, Gemini queda sin bloque de galería y
+    // termina inventando una URL. Solo se sobreescribe el caso por defecto;
+    // si el mensaje ya matchea presupuesto/compra/orden, esa intención manda.
+    if (forceGallery && actionIntent === 'catalog') {
+        actionIntent = 'gallery';
+    }
     const isCompraDirecta = COMPRA_RE.test(lastUserMessage || '');
     const isGalleryRequest = actionIntent === 'gallery' || (excludeGalleryUrls.length > 0 && !lastUserMessage);
     const isOrderRequest = ORDER_RE.test(lastUserMessage || '');

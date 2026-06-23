@@ -62,6 +62,14 @@ const _pendingPresupuestoCustomerIds = new Map();
 // Conversaciones donde la IA envió el resumen de confirmación pero olvidó el marker:
 // jid → true. Al recibir "sí" en este estado se fuerza regeneración con marker.
 const _pendingConfirmacionSinMarker = new Map();
+// jid → true cuando se envió la pregunta de aclaración "¿De qué producto te
+// gustaría ver diseños?" (red de seguridad de galería). GALLERY_RE no detecta
+// respuestas cortas tipo "de franelas"/"franelas" (sin verbo "ver/mostrar"), por
+// lo que sin este flag el siguiente turno cae en modo catálogo normal y Gemini,
+// sin bloque de galería en el contexto, termina inventando una URL — entrando en
+// loop de la misma pregunta. Se consume (borra) en el siguiente turno sin importar
+// el resultado.
+const _pendingGalleryClarification = new Map();
 
 // Apertura flexible: la IA a veces abrevia el tag (ej: [PRESUPUEDATA], [PRESUPUESTO_DATA]).
 // Captura cualquier [PRESUP...] y su cierre correspondiente [/PRESUP...].
@@ -279,6 +287,10 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         const memSentUrls = _sentGalleryUrls.get(jid) || new Set();
         const combinedExcludeUrls = [...new Set([...dbSentUrls, ...memSentUrls])];
 
+        // Consumir (una sola vez) el flag de aclaración de galería pendiente.
+        const forceGallery = _pendingGalleryClarification.get(jid) || false;
+        _pendingGalleryClarification.delete(jid);
+
         const [intentResult, reply] = await Promise.all([
             classifyHandoffIntent(incoming.body, recentClientMessages),
             aiService.generateReply({
@@ -291,6 +303,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
                 extraSystemContext: fullExtraContext,
                 excludeGalleryUrls: combinedExcludeUrls,
                 registeredPhone,
+                forceGallery,
             }),
         ]);
 
@@ -410,6 +423,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // y no tenemos ningún texto para enviar, forzar una respuesta para no dejar colgado el chat.
         if (!textToSend && fcGallery?.args?.url && imgUrls.length === 0) {
             textToSend = '¿De qué producto te gustaría ver diseños? Por ejemplo, puedes pedir franelas, gorras, buzos, joggers, etc. 😊';
+            _pendingGalleryClarification.set(jid, true);
             log.warn({ jid, invalidUrl: fcGallery.args.url }, 'maybeAutoReply: URL de galería inválida y texto vacío — enviando pregunta de aclaración como fallback');
         }
 
