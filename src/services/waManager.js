@@ -149,6 +149,41 @@ function getSession(idEmpresa) {
 }
 
 /**
+ * Genera un retraso aleatorio en milisegundos entre minSec y maxSec.
+ * Por defecto: entre 4.5 y 7.5 segundos.
+ */
+function getRandomDelayMs(minSec = 4.5, maxSec = 7.5) {
+    const minMs = minSec * 1000;
+    const maxMs = maxSec * 1000;
+    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+}
+
+/**
+ * Simula el comportamiento humano de escritura en el chat de WhatsApp:
+ * 1. Envía la presencia 'composing' (Escribiendo...).
+ * 2. Espera el tiempo de retraso configurado (4.5s a 7.5s).
+ * 3. Envía la presencia 'paused'.
+ */
+async function simulateHumanTyping(idEmpresa, jid, delayMs) {
+    const session = getSession(idEmpresa);
+    if (session?.sock) {
+        try {
+            await session.sock.sendPresenceUpdate('composing', jid);
+        } catch (e) {
+            log.warn({ jid, idEmpresa, err: e.message }, 'simulateHumanTyping: falló sendPresenceUpdate composing (no crítico)');
+        }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    if (session?.sock) {
+        try {
+            await session.sock.sendPresenceUpdate('paused', jid);
+        } catch (_) {}
+    }
+}
+
+/**
  * Persiste estado de sesión en wa_session_state (singleton).
  */
 async function persistState(pool, patch) {
@@ -434,6 +469,10 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         }
 
         if (textToSend) {
+            const delayMs = getRandomDelayMs(4.5, 7.5);
+            log.info({ jid, idEmpresa, delayMs }, 'maybeAutoReply: aplicando delay humano (4.5s - 7.5s) y presencia de escritura');
+            await simulateHumanTyping(idEmpresa, jid, delayMs);
+
             try {
                 await sendText(idEmpresa, jid, textToSend, { via: 'ai' });
                 await pool.query(
@@ -456,6 +495,9 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         for (const url of imgUrls) {
             const downloaded = await downloadImageBuffer(url);
             if (!downloaded) continue;
+            // Delay humano de 1.5 a 3s entre imágenes
+            const imgDelayMs = Math.floor(Math.random() * 1500) + 1500;
+            await new Promise((resolve) => setTimeout(resolve, imgDelayMs));
             try {
                 await sendMedia(idEmpresa, jid, {
                     type: 'image',
