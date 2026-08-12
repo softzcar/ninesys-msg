@@ -149,23 +149,47 @@ function getSession(idEmpresa) {
 }
 
 /**
- * Genera un retraso aleatorio en milisegundos entre minSec y maxSec.
- * Por defecto: entre 4.5 y 7.5 segundos.
+ * Calcula un retraso humano dinámico en milisegundos basado en la longitud
+ * del texto a enviar.
+ *
+ * Fórmula:
+ *   1. Pausa de lectura/pensamiento inicial: 1.5s - 2.5s
+ *   2. Ritmo de escritura: ~25ms a 35ms por carácter (30ms prom.)
+ *   3. Jitter aleatorio (+/- 15%)
+ *   4. Límites de seguridad: mínimo 2.5s, máximo 12.0s
  */
-function getRandomDelayMs(minSec = 4.5, maxSec = 7.5) {
-    const minMs = minSec * 1000;
-    const maxMs = maxSec * 1000;
-    return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+function calculateHumanTypingDelayMs(text = '') {
+    const charCount = (text || '').trim().length;
+
+    // 1. Pausa de lectura/pensamiento antes de presionar teclas
+    const initialReadingPauseMs = Math.floor(Math.random() * 1000) + 1500; // 1500ms - 2500ms
+
+    // 2. Velocidad media de escritura en WhatsApp Web (~25-35ms por carácter)
+    const typingMsPerChar = Math.floor(Math.random() * 10) + 25;
+
+    // 3. Variación de ritmo humano (Jitter +/- 15%)
+    const jitter = 0.85 + Math.random() * 0.30;
+
+    // 4. Suma calculada
+    const totalMs = Math.round((initialReadingPauseMs + (charCount * typingMsPerChar)) * jitter);
+
+    // 5. Encajonar entre límites de seguridad creíbles (Min: 2.5s, Max: 12.0s)
+    const MIN_DELAY_MS = 2500;
+    const MAX_DELAY_MS = 12000;
+
+    return Math.max(MIN_DELAY_MS, Math.min(MAX_DELAY_MS, totalMs));
 }
 
 /**
- * Simula el comportamiento humano de escritura en el chat de WhatsApp:
+ * Simula el comportamiento humano de lectura y escritura en WhatsApp:
  * 1. Envía la presencia 'composing' (Escribiendo...).
- * 2. Espera el tiempo de retraso configurado (4.5s a 7.5s).
+ * 2. Espera el tiempo de retraso calculado dinámicamente según la longitud del texto.
  * 3. Envía la presencia 'paused'.
  */
-async function simulateHumanTyping(idEmpresa, jid, delayMs) {
+async function simulateHumanTyping(idEmpresa, jid, textToSend) {
+    const delayMs = calculateHumanTypingDelayMs(textToSend);
     const session = getSession(idEmpresa);
+
     if (session?.sock) {
         try {
             await session.sock.sendPresenceUpdate('composing', jid);
@@ -174,6 +198,7 @@ async function simulateHumanTyping(idEmpresa, jid, delayMs) {
         }
     }
 
+    log.info({ jid, idEmpresa, charCount: (textToSend || '').length, delayMs }, 'simulateHumanTyping: aplicando delay dinámico por longitud de texto');
     await new Promise((resolve) => setTimeout(resolve, delayMs));
 
     if (session?.sock) {
@@ -469,9 +494,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         }
 
         if (textToSend) {
-            const delayMs = getRandomDelayMs(4.5, 7.5);
-            log.info({ jid, idEmpresa, delayMs }, 'maybeAutoReply: aplicando delay humano (4.5s - 7.5s) y presencia de escritura');
-            await simulateHumanTyping(idEmpresa, jid, delayMs);
+            await simulateHumanTyping(idEmpresa, jid, textToSend);
 
             try {
                 await sendText(idEmpresa, jid, textToSend, { via: 'ai' });

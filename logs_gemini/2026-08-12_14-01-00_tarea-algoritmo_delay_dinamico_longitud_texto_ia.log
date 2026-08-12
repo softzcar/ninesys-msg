@@ -1,0 +1,21 @@
+# Bitácora de Trabajo - Algoritmo de Delay Dinámico Basado en Longitud de Texto para IA
+Fecha: 2026-08-12
+Hora: 14:01:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Tarea Realizada
+1. **Algoritmo de Cálculo Dinámico (`calculateHumanTypingDelayMs`)**:
+   - Se reemplazó el retraso estático por un algoritmo que calcula el tiempo de simulación de escritura humana según la cantidad de caracteres de la respuesta enviada por la IA.
+   - **Fórmula**: Pausa de lectura inicial (1.5s - 2.5s) + velocidad media de escritura (~25ms a 35ms por carácter) + variación humana (Jitter +/- 15%).
+   - **Límites**: Encajonado de forma segura entre **2.5 segundos mínimo** (respuestas ultra cortas) y **12.0 segundos máximo** (presupuestos o respuestas extensas).
+
+2. **Simulación de Presencia Humana (`simulateHumanTyping`)**:
+   - Durante todo el tiempo de delay calculado, el socket emite el evento de presencia `sock.sendPresenceUpdate('composing', jid)` notificando al usuario "Escribiendo...".
+   - Al finalizar la ventana de tiempo, finaliza la presencia (`paused`) y envía el mensaje de texto.
+
+## Archivos Modificados
+- `src/services/waManager.js`
+- `logs_gemini/2026-08-12_14-01-00_tarea-algoritmo_delay_dinamico_longitud_texto_ia.log` (creado)
+
+## Resultado
+Respuestas cortas (ej. saludos de 30 caracteres) se envían con ~2.8s de delay; respuestas complejas/presupuestos (300+ caracteres) aplican ~9.5s a 12.0s con presencia "Escribiendo..." activa.
