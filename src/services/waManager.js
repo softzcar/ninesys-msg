@@ -155,7 +155,7 @@ async function persistState(pool, patch) {
     const fields = [];
     const values = [];
     for (const k of Object.keys(patch)) {
-        fields.push(`\`${k}\` = ?`);
+        fields.push(`${k} = ?`);
         values.push(patch[k]);
     }
     if (!fields.length) return;
@@ -222,8 +222,14 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         let registeredPhone = null;
         try {
             if (lidMapping.isLidJid(jid)) {
-                const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
-                if (phoneJid) resolvedJid = phoneJid;
+                const senderPn = incoming.key?.senderPn;
+                if (lidMapping.isPhoneJid(senderPn)) {
+                    resolvedJid = senderPn;
+                    lidMapping.upsertMapping(pool, { lid: jid, phoneJid: senderPn }).catch(() => {});
+                } else {
+                    const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
+                    if (phoneJid) resolvedJid = phoneJid;
+                }
             }
             const clienteRegistrado = await customerLookup.findCustomerByJid(pool, resolvedJid);
             if (clienteRegistrado) {

@@ -1,34 +1,18 @@
 /**
  * baileysAuthState.js
  *
- * Adapter de useAuthState para @whiskeysockets/baileys con backend MySQL.
+ * Adapter de useAuthState para @whiskeysockets/baileys con backend MySQL/PostgreSQL.
  * Persiste credenciales y keys en la tabla `wa_session_auth` del tenant
  * (api_emp_{id_empresa}). Reemplaza el directorio .wwebjs_auth/ del esquema
  * anterior y permite que cualquier instancia del proceso reanude la sesión
  * sin compartir filesystem.
- *
- * Uso:
- *   const { state, saveCreds, clear } = await useMySQLAuthState(pool);
- *   const sock = makeWASocket({ auth: state, ... });
- *   sock.ev.on('creds.update', saveCreds);
- *
- * Esquema de la tabla (ver db/migrations/001_wa_tables.sql):
- *   wa_session_auth(key_name VARCHAR(255) PK, key_value LONGBLOB, updated_at)
- *
- * Convenciones de key_name:
- *   - 'creds'                     → credenciales principales
- *   - '<type>-<id>'               → keys (pre-key, session, sender-key, ...)
  */
 
-// Carga diferida: baileys es ESM y solo debe importarse cuando el flag
-// USE_BAILEYS=1 está activo, para no romper el modo legacy (sin la dep).
 const log = require('../lib/logger').createLogger('baileysAuthState');
 
 let _baileys;
 async function lib() {
     if (!_baileys) {
-        // baileys@6.7.21+ es ESM puro → dynamic import. Cache del módulo
-        // resuelto para no pagar el import en cada readKey/writeKey.
         _baileys = await import('baileys');
     }
     return _baileys;
@@ -39,10 +23,12 @@ async function readKey(pool, key) {
         'SELECT key_value FROM wa_session_auth WHERE key_name = ? LIMIT 1',
         [key]
     );
-    if (!rows.length) return null;
+    if (!rows || !rows.length || !rows[0].key_value) return null;
     try {
         const { BufferJSON } = await lib();
-        return JSON.parse(rows[0].key_value.toString('utf8'), BufferJSON.reviver);
+        const raw = rows[0].key_value;
+        const str = Buffer.isBuffer(raw) ? raw.toString('utf8') : (typeof raw === 'string' ? raw : String(raw));
+        return JSON.parse(str, BufferJSON.reviver);
     } catch (e) {
         log.warn({ err: e, key }, 'No pude parsear key');
         return null;
@@ -52,12 +38,22 @@ async function readKey(pool, key) {
 async function writeKey(pool, key, value) {
     const { BufferJSON } = await lib();
     const data = JSON.stringify(value, BufferJSON.replacer);
-    await pool.query(
-        `INSERT INTO wa_session_auth (key_name, key_value)
-         VALUES (?, ?)
-         ON DUPLICATE KEY UPDATE key_value = VALUES(key_value)`,
-        [key, Buffer.from(data, 'utf8')]
-    );
+
+    if (pool.driver === 'pgsql') {
+        await pool.query(
+            `INSERT INTO wa_session_auth (key_name, key_value, updated_at)
+             VALUES (?, ?, NOW())
+             ON CONFLICT (key_name) DO UPDATE SET key_value = EXCLUDED.key_value, updated_at = NOW()`,
+            [key, Buffer.from(data, 'utf8')]
+        );
+    } else {
+        await pool.query(
+            `INSERT INTO wa_session_auth (key_name, key_value)
+             VALUES (?, ?)
+             ON DUPLICATE KEY UPDATE key_value = VALUES(key_value)`,
+            [key, Buffer.from(data, 'utf8')]
+        );
+    }
 }
 
 async function removeKey(pool, key) {
@@ -65,10 +61,21 @@ async function removeKey(pool, key) {
 }
 
 /**
- * Crea un AuthState compatible con Baileys, respaldado por MySQL.
- * @param {import('mysql2/promise').Pool} pool - pool del tenant
+ * Crea un AuthState compatible con Baileys, respaldado por MySQL/PostgreSQL.
+ * @param {TenantPoolWrapper} pool - pool del tenant
  */
 async function useMySQLAuthState(pool) {
+    // Asegurar tabla wa_session_auth si no existe
+    if (pool.driver === 'pgsql') {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS wa_session_auth (
+                key_name VARCHAR(255) PRIMARY KEY,
+                key_value BYTEA,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `).catch(err => log.warn({ err }, 'Error comprobando tabla wa_session_auth (pgsql)'));
+    }
+
     const { initAuthCreds, proto } = await lib();
     let creds = await readKey(pool, 'creds');
     if (!creds) {

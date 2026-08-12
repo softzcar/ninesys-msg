@@ -970,7 +970,7 @@ async function fetchProducts(idEmpresa, searchTerm, jid = null) {
 
         rememberShownProducts(jid, catalog.products);
 
-        const formattedCatalog = formatCatalogProducts(catalog.products.slice(0, 10));
+        const formattedCatalog = formatCatalogProducts(catalog.products.slice(0, 15));
 
         const lines = [
             '⚠️ INSTRUCCIÓN INTERNA — NO MOSTRAR AL CLIENTE: Los marcadores [cod:X][idCat:X] son referencias para la función submit_presupuesto. Jamás los incluyas en tu respuesta al cliente.',

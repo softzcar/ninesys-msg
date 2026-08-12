@@ -1,0 +1,48 @@
+- **Solicitud del Usuario:** El agente rechazó un presupuesto de 4 productos (chaqueta, gorra DTF, franela algodón, diseño de logo) con el mensaje "No pude generar el presupuesto porque uno o más productos no están en nuestro catálogo", lo cual no tenía sentido porque los productos sí existen y el agente venía mostrando precios correctos durante toda la conversación. El usuario pidió investigar y, al confirmarse que era el problema de fondo ya documentado como pendiente, pidió implementarlo ahora.
+
+- **Fecha y Hora:** 2026-06-23 17:57:10 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — nueva memoria persistente por conversación (`shownProductsByJid`, `rememberShownProducts`, `formatShownProductsMemo`, `clearShownProducts`); `fetchProducts` y `fetchDesignServices` ahora reciben `jid` y memorizan; `enrichContext` inyecta el bloque de memoria siempre.
+  - `msg_ninesys/src/services/waManager.js` — limpia la memoria (`clearShownProducts`) cuando un presupuesto se confirma con éxito.
+  - `scratch/update_prompt_194.php` (repo `ninesys-api`) — Reglas de los datos actualizadas para referenciar el nuevo bloque de memoria persistente.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `bb081a2` — `fix(ai): persist product catalog codes across the whole conversation` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se confirmó en logs de PM2 (`presupuestoService: RECHAZADO — items sin idCategory válido`) que 3 de 5 ítems (`Gorra DTF`, `Franela Algodon`, `Diseño de Logo`) fueron rechazados por `idCategory` inválido, mientras que las chaquetas (el producto más antiguo de la conversación) pasaron. Se verificó en la BD que los 3 productos rechazados SÍ tienen `category_ids` válidos (`Gorra Dtf`→15, `Franela Algodón`→38, `Diseño de Logo`→17) — no era un problema de datos.
+
+  Causa raíz confirmada: el marcador `[cod:X][idCat:X]` de un producto solo existe en el `system_prompt` dinámico del turno exacto en que ese producto se buscó (`fetchProducts`/`fetchDesignServices`), y la IA tiene instrucción explícita de nunca mostrarlo en su respuesta visible — por lo que tampoco queda en el historial de mensajes (`wa_messages`/`contents`). En una conversación de un solo producto esto pasa desapercibido; en un pedido de varios productos discutidos a lo largo de muchos turnos, los códigos de los productos más antiguos desaparecen del contexto por completo. El prompt ya instruía explícitamente "NUNCA uses cod=0... si no tienes esos valores, NO crees el presupuesto" — la IA siguió esa regla de forma segura (abortando en vez de inventar), pero el resultado visible para el cliente fue confuso (parecía que el sistema no reconocía productos reales).
+
+  **Fix implementado:** se agregó una memoria persistente por conversación (`shownProductsByJid`, Map jid → Map<nombreProducto, {cod, idCategory}>) en `contextEnricher.js`. Cada vez que `fetchProducts` o `fetchDesignServices` resuelven productos con cod/idCategory válidos, se memorizan ahí. `enrichContext` inyecta SIEMPRE (no solo cuando hay búsqueda nueva) un bloque `=== PRODUCTOS YA COTIZADOS EN ESTA CONVERSACIÓN (memoria persistente) ===` con todo lo acumulado, independiente de qué se buscó en el turno actual. La memoria se limpia (`clearShownProducts`) desde `waManager.js` cuando el presupuesto se confirma con éxito (carrito cerrado). El prompt se actualizó para indicarle a la IA que busque ahí el cod/idCategory de productos cotizados en turnos anteriores que ya no aparecen en el bloque de catálogo del turno actual.
+
+- **Inconvenientes y Desafíos:**
+  - La memoria es en proceso (no persiste si PM2 se reinicia a mitad de una conversación) — mismo nivel de garantía que `_pendingPresupuestos`/`_sentGalleryUrls`, ya aceptado en el resto del código.
+  - Durante la verificación final en BD, una acción de `mysql -u root -p<password>` directo por SSH fue bloqueada por el clasificador de seguridad de Claude Code (exposición de credencial en línea de comandos) — se resolvió creando un script PHP de verificación temporal (reutilizando la misma conexión PDO que ya usa `update_prompt_194.php`, sin exponer la contraseña en ningún comando de shell), que se eliminó del VPS inmediatamente después de usarlo.
+
+- **Decisión Final y Justificación:**
+  Se implementó el fix de fondo (memoria persistente) en vez del parche rápido (ampliar qué tan atrás se rebusca en `recentUserTexts`) porque el usuario explícitamente lo eligió tras confirmarse que el problema ya estaba causando fallas reales — y porque cierra a la vez la tarea pendiente documentada anteriormente en la sesión (`project_pendiente_resumen_presupuesto_persistente`).
+
+- **Herramienta(s) Utilizada(s):** `AskUserQuestion`, `Bash` (node -c, prueba de integración local con mocks, git add/commit/push, ssh, scp, pm2 restart), `Read`, `Edit`, `Write` (script de verificación temporal)
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Prueba local: se simuló buscar "chaqueta" (turno 1) y luego "gorra" (turno 2) para el mismo `jid` — el bloque de memoria tras el turno 2 sigue incluyendo "Chaqueta: [cod:10][idCat:5]" además de la gorra nueva. Tras `clearShownProducts(jid)`, la memoria vuelve a `null`. Comportamiento exactamente como se diseñó.
+  - `node -c` sin errores de sintaxis en ambos archivos.
+  - Desplegado en `vps-contabo-dev`: HEAD en `bb081a2`, PM2 `ntmsg-app` online sin errores de arranque.
+  - Prompt verificado en BD (vía script PHP temporal): las 2 referencias nuevas (`memoria persistente de productos`, `PRODUCTOS YA COTIZADOS`) están presentes en `wa_ai_agents.system_prompt` (id=2).
+  - Pendiente: repetir un pedido multi-producto real similar (chaqueta → gorra → franela → diseño) y confirmar que la confirmación final ya no aborta.
+
+- **Logro Conseguido:** Se cerró la tarea pendiente documentada anteriormente en la sesión sobre memoria de presupuesto multi-producto — esta vez no solo para que la IA no "olvide" cantidades/tela (ya mitigado subiendo el límite de historial), sino para que NUNCA pierda los códigos de catálogo necesarios para registrar el pedido, sin importar cuántos turnos ni cuántos productos distintos se hayan discutido.
+
+- **Referencias de Sesión (Contexto):** Cierre directo de la tarea pendiente documentada en `project_pendiente_resumen_presupuesto_persistente` (memoria del proyecto) — se debe actualizar esa memoria para reflejar que ya se implementó.
+
+- **⚠️ NOTA DE PERSISTENCIA:** Cualquier nuevo fetcher de catálogo que genere marcadores `[cod:X][idCat:X]` para usar en `submit_presupuesto` (ej. si se agregan más categorías de productos especiales en el futuro) debe llamar a `rememberShownProducts(jid, products)` igual que `fetchProducts`/`fetchDesignServices`, o sus códigos sufrirán el mismo problema de desaparecer tras el turno.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

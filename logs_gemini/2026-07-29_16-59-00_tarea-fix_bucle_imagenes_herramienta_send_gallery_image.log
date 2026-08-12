@@ -1,0 +1,25 @@
+# Bitácora de Trabajo - Corrección del Bucle de Fotos e Invocación de send_gallery_image
+Fecha: 2026-07-29
+Hora: 16:59:00
+
+## 1. Problema Reportado
+Al interactuar con la IA de WhatsApp y preguntarle *"¿Cuánto cuestan?"*, la IA ignoraba la pregunta de precios e insistía en llamar a la función `send_gallery_image` para enviar una foto repetida con la frase en plantilla: *"¡Aquí te muestro un modelo de Franela Sublimada! ¿Te gusta el estilo? Tengo más opciones disponibles si quieres ver otra."*.
+
+## 2. Diagnóstico y Causa Raíz
+Revisando los logs de PM2 (`ntmsg-app-out.log`):
+1. **Clasificación correcta:** Al recibir *"Cuánto cuestan?"*, el clasificador `intentClassifier` determinó `wantsQuote: true` y `wantsGallery: false`.
+2. **Contexto correcto:** `contextEnricher` inyectó los 13 productos del catálogo con sus precios y **omitió** cualquier sección de instrucciones de imágenes de galería.
+3. **Causa Raíz en la Herramienta:** En `src/services/aiService.js`, la declaración de la función `send_gallery_image` en `AGENT_TOOLS` contenía en su propiedad `description`:
+   - El texto *"Llamar SIEMPRE que el contexto muestre..."*.
+   - El texto literal de ejemplo: `"¡Aquí te muestro un modelo de [producto]! ¿Te gusta el estilo? Tengo más opciones disponibles si quieres ver otra."`.
+4. Gemini, al ver que en turnos anteriores se habían enviado fotos, interpretó la descripción literal como una indicación de llamar a `send_gallery_image` de nuevo y replicó exactamente el texto de ejemplo presente en la definición de la herramienta.
+
+## 3. Solución Implementada
+Se actualizó la definición de `send_gallery_image` en `src/services/aiService.js`:
+- Se eliminó el texto de ejemplo en plantilla que Gemini repetía literalmente.
+- Se agregó una restricción estricta (`ESTRICTAMENTE PROHIBIDO llamar a esta función si el contexto de este turno NO incluye una URL de galería de imágenes, o si el usuario únicamente está preguntando precios, presupuestos o dudas de productos en texto.`).
+
+## 4. Despliegue y Verificación
+- El archivo `src/services/aiService.js` fue validado (`node -c`) y sincronizado a `vps-contabo-dev`.
+- Se reinició el microservicio en PM2 (`pm2 restart ntmsg-app`).
+- Ahora Gemini responderá a las preguntas de precios en texto utilizando el catálogo de 13 productos inyectado en el turno actual sin forzar el envío de fotos repetidas.

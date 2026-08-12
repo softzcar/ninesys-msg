@@ -1,0 +1,42 @@
+# Bitácora de Trabajo - Resolución Completa del Filtro de Catálogo e IA (3 Causas Raíz)
+Fecha: 2026-07-29
+Hora: 16:45:00
+
+## Tarea Realizada
+Diagnóstico profundo y solución definitiva al problema donde la IA de WhatsApp solo presentaba 2 franelas (`franela estampado DTF` y `franela mitad sublimada`) en lugar de los 13 productos disponibles en la base de datos.
+
+## Diagnóstico y Solución de las 3 Causas Raíz
+
+### Causa 1: Búsqueda Sensible a Mayúsculas en PostgreSQL (`ninesys-api`)
+- **Problema:** El endpoint `/internal/catalog/{id_empresa}` usaba `p.product LIKE ?`. En PostgreSQL, `LIKE` es case-sensitive y descartaba todas las palabras con mayúsculas (`Franela Sublimada`, `FRANELA ALGODON`, etc.).
+- **Solución:** Se implementó `$likeOp = DB_DRIVER === 'pgsql' ? 'ILIKE' : 'LIKE'` en `app/routes/msg_service.php`.
+- **Efecto:** El endpoint HTTP devolvió exitosamente los 13 productos.
+
+### Causa 2: Caché en Memoria de 30 Minutos en el Microservicio (`msg_ninesys`)
+- **Problema:** `src/lib/catalogClient.js` almacenaba en un mapa en memoria los resultados del catálogo con un TTL de 30 minutos (`CACHE_TTL_MS = 30 * 60 * 1000`). Como la consulta fallida ocurrió a las 16:35 UTC, el microservicio continuó entregando la respuesta obsoleta de 2 productos durante 30 minutos sin consultar nuevamente al backend.
+- **Solución:** Se redujo el TTL a 2 minutos (`2 * 60 * 1000`) y se hizo dinámica la instancia `getHttpClient()` para reevaluar variables de entorno.
+- **Efecto:** `catalogClient.fetchCatalog` limpia y actualiza la caché ante cualquier cambio en el backend.
+
+### Causa 3: Truncado a 10 Productos en la Inyección del Prompt (`contextEnricher.js`)
+- **Problema:** En `fetchProducts` (`contextEnricher.js`), se aplicaba `catalog.products.slice(0, 10)`. Al haber 13 franelas que coincidían, 3 variantes sublimadas (como *Franela Sublimada Licra* y *Franela Sublimada Cuello V*) quedaban recortadas antes de inyectarse al System Prompt de Gemini.
+- **Solución:** Se incrementó el límite de truncado a `catalog.products.slice(0, 15)`.
+
+## Verificación Empírica
+Se ejecutó la simulación en tiempo real de `enrichContext` para la consulta *"Necesito mandar a hacer unas franelas urgente! que franelas tienen?"*.
+- **Resultado:** El System Prompt de Gemini recibe ahora el bloque completo con las **13 franelas** y todas sus escalas de precios:
+  1. Franela Algodon
+  2. Franela Con Corte Sublimada
+  3. Franela Estampado Carta
+  4. Franela Estampado DTF
+  5. Franela Manga Ranglan
+  6. Franela Mitad Sublimada
+  7. Franela Oversize
+  8. Franela Oversize Sublimada
+  9. Franelas Sublimadas Tasa Bcv
+  10. Franela Sublimada
+  11. Franela Sublimada Cuello V
+  12. Franela Sublimada Licra
+  13. Franela Sublimada Tasa Bcv
+
+## Despliegue
+- Todos los cambios fueron sincronizados e instalados en `vps-contabo-dev` y la aplicación fue reiniciada en PM2 (`pm2 restart ntmsg-app`).

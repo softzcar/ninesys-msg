@@ -1,0 +1,40 @@
+- **Solicitud del Usuario:** "ya habíamos avanzado... ahora no da el saldo pendiente cuando le digo 'Necesito saber cuánto dinero les estoy debiendo en total por favor'". Regresión en la detección de preguntas de deuda tras los fixes anteriores de hoy.
+
+- **Fecha y Hora:** 2026-06-23 16:37:25 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — `ORDER_RE` ajustada para tolerar palabras intermedias.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `113b608` — `fix(ai): tolerate intervening words in debt-question regex` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se confirmó en logs de PM2 (`enrichContext: INICIANDO`) que `isOrderRequest: false` para el mensaje "Necesito saber cuánto dinero les estoy debiendo en total por favor". Causa: las dos ramas de `ORDER_RE` agregadas en el fix anterior de hoy (`cu[aá]nto\s+(?:les?\s+|te\s+|le\s+)?(?:estoy\s+)?deb\w*` y `(?:les?|te|le)\s+deb[oe]\w*`) exigían que las palabras clave estuvieran **inmediatamente adyacentes**, sin tolerar palabras naturales intermedias como "dinero" (entre "cuánto" y "les") o "estoy" (entre "les" y "debiendo"). Además, `deb[oe]\w*` no cubría "debiendo" (el siguiente carácter tras "deb" es "i", no "o"/"e").
+
+  Se reemplazaron ambas ramas por versiones con un "gap" tolerante de palabras intermedias: `cu[aá]nto(?:\s+\w+){0,3}?\s+deb\w*` y `(?:les?|te|le)(?:\s+\w+){0,2}?\s+deb\w*`, y se agregó `\bdebiendo\b` como match directo para frases sin "cuánto"/"les" (ej. "estoy debiendo algo").
+
+- **Inconvenientes y Desafíos:**
+  - Riesgo de falso positivo con la ventana de palabras intermedias (ej. "cuánto tiempo creo que debo esperar" podría matchear dentro de la ventana de 3 palabras). Se aceptó este riesgo porque el costo de un falso positivo es bajo (solo se intenta enriquecer con contexto de órdenes, que Gemini simplemente ignora si no aplica), mientras que un falso negativo rompe visiblemente la funcionalidad de consulta de deuda — exactamente el patrón de rigidez que el usuario señaló como preocupación de fondo en esta sesión.
+
+- **Decisión Final y Justificación:**
+  Se prefirió generalizar el patrón (tolerar 0-3 palabras intermedias) en vez de seguir agregando casos literales uno por uno cada vez que aparece una frase nueva — siguiendo la dirección que el usuario marcó: el sistema debe tolerar cómo la gente realmente escribe, no exigir frases "perfectas".
+
+- **Herramienta(s) Utilizada(s):** `Bash` (mysql, pm2 logs, script de prueba con 15 casos, node -c, git add/commit/push, ssh)
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Script local (`scratch/test_order_re2.js`) con 15 casos (el que falló + todos los casos previos ya corregidos hoy + variantes nuevas con palabras intermedias + casos de control que NO deben disparar falso positivo): 15/15 correctos.
+  - Desplegado en `vps-contabo-dev`: HEAD en `113b608`, PM2 `ntmsg-app` online.
+
+- **Logro Conseguido:** La detección de preguntas de deuda ahora tolera la forma natural en que los clientes realmente escriben (con palabras intermedias, gerundios como "debiendo"), reduciendo la necesidad de seguir parchando caso por caso.
+
+- **Referencias de Sesión (Contexto):** Tercer ajuste de `ORDER_RE` en el día — parte del enfoque acordado de refinar reactivamente la rigidez del prompt/regex a partir de conversaciones reales (ver memoria de proyecto `feedback_ia_refinamiento_reactivo`).
+
+- **⚠️ NOTA DE PERSISTENCIA:** Si vuelve a aparecer un falso negativo similar en otra regex de intención (`GALLERY_RE`, `PRESUPUESTO_RE`, `DESIGN_RE`), considerar el mismo patrón de "gap tolerante" `(?:\s+\w+){0,N}?` en vez de exigir adyacencia exacta de palabras clave.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

@@ -7,25 +7,23 @@
  * Endpoint: GET {API_URL}/internal/catalog/{id_empresa}?search=término
  * Header:   Authorization: {id_empresa}
  *
- * Cache en memoria con TTL: el catálogo cambia ocasionalmente, y evitamos
- * golpear ninesys-api en cada generación de respuesta. TTL: 30 minutos.
+ * Cache en memoria con TTL corto (2 minutos) para evitar entregar datos
+ * obsoletos si la base de datos o el catálogo sufren modificaciones.
  */
 
 const axios = require('axios');
 const log = require('./logger').createLogger('catalogClient');
 
-const API_URL = process.env.API_URL;
-const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutos
+const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos
 
-if (!API_URL) {
-    log.warn('API_URL no está definida en .env');
+function getHttpClient() {
+    const baseURL = process.env.API_URL || 'https://api.nineteengreen.com';
+    return axios.create({
+        baseURL,
+        timeout: 5000,
+        headers: { Accept: 'application/json' },
+    });
 }
-
-const http = axios.create({
-    baseURL: API_URL,
-    timeout: 5000,
-    headers: { Accept: 'application/json' },
-});
 
 // { [idEmpresa]: { [searchTerm]: { value, fetchedAt } } }
 const cache = new Map();
@@ -59,9 +57,7 @@ async function fetchCatalog(idEmpresa, searchTerm) {
 
     // Miss o stale → pedir a la API
     try {
-        const url = `${API_URL}/internal/catalog/${id}?search=${encodeURIComponent(searchTerm)}`;
-        log.info({ id, searchTerm, url }, 'catalogClient: solicitando');
-
+        const http = getHttpClient();
         const res = await http.get(`/internal/catalog/${id}`, {
             params: { search: searchTerm },
             headers: { Authorization: String(id) },
@@ -92,7 +88,6 @@ async function fetchCatalog(idEmpresa, searchTerm) {
                 reason,
                 message: err.message,
                 code: err.code,
-                url: `${API_URL}/internal/catalog/${id}?search=${searchTerm}`
             },
             'fetchCatalog falló'
         );
@@ -130,6 +125,7 @@ async function fetchDesignCatalog(idEmpresa) {
     try {
         log.info({ id }, 'catalogClient: solicitando catálogo de diseño (only_design=1)');
 
+        const http = getHttpClient();
         const res = await http.get(`/internal/catalog/${id}`, {
             params: { only_design: 1 },
             headers: { Authorization: String(id) },

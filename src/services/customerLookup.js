@@ -40,16 +40,20 @@ function last10DigitsFromJid(jid) {
 async function findCustomerByJid(pool, jid) {
     const last10 = last10DigitsFromJid(jid);
     if (!last10) return null;
+    const regexpExpr = pool.driver === 'pgsql'
+        ? "REGEXP_REPLACE(phone, '[^0-9]', '', 'g')"
+        : "REGEXP_REPLACE(phone, '[^0-9]', '')";
+    const likePattern = `%${last10}`;
     const [rows] = await pool.query(
         `SELECT _id, first_name, last_name, phone, cedula, address, email
          FROM customers
          WHERE _id <> ?
            AND phone IS NOT NULL
            AND phone <> ''
-           AND REGEXP_REPLACE(phone, '[^0-9]', '') LIKE CONCAT('%', ?)
+           AND ${regexpExpr} LIKE ?
          ORDER BY _id ASC
          LIMIT 1`,
-        [CUSTOMER_SYSTEM_ID, last10]
+        [CUSTOMER_SYSTEM_ID, likePattern]
     );
     return rows[0] || null;
 }

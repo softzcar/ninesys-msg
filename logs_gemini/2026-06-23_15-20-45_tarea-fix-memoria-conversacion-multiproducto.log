@@ -1,0 +1,45 @@
+- **Solicitud del Usuario:** "lee la última conversación... estaba cotizando franelas y luego me interesé en chaquetas, le di precio e imágenes y luego parece que se le olvidó que le había pedido franelas". Se pidió investigar y corregir.
+
+- **Fecha y Hora:** 2026-06-23 15:20:45 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/services/aiService.js` — `DEFAULT_HISTORY_LIMIT` subido de 12 a 30.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `381d03b` — `fix(ai): raise chat history window from 12 to 30 messages` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se leyó la conversación completa del cliente (`wa_messages`, JID `168255394209832@lid`, empresa 194). Secuencia real: el cliente cotizó franelas (5 talla M Damas, 2 talla L Caballeros, 1 talla S Damas, tela Futbol Qatar, logo nuevo) y el bot confirmó el pedido. Luego preguntó por chaquetas (precio) y pidió ver modelos — 3 rondas de "muéstrame otra foto" (cada ronda = pregunta del cliente + texto del bot + imagen = 3 mensajes × 3 = 9 mensajes). Al pedir "esa misma cantidad de franelas talla L" para las chaquetas, el bot respondió "no tengo registrado que me hayas pedido franelas anteriormente".
+
+  Causa raíz: `aiService.loadHistory()` solo carga los últimos `DEFAULT_HISTORY_LIMIT` (=12) mensajes de `wa_messages` como historial para Gemini (cuenta ambos lados de la conversación, y cada imagen ocupa un puesto completo, igual que un mensaje de texto). Contando hacia atrás desde el mensaje que falló, los 12 mensajes previos cubrían solo desde la primera foto de chaqueta en adelante — la confirmación del pedido de franelas (y hasta la pregunta inicial sobre chaquetas) ya había sido expulsada de la ventana. Gemini no "olvidó" nada: literalmente nunca recibió esa parte de la conversación en ese turno.
+
+  Se presentaron 2 opciones de fix al usuario (alivio rápido subiendo el límite vs. solución robusta con un resumen persistente del presupuesto en curso, independiente del historial). El usuario eligió ambas: aplicar el alivio rápido ahora y dejar la solución robusta documentada como tarea pendiente para otra sesión.
+
+  Se subió `DEFAULT_HISTORY_LIMIT` de 12 a 30 en `aiService.js`, con comentario explicando el porqué y la limitación residual (sigue teniendo techo).
+
+- **Inconvenientes y Desafíos:**
+  - Subir el límite es una mitigación, no una solución de fondo: una conversación suficientemente larga (más productos, más fotos) puede volver a topar el límite. Se documentó esto explícitamente para no dar falsa sensación de que el problema está 100% resuelto.
+
+- **Decisión Final y Justificación:**
+  Se optó por NO implementar todavía el resumen persistente del presupuesto (requiere diseño: dónde persistir el estado entre turnos, en qué punto del flujo de Pasos A-E se actualiza) porque el usuario explícitamente pidió dejarlo para otra sesión. Se guardó el diseño conceptual en memoria del proyecto (`project_pendiente_resumen_presupuesto_persistente.md`) para no perder el contexto.
+
+- **Herramienta(s) Utilizada(s):** `Bash` (mysql, node -c, git add/commit/push, ssh, pm2 restart), `Read`, `Edit`, `Write` (memoria del proyecto)
+
+- **Resultado:** Éxito (mitigación aplicada; solución de fondo documentada como pendiente)
+
+- **Verificación:**
+  - `node -c` sin errores de sintaxis.
+  - Desplegado en `vps-contabo-dev`: HEAD en `381d03b`, PM2 `ntmsg-app` online.
+  - Pendiente: prueba funcional real reproduciendo un escenario similar (cotizar un producto, navegar varias fotos de otro, y verificar que el primero ya no se "olvida" dentro del nuevo límite de 30 mensajes).
+
+- **Logro Conseguido:** Se identificó y mitigó una causa estructural de pérdida de contexto en conversaciones multi-producto del agente de WhatsApp. Se dejó documentado el diseño de la solución robusta (resumen persistente) para implementarla en una sesión futura.
+
+- **Referencias de Sesión (Contexto):** Continuación directa de la sesión de hoy (servicios de diseño gráfico → fix de detección de deuda → fix de formato de órdenes → este fix de memoria conversacional).
+
+- **⚠️ NOTA DE PERSISTENCIA:** Ver `project_pendiente_resumen_presupuesto_persistente.md` en la memoria del proyecto para el diseño completo de la solución de fondo pendiente.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

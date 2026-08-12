@@ -1,7 +1,8 @@
 /**
  * assignmentPolicy.js
  * 
- * Lógica de auto-asignación de conversaciones a vendedores (Fase D.2).
+ * Lógica de auto-asignación de conversaciones a vendedores.
+ * Soporta MySQL y PostgreSQL.
  */
 
 const log = require('../lib/logger').createLogger('assignmentPolicy');
@@ -42,20 +43,22 @@ async function pickNextVendor({ pool, jid, excludeUserId = null }) {
     }
 
     // C. Si no hay dueño o no está disponible, buscar al "menos cargado" (Least-Loaded)
-    // Se rompen empates por updated_at ASC para un round-robin suave.
     const [candidates] = await pool.query(`
-        SELECT vs.user_id, 
-               (SELECT COUNT(*) FROM wa_conversations 
-                WHERE assigned_to = vs.user_id AND mode = 'human' AND deleted_at IS NULL) as active_count,
-               vs.max_active
-        FROM wa_vendor_state vs
-        WHERE vs.is_available = 1
-        HAVING (vs.max_active = 0 OR active_count < vs.max_active)
-        ORDER BY active_count ASC, vs.updated_at ASC
+        SELECT sub.user_id, sub.active_count, sub.max_active
+        FROM (
+            SELECT vs.user_id, 
+                   (SELECT COUNT(*) FROM wa_conversations 
+                    WHERE assigned_to = vs.user_id AND mode = 'human' AND deleted_at IS NULL) as active_count,
+                   vs.max_active, vs.updated_at
+            FROM wa_vendor_state vs
+            WHERE vs.is_available = 1
+        ) sub
+        WHERE (sub.max_active = 0 OR sub.active_count < sub.max_active)
+        ORDER BY sub.active_count ASC, sub.updated_at ASC
         LIMIT 1
     `);
 
-    if (candidates.length > 0) {
+    if (candidates && candidates.length > 0) {
         log.info({ jid, vendorId: candidates[0].user_id }, 'Asignación Round-Robin: vendedor menos cargado elegido');
         return candidates[0].user_id;
     }
@@ -72,22 +75,35 @@ async function getVendorState(pool, userId) {
         `SELECT is_available, max_active, allow_auto_assign FROM wa_vendor_state WHERE user_id = ?`,
         [userId]
     );
-    return state || { is_available: 1, max_active: 0, allow_auto_assign: 1 }; // Default: disponible, sin tope, auto-asignar activo
+    return state || { is_available: 1, max_active: 0, allow_auto_assign: 1 };
 }
 
 /**
  * Actualiza el estado de disponibilidad de un vendedor (UPSERT).
  */
 async function setVendorState(pool, userId, { isAvailable, maxActive, allowAutoAssign }) {
-    await pool.query(
-        `INSERT INTO wa_vendor_state (user_id, is_available, max_active, allow_auto_assign)
-         VALUES (?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE 
-            is_available = VALUES(is_available),
-            max_active = VALUES(max_active),
-            allow_auto_assign = VALUES(allow_auto_assign)`,
-        [userId, isAvailable ? 1 : 0, maxActive || 0, allowAutoAssign ? 1 : 0]
-    );
+    if (pool.driver === 'pgsql') {
+        await pool.query(
+            `INSERT INTO wa_vendor_state (user_id, is_available, max_active, allow_auto_assign)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (user_id) DO UPDATE SET 
+                is_available = EXCLUDED.is_available,
+                max_active = EXCLUDED.max_active,
+                allow_auto_assign = EXCLUDED.allow_auto_assign,
+                updated_at = NOW()`,
+            [userId, isAvailable ? 1 : 0, maxActive || 0, allowAutoAssign ? 1 : 0]
+        );
+    } else {
+        await pool.query(
+            `INSERT INTO wa_vendor_state (user_id, is_available, max_active, allow_auto_assign)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE 
+                is_available = VALUES(is_available),
+                max_active = VALUES(max_active),
+                allow_auto_assign = VALUES(allow_auto_assign)`,
+            [userId, isAvailable ? 1 : 0, maxActive || 0, allowAutoAssign ? 1 : 0]
+        );
+    }
     return { user_id: userId, isAvailable, maxActive, allowAutoAssign };
 }
 

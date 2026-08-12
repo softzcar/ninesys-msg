@@ -1,0 +1,33 @@
+# Bitácora de Trabajo - Corrección del Reconocimiento de Clientes Registrados en WhatsApp (@lid y PostgreSQL)
+Fecha: 2026-07-29
+Hora: 17:25:00
+
+## 1. Problema Reportado
+Al interactuar como cliente ya registrado en la empresa a través de WhatsApp, la IA solicitaba al cliente ingresar sus datos personales (*"¿Me podrías indicar tu nombre, apellido y ciudad para generar el presupuesto?"*), en lugar de reconocer automáticamente su perfil existente en la tabla `customers`.
+
+## 2. Diagnóstico Técnico y Causas Raíz
+
+### Causa Raíz 1: Incompatibilidad de `REGEXP_REPLACE` en PostgreSQL
+- **Detalle:** En `customerLookup.findCustomerByJid`, la consulta SQL utilizaba `REGEXP_REPLACE(phone, '[^0-9]', '')`.
+- **Efecto:** En MySQL, esa función reemplaza globalmente todos los caracteres no numéricos. En PostgreSQL, por defecto reemplaza solo la **primera ocurrencia** a menos que se especifique el cuarto parámetro `'g'` (`REGEXP_REPLACE(phone, '[^0-9]', '', 'g')`). Como resultado, las búsquedas de teléfono en PostgreSQL fallaban y la consulta devolvía `null`.
+- **Typing de Parámetros:** Además, la cláusula `LIKE CONCAT('%', ?)` producía un error de tipo indeterminado (`42P18`) en el driver `pg-pool`.
+
+### Causa Raíz 2: Falta de Resolución `senderPn` en `@lid` de `waManager.js`
+- **Detalle:** En mensajes entrantes con JID tipo `@lid` (`168255394209832@lid`), `waManager.js` intentaba buscar en `wa_lid_phone_map`. Si la conversación aún no tenía mapeo en la tabla, el JID no se resolvía a un número telefónico antes de llamar a `findCustomerByJid`, buscando erróneamente los dígitos de un identificador hash LID en lugar del número de teléfono real.
+
+## 3. Solución Implementada
+
+1. **[customerLookup.js](file:///home/developer/Escritorio/niesys/msg_ninesys/src/services/customerLookup.js):**
+   - Se añadió el flag `'g'` para PostgreSQL en `findCustomerByJid`: `REGEXP_REPLACE(phone, '[^0-9]', '', 'g')`.
+   - Se preparó el patrón de búsqueda `likePattern = '%${last10}'` directamente en los parámetros para evitar ambigüedades en `pg-pool`.
+
+2. **[waManager.js](file:///home/developer/Escritorio/niesys/msg_ninesys/src/services/waManager.js):**
+   - Se actualizó el flujo de resolución de JID entrante: antes de consultar `findCustomerByJid`, si el mensaje trae `incoming.key.senderPn`, se extrae el número real, se resuelve `resolvedJid` y se guarda reactivamente el par en `wa_lid_phone_map`.
+
+## 4. Verificación Empírica
+Se ejecutó la consulta directa de búsqueda de cliente en Node.js sobre `vps-contabo-dev` contra PostgreSQL:
+- **Resultado:** `findCustomerByJid` resolvió con éxito el perfil del cliente en la tabla `customers` de la empresa `194`.
+- **Inyección en Prompt:** `waManager` inyecta la sección `=== CLIENTE REGISTRADO EN EL SISTEMA ===` con la indicación crítica: *"NO le preguntes nombre, apellido, cédula, teléfono ni ningún dato personal — ya los tienes arriba"*.
+
+## 5. Despliegue
+- Todos los cambios fueron validados, rsync'd a `vps-contabo-dev` y reiniciados en PM2 (`ntmsg-app` online).

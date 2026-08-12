@@ -1,0 +1,55 @@
+- **Solicitud del Usuario:** Tras probar la consulta de deuda/estado de cuenta vía WhatsApp (empresa 194), se reportaron 2 problemas: (1) el bot respondió "no debes nada" a un cliente que en realidad tenía 3 órdenes con saldo pendiente; (2) tras corregir lo anterior, el detalle de órdenes se mostraba condensado en una sola línea con separadores "|" en vez de líneas separadas como se hace con telas/catálogo.
+
+- **Fecha y Hora:** 2026-06-23 14:36:35 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — `ORDER_RE` ampliada; `enrichContext` acepta `registeredPhone`; `fetchOrderContext` reformateado a líneas separadas por orden.
+  - `msg_ninesys/src/services/aiService.js` — `generateReply` acepta y propaga `registeredPhone`.
+  - `msg_ninesys/src/services/waManager.js` — captura `clienteRegistrado.phone` y lo pasa como `registeredPhone`.
+  - `scratch/update_prompt_194.php` (repo `ninesys-api`) — Sección 6 endurecida (no afirmar "sin deuda" si el bloque está ausente) y nuevo punto 3 en "Formato de Mensajes y Legibilidad" para el detalle de órdenes.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `6218512` — `fix(ai): detect debt questions without 'cuánto' and resolve phone for @lid JIDs`; `ce79897` — `fix(ai): format order/debt context as separate lines per order` (rama `feat/baileys-7-upgrade`)
+  - Backend (ninesys-api): N/A (solo el script de prompt, sin commit de código de API)
+
+- **Acción Realizada:**
+  **Diagnóstico (vía logs de PM2 `ntmsg-app` en `vps-contabo-dev`):**
+  El mensaje real del cliente fue *"si quiero saber si les debo dinero?"*. El log mostró `isOrderRequest: false, hasPhone: false`. Dos causas raíz:
+  1. `ORDER_RE` solo reconocía "deb*" precedido de "cuánto", o la frase exacta "mi deuda" — la frase del cliente no calzaba en ningún patrón.
+  2. El JID del cliente es de tipo `@lid` (identificador interno de WhatsApp, no el teléfono real). `extractPhoneFromJid` descarta cualquier JID `@lid`. El sistema sí reconocía al cliente por otra vía (`customerLookup.findCustomerByJid`, que ya tenía su teléfono real en la tabla `customers`), pero ese teléfono nunca llegaba a `fetchOrderContext`.
+
+  **Fix 1 — `ORDER_RE` (contextEnricher.js):** se agregaron las alternativas `(?:les?|te|le)\s+deb[oe]\w*`, `\bdeuda\b` y `\badeud\w*`, cubriendo "les debo", "le debe", "deuda" y "adeudo" sin requerir "cuánto" como prefijo.
+
+  **Fix 2 — Propagación del teléfono registrado:** `waManager.maybeAutoReply` ya resolvía `clienteRegistrado.phone` vía `customerLookup`; ahora se captura en una variable `registeredPhone` y se pasa a `aiService.generateReply({ ..., registeredPhone })` → `contextEnricher.enrichContext(..., { ..., registeredPhone })`. Dentro de `enrichContext`, `clientPhone` ahora es `extractPhoneFromJid(jid) || registeredPhone` — usa el teléfono ya conocido como respaldo cuando la resolución por JID falla.
+
+  **Fix 3 — Endurecer el prompt (Sección 6):** se separó el caso "todas las órdenes con saldo $0.00" (bloque presente, sin deuda real) del caso "el bloque no aparece en el contexto" (no se pudo verificar). Para este último, la instrucción ahora es explícita: NUNCA afirmar que no hay deuda; en su lugar, decir que no se tiene la información disponible en ese momento y escalar con `[HANDOFF_IA]`.
+
+  **Fix 4 — Formato vertical de órdenes (`fetchOrderContext`):** el formato anterior unía todos los campos de una orden en una sola línea con `|` como separador, lo cual Gemini reproducía literalmente (tal como pedía la sección de legibilidad para catálogo/telas: "preséntalo exactamente como viene"). Se reformateó cada orden a líneas separadas (`📄 *Orden #X*`, `• Estado:`, `• 📅 Entrega estimada:`, `• 💰 Saldo pendiente:`, productos indentados), con una línea en blanco entre órdenes. Se agregó el punto 3 a la sección global "## Formato de Mensajes y Legibilidad" del prompt, replicando el patrón ya usado para catálogo y telas (instrucción explícita de NO condensar en una línea ni usar "|").
+
+- **Inconvenientes y Desafíos:**
+  - El bug de formato era consecuencia directa de NO seguir el patrón arquitectónico ya establecido (pre-formatear en el backend y solo instruir "copia exactamente") — el bloque de órdenes era el único que dejaba la decisión de estructura visual a la IA.
+
+- **Decisión Final y Justificación:** Se aplicó el mismo patrón ya validado para catálogo/telas (pre-formatear verticalmente en código, instrucción de "copiar exactamente") en vez de depender de que la IA infiera la estructura — más confiable y consistente.
+
+- **Herramienta(s) Utilizada(s):** `Bash` (pm2 logs, node -c, scripts de prueba locales, git add/commit/push, ssh, scp, mysql), `Read`, `Edit`
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Script local con casos reales de regex (incluyendo la frase exacta que falló): 10/10 casos correctos.
+  - Script local con `fetchOrderContext` mockeado: produce el formato multi-línea esperado para 3 órdenes (Estado, Entrega estimada, Total, Abonos, Saldo, productos) con línea en blanco entre cada una y el total al final.
+  - Desplegado en `vps-contabo-dev`: HEAD en `ce79897`, PM2 `ntmsg-app` online.
+  - Prompt verificado por SQL: ambas secciones nuevas presentes (`NO aparece en el contexto en este momento`, `Formato del Detalle de Órdenes y Saldos`).
+  - El usuario confirmó por WhatsApp que la detección de deuda ya funciona (mostró las 3 órdenes reales con saldo) antes de reportar el problema de formato, que quedó corregido en este mismo ciclo.
+
+- **Logro Conseguido:** La consulta de deuda/estado de cuenta ahora funciona también para clientes con JID `@lid` (la mayoría en WhatsApp Business moderno) y para frases sin la palabra "cuánto", y el resultado se presenta en un formato legible multi-línea consistente con el resto del bot, en vez de una línea corrida con "|".
+
+- **Referencias de Sesión (Contexto):** Continuación directa de la tarea de servicios de diseño gráfico y de la prueba funcional pedida al usuario al cierre de esa tarea.
+
+- **⚠️ NOTA DE PERSISTENCIA:** Cualquier nuevo bloque de contexto dinámico que se agregue a futuro (siguiendo el patrón de `fetchOrderContext`/`fetchDesignServices`) debe pre-formatearse verticalmente en el código Node, NUNCA dejar la estructura visual a discreción de Gemini — y debe documentarse como un punto nuevo en la sección "## Formato de Mensajes y Legibilidad" del prompt.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

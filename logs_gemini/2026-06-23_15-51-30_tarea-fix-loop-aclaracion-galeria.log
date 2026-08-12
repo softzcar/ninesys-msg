@@ -1,0 +1,54 @@
+- **Solicitud del Usuario:** "vamos a revisar de nuevo los logs, en los últimos mensajes se ha quedado como en un loop". El bot repitió 3 veces la misma pregunta "¿De qué producto te gustaría ver diseños?" sin avanzar pese a que el cliente respondió "de franelas" y "franelas".
+
+- **Fecha y Hora:** 2026-06-23 15:51:30 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/services/waManager.js` — nuevo Map `_pendingGalleryClarification`, marcado al enviar la pregunta de aclaración, consumido en el siguiente turno y pasado como `forceGallery`.
+  - `msg_ninesys/src/services/aiService.js` — `generateReply` acepta y propaga `forceGallery`.
+  - `msg_ninesys/src/lib/contextEnricher.js` — `enrichContext` acepta `forceGallery`; sobrescribe `actionIntent` de 'catalog' a 'gallery' cuando el flag está activo.
+  - `scratch/update_prompt_194.php` (repo `ninesys-api`) — nueva "REGLA ABSOLUTA" en la sección de Galería prohibiendo inventar URLs cuando no hay bloque de galería en el contexto.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `abfad7c` — `fix(ai): break gallery clarification loop with pending-state flag` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se leyó la conversación completa (`wa_messages`) y los logs de PM2 (`ntmsg-app`) del momento exacto del loop. Secuencia real:
+  1. Cliente: "pero quiero ver unos modelos que hayan hecho..." → `intent: gallery` correctamente detectado, pero `enrichContext` devolvió contexto **completamente vacío** (`sections: 0`) — la resolución del término de producto (directa y vía recuperación del historial reciente) no encontró nada, probablemente por una falla transitoria de la llamada a Gemini Flash usada internamente. Sin ningún bloque de galería (ni "hay imagen", ni "no hay imágenes", ni "ya se mostraron todas"), Gemini llamó a `send_gallery_image` con una URL de Cloudinary **inventada** — rechazada por el whitelist de dominio (`cdn.nineteengreen.com`) ya existente en `waManager.js`. Al no haber texto ni imagen, se disparó la red de seguridad: pregunta de aclaración "¿De qué producto te gustaría ver diseños?".
+  2. Cliente responde "de franelas" — respuesta perfectamente razonable a la pregunta del bot. Pero `GALLERY_RE` no matchea frases sin verbo "ver/mostrar", así que `detectActionIntent` devolvió `'catalog'` (no `'gallery'`). `enrichContext` correctamente buscó catálogo normal (sí resolvió "franela" — `fetchProducts: buscando finalSearch: "franela"` — 13 productos encontrados), pero NUNCA intentó la galería porque `wantsGallery` dependía de `actionIntent === 'gallery'`. Gemini, viendo en el HISTORIAL que el turno anterior pidió fotos, intentó ayudar igualmente llamando a `send_gallery_image` con una URL inventada en `nineteen.com` (otro dominio inexistente) — rechazada de nuevo, mismo fallback, mismo bucle.
+  3. Cliente responde "franelas" — mismo patrón, tercera repetición.
+
+  **Causa raíz:** no existía ningún mecanismo para recordar "acabamos de preguntar de qué producto quiere ver fotos" entre turnos. `GALLERY_CONTINUATION_RE` existe pero solo se activa si `excludeGalleryUrls.length > 0` (ya se envió una foto exitosamente antes) — en este caso nunca se envió ninguna foto real, por lo que esa vía nunca se activaba.
+
+  **Fix:** se agregó `_pendingGalleryClarification` (Map jid→true) en `waManager.js`, marcado en el mismo punto donde se envía la pregunta de aclaración. En el siguiente turno se consume (borra) y se pasa como `forceGallery` a través de `generateReply` → `enrichContext`. Dentro de `enrichContext`, si `forceGallery` está activo y la detección normal de intención cayó en el valor por defecto `'catalog'`, se sobreescribe a `'gallery'` — sin afectar los casos donde el mensaje ya matchea presupuesto/compra/orden (esos mandan). Esto permite que el término ya correctamente resuelto ("franela") se use para una búsqueda real de galería en el siguiente turno, en vez de quedar huérfano.
+
+  Adicionalmente, se agregó una "REGLA ABSOLUTA" al prompt (sección de Galería) prohibiendo explícitamente llamar a `send_gallery_image` con una URL inventada cuando no hay ningún bloque de galería en el contexto del turno — como defensa adicional ante el caso (más raro) de que la resolución del término falle por completo incluso con `forceGallery` activo (ej. fallo transitorio de Gemini Flash), repitiendo lo que pasó en el primer mensaje del loop.
+
+- **Inconvenientes y Desafíos:**
+  - No se pudo reproducir 100% en pruebas locales el primer eslabón del loop (contexto vacío en el primer intento) porque depende de una llamada real a Gemini Flash (`extractProductSearch`) que no está disponible sin `GEMINI_API_KEY` en el entorno de pruebas local; se verificó por inspección de logs reales y por la lógica del código que la causa es coherente (falla transitoria de resolución de término, no un bug determinístico).
+  - El whitelist de dominio (`cdn.nineteengreen.com`) en `waManager.js` ya funcionaba correctamente — el problema no era que se enviaran URLs falsas al cliente, sino que el ciclo de aclaración nunca se rompía.
+
+- **Decisión Final y Justificación:**
+  Se eligió un flag de estado pendiente (mismo patrón que `_pendingPresupuestos`/`_pendingConfirmacionSinMarker`, ya establecido en el archivo) en vez de ampliar `GALLERY_RE` para incluir respuestas cortas tipo "de X" — ampliar la regex de forma genérica sería mucho más propenso a falsos positivos en mensajes que no tienen nada que ver con galería. El flag es preciso: solo se activa inmediatamente después de que el propio bot hizo la pregunta de aclaración.
+
+- **Herramienta(s) Utilizada(s):** `Bash` (mysql, ssh, pm2 logs, node -c, scripts de prueba, git add/commit/push, scp), `Read`, `Edit`
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - `node -c` sin errores de sintaxis en los 3 archivos.
+  - Prueba aislada confirmó que `forceGallery=true` cambia `actionIntent` de `'catalog'` a `'gallery'` correctamente (log `intent: "gallery"` tras el override, vs `intent: "catalog"` sin él).
+  - Desplegado en `vps-contabo-dev`: HEAD en `abfad7c`, PM2 `ntmsg-app` online.
+  - Prompt verificado por SQL: la nueva "REGLA ABSOLUTA" está presente.
+  - Pendiente: prueba funcional real reproduciendo el escenario (pedir ver modelos sin especificar producto, y luego responder con el nombre del producto en una respuesta corta) para confirmar que ya no se repite la pregunta.
+
+- **Logro Conseguido:** Se rompió el bucle de aclaración de galería que dejaba al cliente atrapado repitiendo la misma respuesta sin avanzar. El agente ahora recuerda que acaba de pedir aclaración y usa la respuesta del cliente para buscar la galería real en vez de reiniciar la detección de intención desde cero.
+
+- **Referencias de Sesión (Contexto):** Continuación directa de la sesión de hoy (diseño gráfico → fix deuda → fix formato órdenes → fix memoria multi-producto → este fix de loop de galería).
+
+- **⚠️ NOTA DE PERSISTENCIA:** El patrón `_pendingXxx` (Map jid→estado, consumido una sola vez en el siguiente turno) ya se usa para presupuestos, confirmaciones sin marker, y ahora aclaración de galería. Si se agregan más preguntas de aclaración de un solo uso a futuro, seguir este mismo patrón en vez de ampliar regexes genéricas.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

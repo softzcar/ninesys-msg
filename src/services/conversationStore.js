@@ -151,16 +151,26 @@ async function ingestMessage(pool, m, opts = {}) {
         }
     }
 
-    // 1) Insert mensaje (idempotente por wa_message_id). Si ya existía
-    //    (p.ej. persistido por recordOutbound antes del upsert), salimos
-    //    sin emitir nada para evitar eventos duplicados.
-    const [ins] = await pool.query(
-        `INSERT IGNORE INTO wa_messages
-            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [jid, wa_message_id, from_me, sender, type, body, media_url, media_mime,
-         from_me ? 'api' : 'human', 'delivered', ts]
-    );
+    // 1) Insert mensaje (idempotente por wa_message_id).
+    let ins;
+    if (pool.driver === 'pgsql') {
+        [ins] = await pool.query(
+            `INSERT INTO wa_messages
+                (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (wa_message_id) DO NOTHING`,
+            [jid, wa_message_id, from_me, sender, type, body, media_url, media_mime,
+             from_me ? 'api' : 'human', 'delivered', ts]
+        );
+    } else {
+        [ins] = await pool.query(
+            `INSERT IGNORE INTO wa_messages
+                (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [jid, wa_message_id, from_me, sender, type, body, media_url, media_mime,
+             from_me ? 'api' : 'human', 'delivered', ts]
+        );
+    }
     if (ins.affectedRows === 0) return null;
 
     // 2) Si la conversación estaba en papelera y llega nueva actividad,
@@ -176,21 +186,33 @@ async function ingestMessage(pool, m, opts = {}) {
     const restored = restoreRes.affectedRows > 0;
 
     // 3) Upsert conversación + bump last_*.
-    //    mysql2 affectedRows: 1 = insert nuevo, 2 = update, 0 = sin cambios.
-    //    Usamos conversationCreated para disparar auto-asignación a vendedor
-    //    histórico solo cuando se crea la conversación por primera vez.
     const lastPreview = (body || `[${type}]`).slice(0, 500);
-    const [upsertRes] = await pool.query(
-        `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-            name         = COALESCE(name, VALUES(name)),
-            last_message = VALUES(last_message),
-            last_ts      = VALUES(last_ts),
-            unread_count = unread_count + VALUES(unread_count),
-            updated_at   = CURRENT_TIMESTAMP`,
-        [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
-    );
+    let upsertRes;
+    if (pool.driver === 'pgsql') {
+        [upsertRes] = await pool.query(
+            `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (jid) DO UPDATE SET
+                name         = COALESCE(wa_conversations.name, EXCLUDED.name),
+                last_message = EXCLUDED.last_message,
+                last_ts      = EXCLUDED.last_ts,
+                unread_count = wa_conversations.unread_count + EXCLUDED.unread_count,
+                updated_at   = CURRENT_TIMESTAMP`,
+            [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
+        );
+    } else {
+        [upsertRes] = await pool.query(
+            `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                name         = COALESCE(name, VALUES(name)),
+                last_message = VALUES(last_message),
+                last_ts      = VALUES(last_ts),
+                unread_count = unread_count + VALUES(unread_count),
+                updated_at   = CURRENT_TIMESTAMP`,
+            [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
+        );
+    }
     const conversationCreated = upsertRes.affectedRows === 1;
 
     return {
@@ -224,29 +246,53 @@ async function recordOutbound(pool, { jid, wa_message_id, body, type = 'text', s
 
     const timestamp = Number(ts) || Math.floor(Date.now() / 1000);
     const isGroup = jid.endsWith('@g.us') ? 1 : 0;
-
-    await pool.query(
-        `INSERT INTO wa_messages
-            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
-         VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-            status     = VALUES(status),
-            body       = COALESCE(VALUES(body), body),
-            media_url  = COALESCE(VALUES(media_url), media_url),
-            media_mime = COALESCE(VALUES(media_mime), media_mime)`,
-        [jid, wa_message_id, jid, type, body, media_url, media_mime, via, status, timestamp]
-    );
-
     const lastPreview = (body || `[${type}]`).slice(0, 500);
-    await pool.query(
-        `INSERT INTO wa_conversations (jid, is_group, last_message, last_ts, unread_count)
-         VALUES (?, ?, ?, ?, 0)
-         ON DUPLICATE KEY UPDATE
-            last_message = VALUES(last_message),
-            last_ts      = VALUES(last_ts),
-            updated_at   = CURRENT_TIMESTAMP`,
-        [jid, isGroup, lastPreview, timestamp]
-    );
+
+    if (pool.driver === 'pgsql') {
+        await pool.query(
+            `INSERT INTO wa_messages
+                (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (wa_message_id) DO UPDATE SET
+                status     = EXCLUDED.status,
+                body       = COALESCE(EXCLUDED.body, wa_messages.body),
+                media_url  = COALESCE(EXCLUDED.media_url, wa_messages.media_url),
+                media_mime = COALESCE(EXCLUDED.media_mime, wa_messages.media_mime)`,
+            [jid, wa_message_id, jid, type, body, media_url, media_mime, via, status, timestamp]
+        );
+
+        await pool.query(
+            `INSERT INTO wa_conversations (jid, is_group, last_message, last_ts, unread_count)
+             VALUES (?, ?, ?, ?, 0)
+             ON CONFLICT (jid) DO UPDATE SET
+                last_message = EXCLUDED.last_message,
+                last_ts      = EXCLUDED.last_ts,
+                updated_at   = CURRENT_TIMESTAMP`,
+            [jid, isGroup, lastPreview, timestamp]
+        );
+    } else {
+        await pool.query(
+            `INSERT INTO wa_messages
+                (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                status     = VALUES(status),
+                body       = COALESCE(VALUES(body), body),
+                media_url  = COALESCE(VALUES(media_url), media_url),
+                media_mime = COALESCE(VALUES(media_mime), media_mime)`,
+            [jid, wa_message_id, jid, type, body, media_url, media_mime, via, status, timestamp]
+        );
+
+        await pool.query(
+            `INSERT INTO wa_conversations (jid, is_group, last_message, last_ts, unread_count)
+             VALUES (?, ?, ?, ?, 0)
+             ON DUPLICATE KEY UPDATE
+                last_message = VALUES(last_message),
+                last_ts      = VALUES(last_ts),
+                updated_at   = CURRENT_TIMESTAMP`,
+            [jid, isGroup, lastPreview, timestamp]
+        );
+    }
 
     return {
         jid,
@@ -639,12 +685,21 @@ async function upsertChatNames(pool, chats) {
         if (!c.id) continue;
         const name = c.name || c.subject || null;
         if (!name) continue;
-        await pool.query(
-            `INSERT INTO wa_conversations (jid, name, is_group)
-             VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE name = VALUES(name)`,
-            [c.id, name, c.id.endsWith('@g.us') ? 1 : 0]
-        );
+        if (pool.driver === 'pgsql') {
+            await pool.query(
+                `INSERT INTO wa_conversations (jid, name, is_group)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT (jid) DO UPDATE SET name = EXCLUDED.name`,
+                [c.id, name, c.id.endsWith('@g.us') ? 1 : 0]
+            );
+        } else {
+            await pool.query(
+                `INSERT INTO wa_conversations (jid, name, is_group)
+                 VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE name = VALUES(name)`,
+                [c.id, name, c.id.endsWith('@g.us') ? 1 : 0]
+            );
+        }
     }
 }
 
@@ -755,66 +810,105 @@ async function listDeletedJids(pool) {
 
 async function bulkUpsertConversations(pool, chats) {
     if (!chats || !chats.length) return;
-    const query = `
-        INSERT INTO wa_conversations (jid, name, is_group, unread_count, last_ts)
-        VALUES ?
-        ON DUPLICATE KEY UPDATE
-            unread_count = VALUES(unread_count),
-            last_ts = COALESCE(VALUES(last_ts), last_ts),
-            name = COALESCE(VALUES(name), name),
-            updated_at = CURRENT_TIMESTAMP
-    `;
-    const values = chats.map(c => [
-        c.jid,
-        c.name || null,
-        c.jid.endsWith('@g.us') ? 1 : 0,
-        c.unreadCount || 0,
-        c.lastTs || null
-    ]);
-    await pool.query(query, [values]);
+    if (pool.driver === 'pgsql') {
+        for (const c of chats) {
+            if (!c.jid) continue;
+            await pool.query(
+                `INSERT INTO wa_conversations (jid, name, is_group, unread_count, last_ts)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT (jid) DO UPDATE SET
+                     unread_count = EXCLUDED.unread_count,
+                     last_ts = COALESCE(EXCLUDED.last_ts, wa_conversations.last_ts),
+                     name = COALESCE(EXCLUDED.name, wa_conversations.name),
+                     updated_at = CURRENT_TIMESTAMP`,
+                [c.jid, c.name || null, c.jid.endsWith('@g.us') ? 1 : 0, c.unreadCount || 0, c.lastTs || null]
+            );
+        }
+    } else {
+        const query = `
+            INSERT INTO wa_conversations (jid, name, is_group, unread_count, last_ts)
+            VALUES ?
+            ON DUPLICATE KEY UPDATE
+                unread_count = VALUES(unread_count),
+                last_ts = COALESCE(VALUES(last_ts), last_ts),
+                name = COALESCE(VALUES(name), name),
+                updated_at = CURRENT_TIMESTAMP
+        `;
+        const values = chats.map(c => [
+            c.jid,
+            c.name || null,
+            c.jid.endsWith('@g.us') ? 1 : 0,
+            c.unreadCount || 0,
+            c.lastTs || null
+        ]);
+        await pool.query(query, [values]);
+    }
 }
 
 async function bulkUpsertMessages(pool, messages) {
     if (!messages || !messages.length) return;
-    const query = `
-        INSERT IGNORE INTO wa_messages
-            (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
-        VALUES ?
-    `;
-    const chunkSize = 500;
-    for (let i = 0; i < messages.length; i += chunkSize) {
-        const chunk = messages.slice(i, i + chunkSize);
-        const values = chunk.map(m => {
-            const jid = m.key.remoteJid;
-            const wa_message_id = m.key.id;
+    if (pool.driver === 'pgsql') {
+        for (const m of messages) {
+            const jid = m.key?.remoteJid;
+            const wa_message_id = m.key?.id;
+            if (!jid || !wa_message_id) continue;
             const from_me = m.key.fromMe ? 1 : 0;
             const sender = m.key.participant || m.key.remoteJid;
             const ts = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000);
             const type = extractType(m.message);
             const body = extractBody(m.message);
             const media_mime = extractMime(m.message);
+            if (type === 'system' && !body) continue;
+
+            await pool.query(
+                `INSERT INTO wa_messages
+                    (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (wa_message_id) DO NOTHING`,
+                [jid, wa_message_id, from_me, sender, type, body, null, media_mime, from_me ? 'api' : 'human', 'delivered', ts]
+            );
+        }
+    } else {
+        const query = `
+            INSERT IGNORE INTO wa_messages
+                (jid, wa_message_id, from_me, sender, type, body, media_url, media_mime, via, status, ts)
+            VALUES ?
+        `;
+        const chunkSize = 500;
+        for (let i = 0; i < messages.length; i += chunkSize) {
+            const chunk = messages.slice(i, i + chunkSize);
+            const values = chunk.map(m => {
+                const jid = m.key.remoteJid;
+                const wa_message_id = m.key.id;
+                const from_me = m.key.fromMe ? 1 : 0;
+                const sender = m.key.participant || m.key.remoteJid;
+                const ts = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000);
+                const type = extractType(m.message);
+                const body = extractBody(m.message);
+                const media_mime = extractMime(m.message);
+                
+                return [
+                    jid,
+                    wa_message_id,
+                    from_me,
+                    sender,
+                    type,
+                    body,
+                    null, // media_url
+                    media_mime,
+                    from_me ? 'api' : 'human',
+                    'delivered',
+                    ts
+                ];
+            }).filter(row => {
+                const [,,,type,body] = row;
+                if (type === 'system' && !body) return false;
+                return true;
+            });
             
-            return [
-                jid,
-                wa_message_id,
-                from_me,
-                sender,
-                type,
-                body,
-                null, // media_url
-                media_mime,
-                from_me ? 'api' : 'human',
-                'delivered',
-                ts
-            ];
-        }).filter(row => {
-            const [,,,type,body] = row;
-            if (type === 'system' && !body) return false;
-            return true;
-        });
-        
-        if (values.length) {
-            await pool.query(query, [values]);
+            if (values.length) {
+                await pool.query(query, [values]);
+            }
         }
     }
 }

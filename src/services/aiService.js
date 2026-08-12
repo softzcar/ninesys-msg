@@ -211,18 +211,16 @@ const AGENT_TOOLS = [
                 name: 'send_gallery_image',
                 description:
                     'Envía al cliente una imagen de la galería del producto. '
-                    + 'Llamar SIEMPRE que el contexto muestre una URL bajo "INSTRUCCIÓN OBLIGATORIA DE IMAGEN". '
-                    + 'Usar la URL exacta del contexto, sin modificarla. '
-                    + 'OBLIGATORIO: la respuesta debe incluir SIEMPRE texto junto a la llamada a función — '
-                    + 'presenta brevemente el producto y pregunta si le gusta o si quiere ver más. '
-                    + 'Ejemplo de texto: "¡Aquí te muestro un modelo de [producto]! ¿Te gusta el estilo? '
-                    + 'Tengo más opciones disponibles si quieres ver otra."',
+                    + 'Llamar ÚNICAMENTE cuando el contexto del turno presente muestre explícitamente una URL bajo la sección de imagen de galería. '
+                    + 'Usar la URL exacta provista en esa sección del contexto, sin modificarla. '
+                    + 'ESTRICTAMENTE PROHIBIDO llamar a esta función si el contexto de este turno NO incluye una URL de galería de imágenes, o si el usuario únicamente está preguntando precios, presupuestos o dudas de productos en texto. '
+                    + 'OBLIGATORIO: cuando se llame a esta función, incluye un breve texto de acompañamiento respondiendo a la inquietud del cliente o presentando la foto.',
                 parameters: {
                     type: 'object',
                     properties: {
                         url: {
                             type: 'string',
-                            description: 'URL completa de la imagen, copiada exactamente del contexto.',
+                            description: 'URL completa de la imagen, copiada exactamente del contexto del turno.',
                         },
                     },
                     required: ['url'],

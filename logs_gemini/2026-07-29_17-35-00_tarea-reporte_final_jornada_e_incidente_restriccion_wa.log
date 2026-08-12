@@ -1,0 +1,28 @@
+# Bitácora de Trabajo - Reporte Final de la Jornada e Incidente de Restricción de WhatsApp
+Fecha: 2026-07-29
+Hora: 17:35:00
+
+## 1. Resumen Completo de Tareas Realizadas
+
+### A. Migración de `msg_ninesys` a PostgreSQL y Solución a Error 500
+- Se adaptó el microservicio `msg_ninesys` para conectar dinámicamente con PostgreSQL (puerto 5432).
+- Se implementó `TenantPoolWrapper` para unificar la API `query()` en ambos motores (conversión automática de marcadores `?` a `$1, $2...`).
+- Se corrigió el error HTTP 500 en `GET /session-info/194`.
+
+### B. Corrección Completa del Catálogo en la IA (3 Causas Raíz)
+- **Búsqueda Sensible:** Se cambió `LIKE` por `ILIKE` en `ninesys-api` (`app/routes/msg_service.php`), haciendo que la búsqueda de franelas entregue los 13 productos en lugar de 2.
+- **Caché en Memoria:** Se redujo el TTL de `catalogClient.js` de 30 a 2 minutos y se hizo dinámica la instancia HTTP.
+- **Truncado de Prompt:** Se amplió el límite en `contextEnricher.js` de 10 a 15 productos (`slice(0, 15)`).
+- **Verificación:** El System Prompt de Gemini recibe ahora el listado completo de las 13 franelas con sus escalas de precio.
+
+### C. Corrección de la Herramienta de Galería (`send_gallery_image`)
+- Se eliminó el texto plantilla repetitivo en `aiService.js` y se añadió una prohibición estricta para evitar que Gemini envíe fotos repetidas cuando el cliente consulta únicamente precios en texto.
+
+### D. Reconocimiento Automático de Clientes Registrados
+- Se corrigió `REGEXP_REPLACE` en `customerLookup.js` agregando la bandera global `'g'` para PostgreSQL.
+- Se actualizó `waManager.js` para extraer `senderPn` en JIDs `@lid`, inyectando exitosamente la ficha del cliente en el System Prompt para evitar pedirle nuevamente sus datos personales.
+
+## 2. Incidente Actual / Bloqueante
+- **Descripción:** La cuenta de WhatsApp utilizada para las pruebas de desarrollo ha sido temporalmente restringida/bloqueada por WhatsApp debido al volumen de peticiones y pruebas realizadas durante la jornada.
+- **Efecto:** La sesión cerró socket por timeout de QR y no es posible re-escanear el código QR en este momento con la cuenta afectada.
+- **Acción Pendiente:** Aguardar a la desrestricción por parte de WhatsApp o vincular una cuenta/número de pruebas alternativo escaneando el QR en `https://app.nineteengreen.com/whatsapp/conexion/` para continuar las pruebas en vivo.

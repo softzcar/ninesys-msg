@@ -1,0 +1,46 @@
+- **Solicitud del Usuario:** El cliente preguntó por su saldo/deuda y el bot listó las 7 órdenes de su historial completo, incluidas 4 que ya estaban totalmente pagadas (`Saldo pendiente: $0.00`). Se pidió verificar y corregir para que la respuesta de deuda muestre solo las órdenes que realmente tienen saldo pendiente al momento de la consulta.
+
+- **Fecha y Hora:** 2026-06-23 16:30:34 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — `fetchOrderContext` reestructurada para separar órdenes con saldo pendiente de las ya pagadas.
+  - `scratch/update_prompt_194.php` (repo `ninesys-api`) — Sección 6 actualizada para reflejar las dos secciones del nuevo bloque de contexto.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `a0669fd` — `fix(ai): split order context into pending-balance vs paid sections` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  El endpoint `/internal/ordenes/{id}/by-phone` (correcto, sin cambios) siempre devolvió el historial completo de órdenes activas del cliente, no solo las con deuda — eso es intencional para poder responder preguntas de "estado de mi pedido" en general. El problema estaba en `fetchOrderContext`: armaba un solo bloque con TODAS las órdenes mezcladas, y dejaba en manos del prompt (Sección 6, "muestra TODAS las que presenten deuda") filtrar cuáles mostrar — instrucción que el modelo no siguió de forma consistente, mostrando el historial completo.
+
+  Se separó la lógica en dos grupos explícitos dentro de `fetchOrderContext`: `conDeuda` (saldo_pendiente > 0) y `sinDeuda` (saldo_pendiente <= 0). El bloque de contexto ahora trae dos secciones claramente delimitadas con headers: `--- CON SALDO PENDIENTE (usar para preguntas de deuda/saldo) ---` y `--- YA PAGADAS / SIN DEUDA (NO usar para preguntas de saldo/deuda, solo para estado de un pedido puntual) ---`. Las órdenes pagadas se muestran con menos detalle (sin Total/Abonos, solo estado/fecha/saldo $0.00) ya que no son relevantes para una respuesta de deuda. El total adeudado ahora se calcula solo sobre `conDeuda`.
+
+  Se actualizó la Sección 6 del prompt para instruir explícitamente: ante preguntas de saldo/deuda, usar ÚNICAMENTE la sección "CON SALDO PENDIENTE" y nunca mencionar la otra; ante preguntas de estado de un pedido específico, sí se puede buscar en cualquiera de las dos secciones; ante preguntas de estado general, se pueden mencionar ambas pero distinguiendo cuáles tienen saldo.
+
+- **Inconvenientes y Desafíos:**
+  - Se evaluó filtrar directamente en el endpoint PHP (solo devolver órdenes con deuda), pero se descartó porque rompería la capacidad de responder preguntas de "estado de mi pedido #X" para órdenes ya pagadas/entregadas. La separación en dos secciones dentro del mismo bloque preserva ambas capacidades sin ambigüedad para la IA.
+
+- **Decisión Final y Justificación:**
+  Igual que los fixes anteriores de hoy (formato de órdenes, servicios de diseño), se optó por pre-estructurar la información en el código (separación dura en dos grupos) en vez de confiar en que el modelo filtre correctamente solo con una instrucción de texto — patrón ya validado como más confiable en esta sesión.
+
+- **Herramienta(s) Utilizada(s):** `Bash` (node -c, script de prueba local, git add/commit/push, ssh, scp, mysql, pm2 restart), `Read`, `Edit`
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Script local con datos mockeados (2 órdenes con deuda, 2 pagadas, replicando proporciones del caso real) confirmó la salida con las dos secciones separadas correctamente y el total adeudado calculado solo sobre las órdenes con saldo.
+  - `node -c` sin errores de sintaxis.
+  - Desplegado en `vps-contabo-dev`: HEAD en `a0669fd`, PM2 `ntmsg-app` online.
+  - Prompt verificado por SQL: la sección "CON SALDO PENDIENTE" está presente en la BD.
+  - Pendiente: confirmación del usuario probando de nuevo la consulta de saldo por WhatsApp.
+
+- **Logro Conseguido:** Las consultas de deuda/saldo ahora solo pueden mostrar órdenes con saldo pendiente real, eliminando el riesgo de confundir al cliente con su historial completo de compras ya pagadas. Se preservó la capacidad de consultar el estado de un pedido específico ya pagado si el cliente lo pide explícitamente.
+
+- **Referencias de Sesión (Contexto):** Continuación directa de la sesión de hoy (servicios de diseño → fix deuda/teléfono @lid → fix formato órdenes → fix memoria multi-producto → fix loop galería → este fix de filtrado de órdenes pagadas).
+
+- **⚠️ NOTA DE PERSISTENCIA:** El bloque `=== ÓRDENES DEL CLIENTE ===` ahora SIEMPRE viene dividido en las dos secciones "CON SALDO PENDIENTE" / "YA PAGADAS O SIN DEUDA" (aunque una de las dos esté vacía). Cualquier cambio futuro a este bloque debe mantener esa separación o actualizar la Sección 6 del prompt en consecuencia.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

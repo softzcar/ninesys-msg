@@ -1,0 +1,51 @@
+- **Solicitud del Usuario:** Tras parchar repetidamente `ORDER_RE` en el día (y antes `GALLERY_RE`/`DESIGN_RE`), el usuario decidió atacar la causa de fondo: "podemos pasar largos meses... hardcodeando cada posible combinación de palabras... necesitamos una solución que nos permita interpretar de manera inteligente". Se evaluaron 3 alternativas (fusionar en el clasificador LLM existente / LLM solo como respaldo / arquitectura agéntica con function-calling) y el usuario eligió la Alternativa A: fusionar la detección de intención en la llamada LLM que YA se ejecuta en cada mensaje.
+
+- **Fecha y Hora:** 2026-06-23 17:12:24 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — Cambio estructural mayor: nuevo clasificador `classifyMessage`, `extractProductTerm` separado, `enrichContext` reescrita, 6 regex + `detectActionIntent` eliminados.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `b328d75` — `refactor(ai): replace intent-detection regex with unified LLM classifier`; `86daeff` — `fix(ai): use Type enum for responseSchema and disable thinking budget` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  **1. Planificación (modo plan):** Se investigó el código existente (2 precedentes ya en producción: `intentClassifier.js` para escalada a humano, `extractProductSearch` para normalizar prendas — ambos llamadas Gemini Flash fail-safe con timeout). Se confirmó soporte de `responseSchema`/`responseMimeType: 'application/json'` en el SDK instalado (`@google/genai@1.48.0`). Se diseñó el plan con un agente Plan y se aprobó con el usuario antes de tocar código.
+
+  **2. `classifyMessage(message, context)`** (nueva función): una sola llamada Gemini Flash que devuelve `{ productTerm, wantsGallery, wantsQuote, wantsOrderInfo, wantsDesignInfo, isCompraDirecta }`, reemplazando `GALLERY_RE`, `PRESUPUESTO_RE`, `COMPRA_RE`, `ORDER_RE`, `DESIGN_RE`, `GALLERY_CONTINUATION_RE` y `detectActionIntent`. Usa `responseSchema` (con el enum `Type` del SDK, NO strings en minúscula — ver "Inconvenientes") para forzar JSON válido. Recibe `recentMessages` (mensajes recientes del cliente) y `pendingGalleryClarification` (el flag `forceGallery` de hoy) como contexto del mismo prompt, eliminando el loop secuencial de hasta 4 llamadas LLM adicionales que existía para recuperar el término de producto del historial.
+
+  **3. `extractProductTerm(text)`**: se separó del antiguo `extractProductSearch` sin cambios de comportamiento — sigue usándose solo para normalizar nombres de carpetas CDN (`buildFolderNormMap`), que no debe recibir el prompt ampliado de intención (no tiene sentido pedirle banderas de intención al nombre de una carpeta).
+
+  **4. `enrichContext` reescrita**: la Fase 0 ahora corre `classifyMessage` en paralelo con `fetchSchedule`/`fetchTelasContext` (baratos, sin LLM) desde el inicio — se descartan `schedule`/`telas` después si la clasificación resulta ser una solicitud de galería pura, en vez de esperar secuencialmente a tener la clasificación antes de decidir si pedirlos (mitigación de latencia adoptada del plan, para no perder el paralelismo que existía con las regex síncronas de hoy). `fetchOrderContext`/`fetchDesignServices` siguen en una Fase 1 separada porque dependen 100% de las banderas de la clasificación.
+
+  **5. `forceGallery` preservado** (no eliminado): se pasa como `pendingGalleryClarification` dentro del prompt del clasificador en vez de como override post-cálculo — combina el determinismo del flag (sabemos con certeza que se hizo la pregunta de aclaración) con la inferencia del LLM (qué producto está respondiendo el cliente).
+
+- **Inconvenientes y Desafíos:**
+  - **Bug crítico encontrado durante la validación (no en el plan original):** la primera versión de `CLASSIFY_SCHEMA` usaba strings en minúscula (`type: 'object'`, `type: 'string'`) imitando el estilo de `AGENT_TOOLS` en `aiService.js` (que sí funciona así para `functionDeclarations`). Para `responseSchema` de `generateContent` esto NO funciona — `Schema.type` exige estrictamente el enum `Type` (`Type.OBJECT`, `Type.STRING`, `Type.BOOLEAN`, valores en MAYÚSCULA). Sin el enum correcto, Gemini ignoraba silenciosamente el schema y devolvía texto libre con preámbulo conversacional ("Here is the JSON...") en vez de JSON puro, causando errores de parseo en el 100% de los casos de prueba reales.
+  - **Segundo bug encontrado en la misma validación:** sin `thinkingConfig: { thinkingBudget: 0 }`, el modelo gastaba parte del presupuesto de `maxOutputTokens` en razonamiento interno antes de emitir el JSON, truncándolo a mitad de camino ("Unterminated string in JSON"). Este mismo problema ya había sido resuelto para la llamada principal (`generateReply` en `aiService.js`) pero no se había replicado en el nuevo clasificador. Se corrigió agregando la misma configuración.
+  - El script de validación inicial falló por completo en el primer intento por una razón distinta a las dos anteriores: al ejecutarse como script standalone en el VPS (no a través de `app.js`), no se cargaba `.env` (`app.js` llama a `require("dotenv").config()` al inicio, algo que un script suelto no hereda) — `GEMINI_API_KEY` quedaba indefinida y todo caía al fallback seguro. Se corrigió agregando `require('dotenv').config()` al script de prueba antes de re-ejecutar.
+  - No hay `GEMINI_API_KEY` disponible en el entorno local de desarrollo (sandbox de Claude Code) — toda la validación con la API real se hizo en `vps-contabo-dev`, **antes de reiniciar PM2**, para no exponer a clientes reales a una versión sin validar.
+
+- **Decisión Final y Justificación:**
+  Se mantuvo `forceGallery`/`_pendingGalleryClarification` en `waManager.js` sin cambios (en vez de confiar en que el LLM infiera del historial implícito) porque ese mecanismo resolvió un bug real hoy mismo y el costo de mantenerlo es una línea de contexto adicional en el prompt — el riesgo de quitarlo (volver al loop de aclaración de galería) no se justificaba frente al ahorro marginal.
+
+- **Herramienta(s) Utilizada(s):** `Agent` (Plan, para diseñar el reemplazo), `AskUserQuestion` (elección de alternativa A/B/C), `Read`, `Edit`, `Bash` (node -c, pruebas de integración locales con mocks, git add/commit/push, ssh, scp, pm2 restart/logs)
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Pruebas locales (sin `GEMINI_API_KEY`, solo estructura): `classifyMessage('hola')` devuelve `SAFE_FALLBACK` correctamente; `enrichContext` completo con clientes mockeados no lanza excepciones.
+  - **Validación contra la API real de Gemini en `vps-contabo-dev`** (script `scratch/test_classify_message.js`, 36 casos): reúne los 15 casos de `test_order_re2.js` (incluido el mensaje real que rompió `ORDER_RE` hoy), los 8 de `test_design_services.js`, 10 casos nuevos (intención combinada, presupuesto, compra directa, negativos) y el caso `pendingGalleryClarification`. Tras los 2 fixes (enum `Type`, `thinkingConfig`): **36/36 casos pasaron**, incluyendo el caso de aclaración de galería forzada (`"de franelas"` + `pendingGalleryClarification: true` → `wantsGallery: true, productTerm: "franela"`).
+  - Despliegue secuenciado de forma segura: `git reset --hard` en el VPS **sin reiniciar PM2**, validación completa contra la API real con el código nuevo en disco (mientras el proceso en memoria seguía corriendo el código anterior, sin afectar a usuarios), y solo tras confirmar 36/36 OK se ejecutó `pm2 restart`. Logs post-reinicio sin errores de arranque.
+  - Archivo temporal de prueba (`scratch_test_classify_message.js`) eliminado del VPS tras la validación.
+
+- **Logro Conseguido:** Las 5 regex de intención que se parcharon repetidamente hoy (y que inevitablemente volverían a romperse con la siguiente frase no anticipada) fueron reemplazadas por un único clasificador LLM que interpreta lenguaje natural real en vez de exigir patrones exactos — sin agregar una llamada nueva a Gemini (se fusionó en la que ya corría en cada mensaje) ni latencia adicional al camino feliz. El fix de hoy `113b608` (tolerancia de palabras en `ORDER_RE`) queda obsoleto: el problema que intentaba resolver desaparece de raíz con este cambio.
+
+- **Referencias de Sesión (Contexto):** Cierre de la línea de trabajo reactiva de hoy sobre rigidez de detección de intención (ver memoria de proyecto `feedback_ia_refinamiento_reactivo` y `project_pendiente_resumen_presupuesto_persistente`).
+
+- **⚠️ NOTA DE PERSISTENCIA:** Para cualquier llamada futura a Gemini que use `responseSchema` para output estructurado: usar SIEMPRE el enum `Type` importado de `@google/genai` (`Type.OBJECT`, `Type.STRING`, `Type.BOOLEAN`, etc.) — los strings en minúscula que sí funcionan en `AGENT_TOOLS`/`functionDeclarations` NO funcionan igual para `responseSchema` de `generateContent`, fallan en silencio (sin excepción, solo output no-JSON). Incluir también `thinkingConfig: { thinkingBudget: 0 }` en cualquier llamada de clasificación/extracción donde el output esperado sea corto y estructurado, para no perder el presupuesto de tokens en razonamiento interno.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

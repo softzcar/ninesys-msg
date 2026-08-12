@@ -1,0 +1,36 @@
+# Bitácora de Trabajo - Adaptación de msg_ninesys a PostgreSQL y Solución al Error 500 en /session-info/194
+Fecha: 2026-07-29
+Hora: 12:30:00
+
+## Tarea Realizada
+Solución al error HTTP 500 en el endpoint `GET /session-info/194` al presionar [Actualizar estado] en la interfaz de conexión de WhatsApp (`https://app.nineteengreen.com/whatsapp/conexion/`), derivado de la migración del motor de base de datos a PostgreSQL en el servidor de desarrollo `vps-contabo-dev`.
+
+## Diagnóstico y Causa Raíz
+1. La base de datos de desarrollo (`vps-contabo-dev`) fue migrada a **PostgreSQL (puerto 5432)**, donde residen `api_empresas` y las 12 tablas de WhatsApp `wa_*` de `api_emp_194`.
+2. `msg_ninesys` mantenía una implementación legacy con `mysql2` intentando conectarse a MariaDB/MySQL en el puerto 3306, resultando en rechazo de autenticación (`Access denied for user 'dev_user'@'localhost'`).
+
+## Acciones Realizadas
+
+### 1. Backend API (`ninesys-api`)
+- Se actualizó `app/routes/msg_service.php` para incluir `db_driver` (`pgsql` o `mysql`) y `db_port` (`5432` o `3306`) en el payload JSON devuelto por `GET /internal/db-credentials/{id_empresa}`.
+
+### 2. Microservicio de Mensajería (`msg_ninesys`)
+- **Dependencias:** Se instaló el paquete `pg` (v8.13.1) en `package.json`.
+- **Evaluación Dinámica de Entorno:** Se adaptó `src/db/credentialsClient.js` para instanciar el cliente `axios` dinámicamente, asegurando que `API_URL` y `MSG_SERVICE_INTERNAL_TOKEN` se lean correctamente tras la carga de `dotenv`.
+- **Abstracción de Pools Dual (MySQL + PostgreSQL):** Se creó la clase `TenantPoolWrapper` en `src/db/tenantResolver.js` para normalizar la API `pool.query(sql, params)` independientemente del driver underlying (convirtiendo marcadores `?` a `$1, $2...` para PostgreSQL).
+- **Adaptación de Consultas SQL:**
+  - `src/services/baileysAuthState.js`: Se adaptó la persistencia de claves con `ON CONFLICT (key_name) DO UPDATE` para PostgreSQL y `ON DUPLICATE KEY UPDATE` para MySQL. Se garantizó la creación automática de la tabla `wa_session_auth` si no existe.
+  - `src/services/conversationStore.js`: Se adaptaron los métodos `ingestMessage`, `recordOutbound`, `upsertChatNames`, `bulkUpsertConversations` y `bulkUpsertMessages` para soportar `ON CONFLICT` e `INSERT DO NOTHING`.
+  - `src/services/usageStore.js`: Se adaptó el conteo de consumo mensual a `ON CONFLICT (year_month, provider) DO UPDATE`.
+  - `src/services/lidMapping.js`: Se adaptó la persistencia LID↔Fono a `ON CONFLICT (lid_jid) DO UPDATE`.
+  - `src/services/assignmentPolicy.js`: Se adaptaron las consultas de asignación de vendedores a subqueries compatibles con PostgreSQL y `ON CONFLICT (user_id) DO UPDATE`.
+  - `src/services/waManager.js`: Se eliminaron escapes de backticks en `persistState`.
+
+### 3. Despliegue y Verificación en Vivo
+- Se sincronizaron los archivos hacia `vps-contabo-dev` mediante `rsync`.
+- Se reinició el microservicio en PM2: `pm2 restart ntmsg-app`.
+- **Prueba Final:** Se realizó la consulta HTTP a `GET /session-info/194` con el token JWT de administrador, respondiendo exitosamente con **HTTP 200** y entregando la imagen del código QR en base64:
+  `{"qr":"data:image/png;base64,...","ws_ready":false,"message":"Escanee el código QR para la compañía ID 194."}`.
+
+## Resultado
+Éxito completo. El microservicio `msg_ninesys` ahora soporta PostgreSQL de forma nativa e integrada con `ninesys-api`. El error 500 quedó resuelto.

@@ -1,0 +1,16 @@
+# Bitácora de Trabajo - Obtención de Credenciales de Gestión
+Fecha: 2026-07-01
+Hora: 11:00:00
+
+## Tarea Realizada
+Identificación de las credenciales de usuario y contraseña hardcodeadas en la interfaz de gestión de `msg_ninesys`.
+
+## Detalles del Análisis
+1. Se analizó el controlador de autenticación [authController.js](file:///home/developer/Escritorio/niesys/msg_ninesys/controllers/authController.js) en el proyecto `msg_ninesys`.
+2. En la función `loginManager` (línea 48), que maneja el inicio de sesión para el gestor en el endpoint `/login`, se localizó la validación directa de credenciales estáticas.
+3. Las credenciales requeridas para el inicio de sesión son:
+   - **Usuario**: `admin`
+   - **Contraseña**: `Ninesys@2024`
+
+## Conclusión
+Se identificaron de forma segura las credenciales estáticas que permiten acceder a la interfaz de administración del servicio.

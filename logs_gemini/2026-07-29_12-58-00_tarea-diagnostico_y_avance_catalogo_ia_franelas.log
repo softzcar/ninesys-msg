@@ -1,0 +1,33 @@
+# Bitácora de Trabajo - Diagnóstico de Filtro de Catálogo e IA en Servicio de WhatsApp (Franelas)
+Fecha: 2026-07-29
+Hora: 12:58:00
+
+## 1. Problema / Requerimiento
+Al interactuar con la IA de WhatsApp solicitando información sobre franelas disponibles, la IA respondió que solo existían 2 modelos (`Franela Estampado DTF` y `Franela Mitad Sublimada`), a pesar de que en la base de datos y en la lista oficial de productos existen 13 franelas (sublimada tradicional, sublimada licra, cuello V, algodón, oversize, corte sublimado, etc.).
+
+## 2. Diagnóstico Técnico y Avances Realizados
+
+### A. Corrección de Sensibilidad a Mayúsculas en PostgreSQL (`ILIKE`)
+- **Causa Raíz:** En `ninesys-api` (`app/routes/msg_service.php`), la consulta `GET /internal/catalog/{id_empresa}` utilizaba la cláusula `p.product LIKE ?`. Tras la migración de MariaDB a PostgreSQL, `LIKE` se convirtió en case-sensitive.
+- **Resultado Anterior:** Al buscar `'franela'` (minúsculas), PostgreSQL solo retornaba las 2 filas cuyo nombre estaba en minúsculas en la BD (`franela estampado DTF` y `franela mitad sublimada`), excluyendo las 11 franelas cuyos nombres inician en mayúscula (`Franela Sublimada`, `FRANELA ALGODON`, etc.).
+- **Fix Implementado:** Se modificó `msg_service.php` para usar `$likeOp = DB_DRIVER === 'pgsql' ? 'ILIKE' : 'LIKE'`.
+- **Verificación API:** La consulta HTTP directa `GET /internal/catalog/194?search=franela` pasó de devolver 2 productos a devolver los **13 productos** completos con sus escalas de precios.
+
+### B. Análisis del Comportamiento Persistente en la IA
+A pesar de que el endpoint backend ahora devuelve los 13 productos, en la interacción en vivo la IA aún puede presentar un subconjunto restringido. Las causas potenciales identificadas para investigar en la siguiente sesión son:
+
+1. **Extracción de Intención (`intentClassifier.js`):**
+   - El clasificador unificado Gemini analiza el mensaje del cliente y extrae `productTerm`. Si el término extraído o la intención detectada es muy específico o tiene ligeras variaciones, el contexto inyectado puede diferir.
+2. **Memoria Persistente de Productos Cotizados (`shownProductsByJid`):**
+   - En `contextEnricher.js`, los productos presentados en turnos anteriores quedan memorizados en `shownProductsByJid`. Si en turnos previos la memoria guardó solo los 2 productos antiguos (antes del fix `ILIKE`), la memoria persistente inyectada en el prompt de la conversación activa puede estar influenciando la respuesta de Gemini.
+3. **Ordenamiento y Truncado de Catálogo (`.slice(0, 10)`):**
+   - El catálogo devuelto se formatea y trunca a 10 elementos en `contextEnricher.js`. En PostgreSQL, el ordenamiento ASCII `ORDER BY p.product ASC` agrupa primero las mayúsculas, por lo que la composición del bloque inyectado debe revisarse.
+
+## 3. Estado Actual de Código y Despliegue
+- **`ninesys-api`:** `msg_service.php` actualizado con `ILIKE` y desplegado en `vps-contabo-dev`.
+- **`msg_ninesys`:** Adaptación completa a PostgreSQL (`TenantPoolWrapper`, `baileysAuthState.js`, `conversationStore.js`, `usageStore.js`, `lidMapping.js`, `assignmentPolicy.js`) desplegada y operando en PM2 (`ntmsg-app` online).
+
+## 4. Puntos de Partida para la Siguiente Sesión
+1. Probar en una **conversación completamente nueva** o tras limpiar la memoria conversacional (`clearShownProducts` / nuevo número de prueba) para descartar el sesgo de la memoria persistente previa al fix.
+2. Inspeccionar en logs de PM2 (`/root/.pm2/logs/ntmsg-app-out.log`) el bloque exacto `Productos encontrados:` e `=== PRODUCTOS YA COTIZADOS EN ESTA CONVERSACIÓN ===` que recibe el modelo Gemini en el turno.
+3. Ajustar las instrucciones del System Prompt en `wa_ai_agents` si Gemini requiere una indicación explícita para listar la totalidad de las variantes cuando el usuario pregunta de forma general por "franelas disponibles".

@@ -30,15 +30,28 @@ function isPhoneJid(jid) { return typeof jid === 'string' && jid.endsWith('@s.wh
 async function upsertMapping(pool, { lid, phoneJid, pushname } = {}) {
     if (!isLidJid(lid) || !isPhoneJid(phoneJid)) return false;
     try {
-        const [r] = await pool.query(
-            `INSERT INTO wa_lid_phone_map (lid_jid, phone_jid, pushname)
-             VALUES (?, ?, ?)
-             ON DUPLICATE KEY UPDATE
-                phone_jid    = VALUES(phone_jid),
-                pushname     = COALESCE(VALUES(pushname), pushname),
-                last_seen_at = CURRENT_TIMESTAMP`,
-            [lid, phoneJid, pushname || null]
-        );
+        let r;
+        if (pool.driver === 'pgsql') {
+            [r] = await pool.query(
+                `INSERT INTO wa_lid_phone_map (lid_jid, phone_jid, pushname)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT (lid_jid) DO UPDATE SET
+                    phone_jid    = EXCLUDED.phone_jid,
+                    pushname     = COALESCE(EXCLUDED.pushname, wa_lid_phone_map.pushname),
+                    last_seen_at = CURRENT_TIMESTAMP`,
+                [lid, phoneJid, pushname || null]
+            );
+        } else {
+            [r] = await pool.query(
+                `INSERT INTO wa_lid_phone_map (lid_jid, phone_jid, pushname)
+                 VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                    phone_jid    = VALUES(phone_jid),
+                    pushname     = COALESCE(VALUES(pushname), pushname),
+                    last_seen_at = CURRENT_TIMESTAMP`,
+                [lid, phoneJid, pushname || null]
+            );
+        }
         if (r.affectedRows === 1) {
             log.info({ lid, phoneJid, pushname }, '[lidMapping] nuevo mapeo persistido');
         }

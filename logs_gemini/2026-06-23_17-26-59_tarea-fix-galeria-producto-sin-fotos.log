@@ -1,0 +1,49 @@
+- **Solicitud del Usuario:** "le pedí gorras y me dio los precios correctamente, luego le pedí que me muestre gorras pero en la galería NO tengo fotos de gorras y allí se trancó". Se pidió leer la última conversación e investigar.
+
+- **Fecha y Hora:** 2026-06-23 17:26:59 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — `fetchGallery` cambia su contrato de retorno para distinguir "sin imágenes en absoluto" de "ya se mostraron todas"; `enrichContext` actualizado para usar ese dato en vez de un proxy global.
+  - `msg_ninesys/src/services/waManager.js` — red de seguridad: avisar al cliente si ninguna imagen pudo descargarse/enviarse.
+
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): `f920e9f` — `fix(ai): stop claiming gallery is exhausted for products with zero photos` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se confirmó primero (vía `galleryClient: carpetas listadas`) que el CDN de la empresa 194 solo tiene carpetas `chaquetas` y `franelas` — efectivamente no existen fotos de gorras, tal como reportó el usuario.
+
+  El clasificador unificado (implementado hace un momento) funcionó perfectamente: `classification: { productTerm: "gorra", wantsGallery: true, ... }`. El problema estaba en una capa más profunda, preexistente a los cambios de hoy:
+
+  `fetchGallery` retornaba `null` tanto cuando un producto NUNCA tuvo fotos (`carpeta vacía o inexistente`) como cuando SÍ tuvo fotos pero todas ya se mostraron (`todas las imágenes ya fueron enviadas`) — ambos casos indistinguibles para quien llama. `enrichContext` usaba `excludeGalleryUrls.length > 0` (si se envió ALGUNA imagen en TODA la conversación, de cualquier producto) como proxy para decidir cuál nota inyectar. Como el cliente ya había visto fotos de chaquetas antes en la misma conversación, `excludeGalleryUrls.length > 0` era `true`, y el sistema inyectó la nota: *"Ya se enviaron todas las fotos disponibles de 'gorra'... NO digas que no tienes imágenes — sí las tienes, pero ya las mostraste todas."* — una instrucción **falsa**, ya que nunca existió ninguna foto de gorra. Gemini, siguiendo esa instrucción (que no prohíbe llamar a `send_gallery_image`, solo prohíbe decir "no tengo"), inventó una URL plausible (`.../gallery/gorras/gorra-dtf-01.png`, imitando el patrón de nombres reales) que pasó el whitelist de dominio (`cdn.nineteengreen.com`) pero no existía (404 al descargarla). El texto de respaldo "¡Aquí te muestro!" ya se había enviado antes de intentar la descarga, y al fallar esta con un `continue` silencioso, el cliente quedó esperando una foto que nunca llegó — el "se trancó" reportado.
+
+  **Fix 1 (causa raíz):** `fetchGallery` ahora retorna `{ instruction, totalImages }` en vez de `string|null`. `totalImages` es específico del producto consultado (0 = nunca existió esa categoría; >0 sin `instruction` = existían pero ya se mostraron todas). `enrichContext` usa `galleryResult.totalImages > 0` para elegir la nota correcta, eliminando la dependencia del proxy global `excludeGalleryUrls.length`.
+
+  **Fix 2 (defensa adicional):** en `waManager.js`, si se prometió una imagen (`imgUrls.length > 0`) pero ninguna logró descargarse/enviarse (`anyImageSent === false`), se envía un mensaje de disculpa pidiendo que repita el producto, en vez de dejar la conversación colgada con un "¡Aquí te muestro!" sin imagen real.
+
+- **Inconvenientes y Desafíos:**
+  - Este bug es independiente del trabajo de hoy sobre el clasificador LLM (que funcionó correctamente) — es un bug preexistente en la lógica de galería, expuesto por primera vez en esta sesión simplemente porque hoy se probó pidiendo fotos de un producto sin carpeta CDN después de haber visto fotos de otro producto en la misma conversación (combinación de condiciones que no se había dado en pruebas anteriores).
+
+- **Decisión Final y Justificación:**
+  Se cambió el contrato de retorno de `fetchGallery` (de string a objeto) en vez de mantenerlo y agregar un parámetro de salida adicional por otra vía, porque es la forma más clara de que el dato (`totalImages`) viaje junto con la instrucción sin introducir un segundo argumento de salida o una variable de estado compartida.
+
+- **Herramienta(s) Utilizada(s):** `Bash` (mysql, pm2 logs, node -c, prueba de integración local reproduciendo el caso exacto, git add/commit/push, ssh, pm2 restart), `Read`, `Edit`
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Prueba local reproduciendo el caso exacto (carpetas CDN = `["chaquetas","franelas"]`, `excludeGalleryUrls` con una URL de chaqueta previa, se pide `"gorra"`): `fetchGallery` devuelve `{"instruction":null,"totalImages":0}` — correcto, antes el dato disponible para decidir la nota no existía.
+  - `node -c` sin errores de sintaxis en ambos archivos.
+  - Desplegado en `vps-contabo-dev`: HEAD en `f920e9f`, PM2 `ntmsg-app` online sin errores de arranque.
+  - Pendiente: prueba funcional real repitiendo "muéstrame gorras" tras haber visto fotos de otro producto, para confirmar que ahora responde honestamente "no tengo fotos de gorras" sin inventar URL.
+
+- **Logro Conseguido:** El bot ya no le miente a Gemini sobre la existencia de fotos de un producto basándose en si se mostraron fotos de OTRO producto antes en la conversación — cada producto se evalúa de forma independiente. Además, si en el futuro cualquier URL de imagen (inventada o no) falla al descargarse, el cliente recibe una respuesta en vez de quedar esperando indefinidamente.
+
+- **Referencias de Sesión (Contexto):** Primera prueba funcional real del clasificador LLM unificado desplegado en la tarea anterior — sirvió para detectar este bug preexistente en `fetchGallery`/`enrichContext` que las regex de hoy nunca habían expuesto.
+
+- **⚠️ NOTA DE PERSISTENCIA:** Cualquier lógica futura de "¿ya le mostré esto al cliente?" debe evaluarse por producto/categoría específica, nunca con una bandera global de toda la conversación — ese patrón (proxy global en vez de dato específico) fue la causa raíz de este bug y podría repetirse en otras áreas (ej. catálogo, telas) si se reutiliza sin pensar el mismo atajo.
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A.

@@ -1,0 +1,80 @@
+- **Solicitud del Usuario:** Mejorar el formato de los productos del catálogo y las telas para móviles (con emojis, listas verticales) y añadir el contexto de órdenes/deudas del cliente al prompt dinámico enviado a Gemini, para que el bot pueda responder consultas de estado de cuenta sin escalar a un asesor humano.
+
+- **Fecha y Hora:** 2026-06-23 11:04:00 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/contextEnricher.js` — Archivo principal modificado. Contiene todas las funciones de enriquecimiento de contexto para el prompt de Gemini.
+  - `msg_ninesys/src/lib/orderClient.js` — Archivo de cliente HTTP para llamar al endpoint de órdenes (consultado como referencia, no modificado hoy).
+
+- **Commits Relacionados:**
+  - Frontend: N/A
+  - Backend (msg_ninesys): `41d7b8a` — `feat(ai): improve legibility formatting for catalog products and fabrics, and add order context` (rama `feat/baileys-7-upgrade`)
+
+- **Acción Realizada:**
+  Se realizaron 3 cambios mayores en `contextEnricher.js`:
+
+  **1. `fetchOrderContext(tenantId, phone)` — Nueva función de inyección de órdenes:**
+  - Llama al nuevo endpoint `GET /internal/ordenes/{tenantId}/by-phone?phone={phone}` usando el cliente HTTP interno.
+  - Si `found: true`, construye un bloque de texto con el encabezado `=== ÓRDENES DEL CLIENTE ===` que incluye:
+    - Instrucción crítica para la IA: "Usa ÚNICAMENTE esta información para responder. NO uses [HANDOFF_IA]."
+    - Para cada orden: ID, estatus, fecha de entrega, saldo pendiente, lista de productos.
+    - Usa emojis para legibilidad móvil: 📄 (orden), 📅 (fecha), 💰 (saldo), ✅ (pagada).
+  - Si `found: false` o hay error, retorna un bloque vacío (no rompe el flujo).
+  - Esta función es llamada en el ensamblador del contexto principal y se inyecta como sección dinámica en el prompt del turno.
+
+  **2. `formatCatalogProducts(products)` — Reformateo de precios verticales:**
+  - Antes: Los precios de cada rango de cantidad se listaban en línea (difícil de leer en móvil).
+  - Ahora: Se lista cada rango de precio en una línea separada con viñeta `•`, acompañado del emoji 💲.
+  - Se añadió un marcador interno `[PRODUCTO_CATALOGO]` al inicio de cada bloque de producto para facilitar el parseo futuro.
+  - Ejemplo de salida:
+    ```
+    [PRODUCTO_CATALOGO]
+    🎽 *Camiseta Dry-Fit*
+    💲 10-49 unidades: $5.00/u
+    💲 50-99 unidades: $4.50/u
+    💲 100+ unidades: $4.00/u
+    ```
+
+  **3. `formatTelasCategorized(telas)` — Clasificación de telas en 5 categorías:**
+  - Antes: Todas las telas se listaban en un solo bloque alfabético plano.
+  - Ahora: Se agrupan en 5 categorías con emojis de encabezado:
+    - 🔵 **Licra Standard** (Licra, Licra Doble Faz)
+    - 🟣 **Licra Premium / Técnica** (Supplex, Poliamida, Lycra 4-way stretch)
+    - 🟢 **Deportiva / Transpirable** (Dry-Fit, Microfibra, Mesh, Sublimable)
+    - 🟡 **Algodón y Mezclas** (Jersey, Franela, Piqué, Flatknit)
+    - ⚪ **Industrial / Especial** (Tyvek, Non-woven, Rigatino, Parachute)
+  - La categorización usa `includes()` e `indexOf()` sobre el nombre de la tela para clasificación automática.
+  - Subtipo de Licra agrupados: se detecta si el nombre contiene "Licra" para unificarlos en la primera categoría.
+
+- **Inconvenientes y Desafíos:**
+  - El sistema de clasificación de telas debe ser tolerante a nombres nuevos que no caigan en ninguna categoría conocida; se añadió una categoría `⚪ Otros` como fallback.
+  - Coordinación con el nuevo endpoint de órdenes: el `orderClient.js` ya estaba implementado en sesiones previas, por lo que solo se necesitó integrarlo en el flujo del `contextEnricher`.
+  - El bloque de contexto de órdenes debía colocarse estratégicamente: después del saludo inicial pero antes de los datos del catálogo, para que la IA lo priorice al responder preguntas de deuda.
+
+- **Decisión Final y Justificación:**
+  Se optó por inyectar las instrucciones anti-handoff DENTRO del bloque dinámico de contexto (en lugar de solo en el prompt estático del sistema) porque el prompt estático se carga una vez y las instrucciones dentro del contexto tienen mayor "peso" al estar en el turno actual de la conversación. Esto aumenta la probabilidad de que Gemini las siga en la respuesta inmediata.
+
+- **Herramienta(s) Utilizada(s):** `view_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` (git commit, git push, ssh para restart PM2)
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - El proceso PM2 `ntmsg-app` fue reiniciado en `vps-contabo-dev` (`ws.nineteengreen.com`) y quedó en estado `online` con PID 946341.
+  - Se confirmó via SSH que el directorio remoto está en el commit `41d7b8a` de la rama `feat/baileys-7-upgrade`.
+  - El endpoint de órdenes (`/internal/ordenes/194/by-phone`) responde correctamente, lo que valida que el `fetchOrderContext` puede obtener datos.
+
+- **Logro Conseguido:**
+  El contexto enviado a Gemini ahora incluye información en tiempo real de las deudas del cliente (obtenida del ERP), y los productos del catálogo y telas se presentan en formato optimizado para móviles. Esto permite que el agente virtual responda preguntas de estado de cuenta, saldo y fechas de entrega directamente, sin derivar la conversación a un asesor humano.
+
+- **Referencias de Sesión (Contexto):**
+  - Task: `/home/developer/.gemini/antigravity-ide/brain/15b9de0c-a0ad-48d0-9e2e-21a6c800bf27/task.md`
+  - Walkthrough: `/home/developer/.gemini/antigravity-ide/brain/15b9de0c-a0ad-48d0-9e2e-21a6c800bf27/walkthrough.md`
+
+- **⚠️ NOTA DE PERSISTENCIA:** Los cambios en `contextEnricher.js` son la pieza central del flujo de enriquecimiento de la IA. Cualquier cambio futuro al prompt dinámico debe hacerse en este archivo. Ver "Acción Realizada" para la lógica completa de clasificación de telas y estructura del bloque de órdenes.
+
+- **Observaciones de Gemini:**
+  Este cambio es parte de un refactoring mayor del agente de WhatsApp iniciado en la rama `feat/baileys-7-upgrade` (upgrade de Baileys 6 a 7, con nueva arquitectura multi-tenant). El `contextEnricher.js` actúa como el "cerebro de datos" que alimenta a Gemini con información del ERP en tiempo real para cada conversación.
+
+- **Respuesta de Gemini:** "El servicio de WhatsApp está online y el contexto de órdenes está siendo inyectado correctamente en el prompt de Gemini."

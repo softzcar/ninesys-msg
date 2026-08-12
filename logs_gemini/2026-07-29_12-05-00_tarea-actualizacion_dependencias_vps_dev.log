@@ -1,0 +1,30 @@
+# Bitácora de Trabajo - Actualización de Dependencias y Reinicio del Servicio de WhatsApp en Dev
+Fecha: 2026-07-29
+Hora: 12:05:00
+
+## Tarea Realizada
+Verificación de dependencias desactualizadas en el servidor de desarrollo (`vps-contabo-dev`), actualización via npm y reinicio del proceso PM2 (`ntmsg-app`).
+
+## Detalles de la Ejecución
+1. **Conexión SSH:** Se accedió al servidor de desarrollo `vps-contabo-dev` en la ruta `/home/ws.nineteengreen.com/public_html`.
+2. **Diagnóstico de Dependencias (`npm outdated`):** Se detectaron dependencias desactualizadas dentro del rango de versiones del proyecto.
+3. **Actualización Realizada (`npm update`):**
+   - Paquetes actualizados / modificados: 69 paquetes modificados, 41 añadidos, 33 eliminados.
+   - Principales dependencias actualizadas:
+     - `@google/genai`: `1.48.0` → `1.52.0`
+     - `@supabase/supabase-js`: `2.103.0` → `2.111.0`
+     - `axios`: `1.13.2` → `1.18.1`
+     - `baileys`: `6.7.21` → `6.7.24`
+     - `mysql2`: `3.16.0` → `3.23.2`
+     - `body-parser`: `1.20.4` → `1.20.6`
+     - `cors`: `2.8.5` → `2.8.6`
+     - `express`: `4.22.1` → `4.22.2`
+4. **Reinicio de Servicio:**
+   - Se ejecutó `pm2 restart ntmsg-app` en `vps-contabo-dev`.
+   - Estado tras reinicio: `online` (PID: `530511`).
+5. **Verificación de Logs PM2:**
+   - El servidor arrancó limpiamente sirviendo HTTP + WebSocket en el puerto `3000`.
+   - Los clientes WebSocket se reconectaron satisfactoriamente sin errores.
+
+## Resultado
+Éxito total. Servidor en producción/desarrollo actualizado y operando normalmente.

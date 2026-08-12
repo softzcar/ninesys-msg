@@ -1,0 +1,63 @@
+- **Solicitud del Usuario:** Enseñarle al agente de Ventas de WhatsApp (empresa 194) a manejar diseño gráfico: cuando el cliente, mientras cotiza, indique que quiere agregar un logotipo, dibujo u otro arte gráfico, se debe agregar el servicio de diseño gráfico correspondiente como un ítem adicional del presupuesto (no solo en observaciones), y permitir que la IA muestre la lista de servicios de diseño disponibles cuando se le pregunte.
+
+- **Fecha y Hora:** 2026-06-23 12:42:06 (America/Caracas, UTC-4)
+
+- **Proyecto(s):** Backend (Servicio de WhatsApp / msg_ninesys)
+
+- **Archivos Involucrados:**
+  - `msg_ninesys/src/lib/catalogClient.js` — Nueva función `fetchDesignCatalog(idEmpresa)`.
+  - `msg_ninesys/src/lib/contextEnricher.js` — Nueva regex `DESIGN_RE`, nueva función `fetchDesignServices(idEmpresa)`, enganchada en la Fase 1 paralela de `enrichContext`.
+  - `scratch/update_prompt_194.php` (repo `ninesys-api`) — Texto del `system_prompt` del agente de Ventas (id=2) ampliado.
+
+- **Commits Relacionados:**
+  - Frontend: N/A
+  - Backend (msg_ninesys): `09434c2` — `feat(ai): add graphic design services as an extra presupuesto item` (rama `feat/baileys-7-upgrade`)
+  - Backend (ninesys-api): `806dcc6` — `feat(internal): add only_design filter to catalog endpoint` (rama `refactor/modular-routes`)
+
+- **Acción Realizada:**
+  **1. `catalogClient.fetchDesignCatalog(idEmpresa)` (nueva función):**
+  Cliente HTTP hermano de `fetchCatalog`, consulta `GET /internal/catalog/{id}?only_design=1` con header `Authorization: {id}`. Comparte la misma cache en memoria (clave fija `__only_design__`, TTL 30 min) y el mismo manejo de errores (nunca lanza excepción, retorna `null`).
+
+  **2. `contextEnricher.DESIGN_RE` (nueva regex):**
+  Detecta intención de AGREGAR o PREGUNTAR por un servicio de diseño: `logo`, `logotipo`, `dibujo`, `arte gráfico`, `ilustración`, `estampado personalizado`, `mockup`, `bordado personalizado`, `diseño gráfico`, `redibuj*`, `servicios de diseño`. Deliberadamente NO incluye la palabra suelta "diseño"/"diseños" (ese es dominio de `GALLERY_RE`, que la usa para "ver diseños/modelos existentes" — un significado distinto: fotos vs. un servicio nuevo a cotizar).
+
+  **3. `contextEnricher.fetchDesignServices(idEmpresa)` (nueva función):**
+  - Llama a `catalogClient.fetchDesignCatalog`.
+  - Filtra productos sin precio usable (excluye servicios con `prices` vacío o precio $0 — cod 112/113 en empresa 194).
+  - Devuelve un bloque `=== SERVICIOS DE DISEÑO GRÁFICO DISPONIBLES ===` con instrucciones explícitas para Gemini: agregar el servicio como ítem ADICIONAL en `submit_presupuesto` (no solo en `obs`), regla de inferencia de cuál servicio usar (logo nuevo → "Diseño de Logo"; ya tiene logo y pide ajustarlo → "Redibujo de Logo"; ambiguo/otro arte → "Diseño Gráfico" genérico), cantidad siempre 1 (tarifa única, no se multiplica por cantidad de prendas), y el listado `• {nombre}: [cod:X][idCat:X] — $X.XX (tarifa única)`.
+
+  **4. Enganche en `enrichContext`:**
+  Se calcula `isDesignRequest = DESIGN_RE.test(lastUserMessage)` junto a `isOrderRequest`; se añadió como quinta promesa condicional en el `Promise.all` de la Fase 1 (mismo patrón que `fetchOrderContext`), con timeout de 8s, y se empuja a `sections` si no es `null`. Se exportó `_fetchDesignServices` en `module.exports` para testing.
+
+  **5. Prompt del agente (`scratch/update_prompt_194.php`):** ver bitácora paralela `2026-06-23_12-42-06_tarea-catalogo-only-design.log` del repo `ninesys-api` para el detalle completo del texto agregado (Regla especial en Paso D, nueva Sección 7, nueva prohibición). Subido y ejecutado en BD de Contabo Dev (`api_emp_194.wa_ai_agents`, id=2), verificado por SQL.
+
+- **Inconvenientes y Desafíos:**
+  - Evitar falsos positivos cruzados entre `DESIGN_RE` (nueva) y `GALLERY_RE` (existente, ya usa "ver diseños" para fotos). Se resolvió excluyendo la palabra suelta "diseño" de `DESIGN_RE` y probando 8 casos representativos en un script local (`scratch/test_design_services.js`), todos correctos.
+  - Se detectó que el script de despliegue `msg_ninesys/scripts/deploy_msg_ninesys.sh` apunta a un alias SSH desactualizado (`vps-ninesys` → Hostinger), pero el proceso PM2 `ntmsg-app` real y activo corre en `vps-contabo-dev` (`/home/ws.nineteengreen.com/public_html`, confirmado con `pm2 describe`). Se desplegó manualmente con el patrón correcto (git fetch + reset --hard + pm2 restart) en lugar de usar ese script obsoleto, para no desplegar a un servidor inactivo. Se recomienda actualizar o eliminar ese script para evitar confusión futura.
+
+- **Decisión Final y Justificación:**
+  Se creó una función hermana (`fetchDesignCatalog`) en vez de modificar `fetchCatalog` para no arriesgar la cache/firma que ya usa producción. Se usó una regex síncrona (`DESIGN_RE`) en vez de una llamada a Gemini para detectar intención, siguiendo el mismo patrón ya establecido para `ORDER_RE`/`GALLERY_RE`/`PRESUPUESTO_RE` (sin latencia adicional). No se modificaron `aiService.js` ni `presupuestoService.js`: se verificó leyendo el código que ya son genéricos y soportan un ítem de servicio sin talla/corte/tela.
+
+- **Herramienta(s) Utilizada(s):** `Read`, `Edit`, `Write`, `Bash` (node -c, node script de prueba, git add/commit/push, ssh, scp, pm2 restart, mysql, curl)
+
+- **Resultado:** Éxito
+
+- **Verificación:**
+  - Script local `scratch/test_design_services.js`: 8/8 casos de regex correctos (sin solapamiento `DESIGN_RE`/`GALLERY_RE`), y `fetchDesignServices` (con `catalogClient` mockeado) formatea correctamente el bloque, excluye productos sin precio, y retorna `null` ante catálogo vacío o error de red sin lanzar excepción.
+  - `node -c` sin errores de sintaxis en ambos archivos modificados.
+  - Desplegado en `vps-contabo-dev`: `git reset --hard origin/feat/baileys-7-upgrade` → HEAD en `09434c2`; `pm2 restart ntmsg-app` → estado `online`.
+  - Endpoint real verificado: `curl -H "Authorization: 194" ".../internal/catalog/194?only_design=1"` devuelve los 5 productos esperados con `category_id=17`.
+  - Prompt verificado por SQL: las 3 secciones nuevas (`SERVICIOS DE DISEÑO GRÁFICO DISPONIBLES`, `Regla especial`, prohibición de inventar) están presentes en `wa_ai_agents.system_prompt` (id=2).
+  - Pendiente para el usuario: prueba funcional real por WhatsApp (mensajes de prueba sugeridos: "agregar un logo nuevo", "redibujar mi logo", "qué servicios de diseño tienen", y el caso de control "ver los diseños disponibles" que NO debe disparar el bloque de servicios).
+
+- **Logro Conseguido:**
+  El agente de Ventas de WhatsApp (empresa 194) ahora puede, durante una cotización, detectar cuándo el cliente quiere agregar un logotipo/dibujo/arte gráfico, elegir automáticamente el servicio correcto (Diseño Gráfico/Diseño de Logo/Redibujo de Logo) según lo que describa, y registrarlo como un ítem real y facturable del presupuesto — además de poder listar los servicios de diseño disponibles cuando se le pregunte, sin inventar precios ni servicios.
+
+- **Referencias de Sesión (Contexto):**
+  - Continuación directa de la tarea de hoy sobre consulta de deuda/estado de cuenta (logs `2026-06-23_11-04-00_tarea-contextEnricher-orders-y-formato.log` y bitácoras relacionadas en `ninesys-api`).
+
+- **⚠️ NOTA DE PERSISTENCIA:** Se detectó una discrepancia de datos para la empresa 194: el precio de "Redibujo de Logo" en `products.price` es $10.00, pero el tramo real usado por el sistema (tabla `products_prices`, la misma que usa todo el catálogo) es $5.00. El sistema cotizará $5.00 (dato operativo real). Si el precio deseado es $10.00, corregir el dato en `products_prices` para `id_product=93` en la BD de la empresa correspondiente (esto es un ajuste de datos, no de código).
+
+- **Observaciones de Gemini:** N/A (tarea ejecutada con Claude Code).
+
+- **Respuesta de Gemini:** N/A — Resultado entregado directamente al usuario por Claude Code: funcionalidad desplegada en Contabo Dev y verificada (endpoint + prompt). Queda pendiente la prueba funcional real por WhatsApp.
