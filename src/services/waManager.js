@@ -654,11 +654,17 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
         let vendorId;
         if (opts.forcedVendorId != null) {
             vendorId = Number(opts.forcedVendorId);
-            await pool.query(
-                `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active)
-                 VALUES (?, 1, 0)`,
-                [vendorId]
-            ).catch(() => {});
+            if (pool.driver === 'pgsql') {
+                await pool.query(
+                    `INSERT INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0) ON CONFLICT (user_id) DO NOTHING`,
+                    [vendorId]
+                ).catch(() => {});
+            } else {
+                await pool.query(
+                    `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                    [vendorId]
+                ).catch(() => {});
+            }
         } else {
             vendorId = await assignmentPolicy.pickNextVendor({
                 pool,
@@ -1535,10 +1541,17 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
             try {
                 await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
                 // Fase D.2: Asegurar que el vendedor exista en wa_vendor_state
-                await pool.query(
-                    `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
-                    [sentByUser]
-                ).catch(() => {});
+                if (pool.driver === 'pgsql') {
+                    await pool.query(
+                        `INSERT INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0) ON CONFLICT (user_id) DO NOTHING`,
+                        [sentByUser]
+                    ).catch(() => {});
+                } else {
+                    await pool.query(
+                        `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                        [sentByUser]
+                    ).catch(() => {});
+                }
 
                 // Atomic: mode/ai_enabled/assigned_to + assigned_at (si cambió
                 // el vendedor) + last_vendor_reply_at=NOW. Reloj de timeout D.3.
@@ -1701,10 +1714,17 @@ async function sendMedia(idEmpresa, jid, params, opts = {}) {
             try {
                 await conversationStore.tagSentByUser(pool, wa_message_id, sentByUser);
                 // Fase D.2: Asegurar que el vendedor exista en wa_vendor_state
-                await pool.query(
-                    `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
-                    [sentByUser]
-                ).catch(() => {});
+                if (pool.driver === 'pgsql') {
+                    await pool.query(
+                        `INSERT INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0) ON CONFLICT (user_id) DO NOTHING`,
+                        [sentByUser]
+                    ).catch(() => {});
+                } else {
+                    await pool.query(
+                        `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                        [sentByUser]
+                    ).catch(() => {});
+                }
 
                 // Atomic: reloj de timeout D.3 (ver sendText).
                 await conversationStore.recordHumanTakeover(pool, jid, sentByUser);

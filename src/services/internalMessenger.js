@@ -35,7 +35,7 @@ async function resolveDepartmentForEmployee(pool, employeeId) {
             `SELECT id_departamento
              FROM api_empresas.empresas_usuarios_departamentos
              WHERE id_empleado = ? AND id_departamento IN (5, 6)
-             ORDER BY FIELD(id_departamento, 6, 5)
+             ORDER BY CASE WHEN id_departamento = 6 THEN 1 WHEN id_departamento = 5 THEN 2 ELSE 3 END
              LIMIT 1`,
             [employeeId]
         );

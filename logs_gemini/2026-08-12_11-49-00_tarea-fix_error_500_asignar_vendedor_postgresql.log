@@ -1,0 +1,21 @@
+# Bitácora de Trabajo - Solución a Error 500 al Asignar Vendedor y Adaptación Global PostgreSQL
+Fecha: 2026-08-12
+Hora: 11:49:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Tarea Realizada
+1. Se diagnosticó la causa del error HTTP 500 en `POST /conversations/204/171107302793405@lid/assign`: la sentencia `INSERT IGNORE INTO wa_vendor_state` generaba un error sintáctico en PostgreSQL.
+2. Se actualizó el wrapper `TenantPoolWrapper` en `src/db/tenantResolver.js` para convertir automáticamente cualquier instrucción `INSERT IGNORE INTO` a `INSERT INTO ... ON CONFLICT DO NOTHING` en bases de datos PostgreSQL.
+3. Se adaptaron las consultas explícitas en `controllers/whatsappController.js` y `src/services/waManager.js`.
+4. Se corrigió la función exclusiva de MySQL `ORDER BY FIELD()` en `src/services/internalMessenger.js` reemplazándola por `CASE WHEN`.
+5. Se desplegó con éxito hacia `vps-contabo-dev` mediante `ninesys-hub/bin/deploy_msg_ninesys.sh` y se verificó que el servicio `ntmsg-app` se encuentre activo y respondiendo de forma correcta (`https://ws.nineteengreen.com/health`).
+
+## Archivos Modificados
+- `src/db/tenantResolver.js`
+- `controllers/whatsappController.js`
+- `src/services/waManager.js`
+- `src/services/internalMessenger.js`
+- `logs_gemini/2026-08-12_11-49-00_tarea-fix_error_500_asignar_vendedor_postgresql.log` (creado)
+
+## Resultado
+Éxito completo. El microservicio `msg_ninesys` es ahora 100% compatible con PostgreSQL para la asignación de vendedores y consultas relacionadas, quedando desplegado y verificado en `vps-contabo-dev`.

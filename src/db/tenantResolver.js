@@ -39,9 +39,16 @@ class TenantPoolWrapper {
 
     async query(sql, params = []) {
         if (this.driver === 'pgsql') {
+            let processedSql = sql;
+            if (/INSERT\s+IGNORE\s+INTO/i.test(processedSql)) {
+                processedSql = processedSql.replace(/INSERT\s+IGNORE\s+INTO/i, 'INSERT INTO');
+                if (!/ON\s+CONFLICT/i.test(processedSql)) {
+                    processedSql += ' ON CONFLICT DO NOTHING';
+                }
+            }
             // Convertir marcadores de posición ? a $1, $2, $3... para PostgreSQL
             let idx = 1;
-            const pgSql = sql.replace(/\?/g, () => `$${idx++}`);
+            const pgSql = processedSql.replace(/\?/g, () => `$${idx++}`);
             const res = await this.rawPool.query(pgSql, params);
             const rows = res.rows || [];
             rows.affectedRows = res.rowCount;

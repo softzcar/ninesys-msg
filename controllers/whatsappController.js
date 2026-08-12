@@ -503,10 +503,17 @@ async function assignConversation(req, res) {
 
         // Fase D.2: Asegurar que el vendedor exista en la tabla de disponibilidad.
         // Si no existe, lo creamos como disponible por defecto.
-        await pool.query(
-            `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
-            [uid]
-        );
+        if (pool.driver === 'pgsql') {
+            await pool.query(
+                `INSERT INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0) ON CONFLICT (user_id) DO NOTHING`,
+                [uid]
+            );
+        } else {
+            await pool.query(
+                `INSERT IGNORE INTO wa_vendor_state (user_id, is_available, max_active) VALUES (?, 1, 0)`,
+                [uid]
+            );
+        }
 
         // D.4: notificar a toda la sala de la empresa. El frontend filtra
         // por userId para saber si el evento le concierne (le quitaron /
