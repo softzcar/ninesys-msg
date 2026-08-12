@@ -1,0 +1,17 @@
+# Bitácora de Trabajo - Revisión de Estado del Servicio de WhatsApp y Creación de Script de Despliegue Centralizado
+Fecha: 2026-08-12
+Hora: 11:37:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Tarea Realizada
+1. Revisión integral del estado del servicio de WhatsApp (`msg_ninesys`), confirmando que se encuentra ONLINE y operativo en `vps-contabo-dev` tras la corrección aplicada hoy en `aiService.js` (error de comillas invertidas MySQL en el switch de IA global).
+2. Presentación del informe/plan de revisión de estado documentado en el artefacto `estado_revision_servicio_whatsapp.md`.
+3. Commiteado de los cambios pendientes de la migración a PostgreSQL y tenant pool wrapper en la rama `feat/baileys-7-upgrade` (Commit: `87b050b`).
+4. Creación del script de despliegue centralizado en `ninesys-hub/bin/deploy_msg_ninesys.sh` para gestionar los despliegues del servicio de WhatsApp hacia `vps-contabo-dev` (opción 2) y proteger `vps-contabo-prod` (opción 1 con clave de seguridad).
+
+## Archivos Creados/Modificados
+- `ninesys-hub/bin/deploy_msg_ninesys.sh` (creado y con permisos `chmod +x`)
+- `msg_ninesys/logs_gemini/2026-08-12_11-37-00_tarea-revision_whatsapp_y_creacion_script_deploy.log` (creado)
+
+## Resultado
+Éxito completo. El código de `msg_ninesys` quedó commiteado y sincronizado localmente, y la infraestructura cuenta ahora con un script de despliegue centralizado estandarizado en `ninesys-hub/bin/`.
