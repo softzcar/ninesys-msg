@@ -442,7 +442,7 @@ async function updateAgent(pool, agentId, patch = {}) {
     const params = [];
     for (const [k, v] of Object.entries(normalized)) {
         if (!AGENT_WHITELIST.has(k)) continue;
-        sets.push(`\`${k}\` = ?`);
+        sets.push(`${k} = ?`);
         if ((k === 'knowledge_base') && v && typeof v !== 'string') {
             params.push(JSON.stringify(v));
         } else if (k === 'enabled' || k === 'is_default') {
@@ -702,7 +702,7 @@ async function updateSettings(pool, patch = {}) {
     const params = [];
     for (const [k, v] of Object.entries(patch)) {
         if (!SETTINGS_WHITELIST.has(k)) continue;
-        sets.push(`\`${k}\` = ?`);
+        sets.push(`${k} = ?`);
         // JSON columns aceptan string o se serializan
         if ((k === 'handoff_rules' || k === 'knowledge_base') && v && typeof v !== 'string') {
             params.push(JSON.stringify(v));
