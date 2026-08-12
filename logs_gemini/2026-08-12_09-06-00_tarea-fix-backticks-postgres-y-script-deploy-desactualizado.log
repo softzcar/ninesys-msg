@@ -1,0 +1,22 @@
+- **Solicitud del Usuario:** "vamos a corregir un bug en `/whatsapp/configuracion` donde tenemos un switch para desactivar la IA que al intentar desactivarla muestra el error `Error toggling IA global` lo desplegamos y procedemos con los dos puntos".
+- **Fecha y Hora:** 2026-08-12 09:06:00
+- **Proyecto(s):** Backend (msg_ninesys, servicio de WhatsApp)
+- **Archivos Involucrados:**
+  - `src/services/aiService.js` (`updateSettings()`, `updateAgent()`)
+  - `scripts/deploy_msg_ninesys.sh` (eliminado)
+- **Commits Relacionados:**
+  - msg_ninesys: `f62fd7a` (fix backticks), `19ccfdf` (eliminación script)
+- **Acción Realizada:**
+  1. Rastreado el error hasta `toggleAiGlobal` (`controllers/whatsappController.js`) → `aiService.setGlobalEnabled()` → `updateSettings()`, que armaba dinámicamente el `SET` de un `UPDATE` envolviendo cada nombre de columna en backticks (`` `${k}` = ? ``) -- sintaxis válida solo en MySQL. La empresa 204 (y cualquier empresa migrada a Postgres) rompía con "syntax error at or near \`\`\`" -- confirmado en vivo por el usuario contra `https://ws.nineteengreen.com/ai/toggle/204`, mensaje idéntico al reportado.
+  2. Se encontró el MISMO patrón exacto en `updateAgent()` (edición de agentes de IA), corregido igual, aunque no fue el bug reportado -- mismo archivo, mismo riesgo.
+  3. **Intento de despliegue fallido:** `scripts/deploy_msg_ninesys.sh` apuntaba a `vps-ninesys` (Hostinger, IP `194.195.86.253`). SSH a ese host falló de forma persistente (reset/timeout en el handshake de banner, no es problema de credenciales). El usuario aclaró que Hostinger no se usa "desde hace meses". Se confirmó vía `pm2 describe ntmsg-app` en `vps-contabo-dev` que el proceso real vive en Contabo Dev, misma ruta (`/home/ws.nineteengreen.com/public_html`), desde hace tiempo -- el script nunca se actualizó tras esa migración.
+  4. Desplegado manualmente por `rsync` + `pm2 restart ntmsg-app` contra el host correcto (Contabo Dev). El usuario pidió explícitamente eliminar el script viejo en vez de corregirlo ("elimina ese script desactualizado!") -- no existe todavía un reemplazo centralizado en `ninesys-hub/bin/` para este servicio, documentado en memoria para la próxima vez.
+- **Inconvenientes y Desafíos:** El repositorio tenía WIP ajeno preexistente sin commitear en el MISMO archivo (`aiService.js`, un ajuste de prompt para `send_gallery_image` no relacionado). Se usó `git stash` para aislar el fix (dejando el archivo en su estado original con backticks), reaplicar el fix limpio vía Edit, commitear solo eso, y `git stash pop` para restaurar el WIP ajeno -- confirmado que el pop se fusionó sin conflictos y sin reintroducir los backticks.
+- **Decisión Final y Justificación:** Quitar las comillas invertidas por completo (no reemplazarlas por comillas dobles de Postgres) porque ninguna de las columnas de las listas blancas (`SETTINGS_WHITELIST`, `AGENT_WHITELIST`) es palabra reservada en ningún motor -- la sintaxis sin comillas es válida y portable en MySQL y Postgres simultáneamente, sin necesidad de detectar el driver.
+- **Herramienta(s) Utilizada(s):** Read, Edit, Bash (`node --check`, `grep`, `git stash`/`pop`, `ssh`, `pm2`, `rsync`, `curl`, `psql`).
+- **Resultado:** Éxito.
+- **Verificación:** Verificado a nivel SQL directo contra la BD real de la empresa 204 en Contabo Dev (`UPDATE wa_ai_settings SET enabled = 0 WHERE id = 1` sin backticks, ejecuta limpio; estado restaurado a su valor original tras la prueba). El usuario confirmó en el navegador que el switch de `/whatsapp/configuracion` ya no muestra el error.
+- **Logro Conseguido:** Se corrigió un bug real que bloqueaba una función de seguridad/control operativo (desactivar la IA globalmente) para cualquier empresa migrada a Postgres, y se destapó y corrigió una referencia de despliegue completamente desactualizada (Hostinger, abandonada hace meses) que habría seguido fallando silenciosamente en el próximo intento de deploy de este servicio.
+- **Referencias de Sesión (Contexto):** N/A
+- **Observaciones de Claude:** N/A
+- **Respuesta de Claude:** Bug corregido (comillas invertidas de MySQL rompían el UPDATE dinámico en Postgres) y desplegado en el servidor real (Contabo Dev, no Hostinger como indicaba el script viejo, ya eliminado). Confirmado funcionando por el usuario.
