@@ -789,21 +789,38 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
         }
 
         // 4. Notificar al vendedor por dos canales (best-effort en ambos):
-        //    a) Mensajería interna de ninesys (panel)
+        //    a) Mensajería interna de ninesys (panel) -- este canal SÍ llega
+        //       al WhatsApp real del vendedor también: ninesys-api relaya
+        //       /ws/build-message/interno hacia send-direct-message.
         //    b) WhatsApp directo al número personal del vendedor
         //    Se ejecuta en ambos modos — en always_ai es solo notificación.
+        //    Switch notify_vendors_whatsapp (Configuración WhatsApp >
+        //    Opciones adicionales): con ambos canales siendo en realidad
+        //    WhatsApp real, si está desactivado se omiten los dos -- el
+        //    resto del handoff (asignación, cambio de modo) ya ocurrió
+        //    arriba y no se ve afectado.
         if (vendorId) {
-            internalMessenger.notifyVendorOfAssignment(idEmpresa, pool, {
-                vendorId,
-                jid,
-                reason,
-            }).catch(() => {});
+            const settings = await aiService.loadSettings(pool).catch(() => null);
+            const notifyEnabled = settings ? settings.notifyVendorsWhatsapp : true;
 
-            notifyVendorByWhatsApp(idEmpresa, pool, {
-                vendorId,
-                clientJid: jid,
-                reason,
-            }).catch(() => {});
+            if (notifyEnabled) {
+                internalMessenger.notifyVendorOfAssignment(idEmpresa, pool, {
+                    vendorId,
+                    jid,
+                    reason,
+                }).catch(() => {});
+
+                notifyVendorByWhatsApp(idEmpresa, pool, {
+                    vendorId,
+                    clientJid: jid,
+                    reason,
+                }).catch(() => {});
+            } else {
+                log.info(
+                    { tenantId: idEmpresa, jid, vendorId },
+                    'Aviso de asignación por WhatsApp omitido: notify_vendors_whatsapp desactivado'
+                );
+            }
         }
 
         log.info({ tenantId: idEmpresa, jid, assignedTo: vendorId, alwaysAi }, 'Handoff automático completado');

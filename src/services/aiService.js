@@ -297,7 +297,8 @@ function getClient() {
 async function loadSettings(pool) {
     const [rows] = await pool.query(
         `SELECT provider, enabled, model, system_prompt, temperature,
-                max_tokens, respond_in_groups, knowledge_base, always_ai
+                max_tokens, respond_in_groups, knowledge_base, always_ai,
+                notify_vendors_whatsapp
          FROM wa_ai_settings WHERE id = 1`
     );
     const s = rows[0];
@@ -312,6 +313,10 @@ async function loadSettings(pool) {
         respondInGroups: !!s.respond_in_groups,
         knowledgeBase: s.knowledge_base || null,
         alwaysAi: !!s.always_ai,
+        // Default true si la columna aún no existe en el tenant (empresas
+        // creadas antes de esta migración) -- no silenciar avisos por
+        // ausencia de dato, mismo criterio que el resto de estos booleanos.
+        notifyVendorsWhatsapp: s.notify_vendors_whatsapp == null ? true : !!s.notify_vendors_whatsapp,
     };
 }
 
@@ -692,7 +697,7 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
 const SETTINGS_WHITELIST = new Set([
     'provider', 'enabled', 'model', 'system_prompt', 'temperature',
     'max_tokens', 'respond_in_groups', 'handoff_rules', 'knowledge_base',
-    'always_ai',
+    'always_ai', 'notify_vendors_whatsapp',
 ]);
 
 async function updateSettings(pool, patch = {}) {
@@ -704,7 +709,7 @@ async function updateSettings(pool, patch = {}) {
         // JSON columns aceptan string o se serializan
         if ((k === 'handoff_rules' || k === 'knowledge_base') && v && typeof v !== 'string') {
             params.push(JSON.stringify(v));
-        } else if (k === 'enabled' || k === 'respond_in_groups' || k === 'always_ai') {
+        } else if (k === 'enabled' || k === 'respond_in_groups' || k === 'always_ai' || k === 'notify_vendors_whatsapp') {
             params.push(v ? 1 : 0);
         } else {
             params.push(v);
