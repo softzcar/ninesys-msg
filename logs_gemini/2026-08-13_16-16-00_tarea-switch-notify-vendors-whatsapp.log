@@ -1,0 +1,48 @@
+# Bitácora de Trabajo - Switch notify_vendors_whatsapp + incidente real detectado y corregido en el camino
+
+Fecha: 2026-08-13
+Hora: 16:16:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys) + Frontend (app_multi) + plantilla (ninesys-api)
+
+## Solicitud del Usuario
+
+"Vamos a implementar un switch en la página de configuración que ya existe, en la misma sección 'Opciones adicionales', para desactivar los envíos automáticos a empleados. Procede."
+
+## Tarea Realizada
+
+1. Nueva columna `wa_ai_settings.notify_vendors_whatsapp` (default 1, sin cambio de comportamiento) aplicada directamente en la base de datos de la empresa 194 (Postgres, Desarrollo).
+2. `aiService.js`: `loadSettings()` ahora expone `notifyVendorsWhatsapp`; `updateSettings()` la agrega a la lista blanca de campos editables.
+3. `waManager.js`, en `handoffToHuman()`: antes de disparar los 2 canales de aviso al vendedor (mensajería interna + WhatsApp directo -- ambos terminan siendo WhatsApp real, ver bitácora anterior), se consulta el setting; si está en 0, se omiten ambos sin afectar el resto del handoff (asignación del chat, cambio de modo de conversación).
+4. Frontend (`WaConfiguracion.vue`, app_multi): switch nuevo conectado al mismo patrón que los switches ya existentes.
+
+## Incidente real encontrado y corregido en el camino
+
+Al verificar la página en el navegador, apareció un error real ("Error leyendo settings IA") para la empresa **204 ("19 print")** -- que resultó ser justamente la empresa real que sufrió el bloqueo de WhatsApp que originó todo este trabajo. La columna nueva se había aplicado solo en la base de datos de la empresa 194 (con la que se venía trabajando toda la sesión), sin considerar que este servicio de Desarrollo también sirve a la 204 (y a la 163) -- sin la columna, el código nuevo rompía la carga de configuración de esas 2 empresas. Corregido aplicando la misma migración a las 3 bases de datos de Desarrollo (163, 194, 204), verificado que las 3 quedaron con el valor correcto.
+
+Segundo hueco encontrado al responder una pregunta directa del usuario ("¿esto ya está aplicado en 194 y 204 así como habilitado para nuevas empresas?"): la plantilla de empresa nueva (`ninesys-api`, commit `db8d97a`) estaba commiteada y pusheada a GitHub pero nunca se había desplegado al servidor real de Desarrollo -- corregido corriendo `deploy_backend.sh` y reverificando por `grep` directo contra el servidor.
+
+## Archivos Modificados
+- `src/services/aiService.js`
+- `src/services/waManager.js`
+- `scripts/add_notify_vendors_whatsapp_column.sql` (nuevo, documentación del cambio de esquema)
+
+## Commits Relacionados
+- msg_ninesys: `b9c020f`
+- app_multi: `bff6a49`
+- ninesys-api: `db8d97a`
+
+## Inconvenientes y Desafíos
+
+El incidente de la empresa 204 no fue detectado por revisión de código sino por prueba real en el navegador con una sesión de un usuario distinto a la que se venía usando toda la sesión -- refuerza la importancia de probar cambios de esquema contra TODAS las empresas activas de un ambiente, no solo la que está "de turno" en la conversación.
+
+## Resultado
+
+Éxito, tras 2 correcciones encontradas en el camino (ninguna de las 2 dejó datos reales dañados, ambas detectadas antes de que el usuario las encontrara por su cuenta).
+
+## Verificación
+
+Verificado end-to-end con curl (GET/PUT reales contra el servicio corriendo, con un JWT de prueba generado en el propio servidor): el valor se lee y se guarda correctamente, restaurado a su default (1) tras la prueba. Verificado visualmente en el navegador contra la empresa real 204 con su configuración real (81 conversaciones sin leer). Confirmado por SQL directo que las 3 empresas de Desarrollo (163, 194, 204) tienen la columna con el valor correcto, y que el archivo de plantilla en el servidor real ya la incluye.
+
+## Logro Conseguido
+
+Existe ahora un control real, verificado extremo a extremo, para apagar los avisos automáticos de WhatsApp a vendedores sin afectar la asignación de conversaciones -- disponible para las 3 empresas activas de Desarrollo y garantizado para cualquier empresa nueva que se cree a partir de ahora.

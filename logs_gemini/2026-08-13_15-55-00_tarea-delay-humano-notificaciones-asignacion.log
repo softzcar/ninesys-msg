@@ -1,0 +1,42 @@
+# Bitácora de Trabajo - Delay humano aplicado también a notificaciones de asignación (no solo respuestas de IA)
+
+Fecha: 2026-08-13
+Hora: 15:55:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+Revisión de los cambios de delay humano hechos el día anterior (2026-08-12, prevención de bloqueo de cuenta en respuestas de IA a clientes). El usuario notó, con una captura de pantalla real de su WhatsApp personal, que el aviso de "conversación asignada" a un vendedor llega en ráfaga de 2-3 mensajes prácticamente en el mismo segundo -- el mismo patrón de comportamiento tipo bot que ya causó el bloqueo original. Pidió corregirlo de la misma manera, acotado específicamente a esta sección (sin abrir una revisión más amplia del módulo de WhatsApp).
+
+## Diagnóstico
+
+El delay humano (`simulateHumanTyping`, ya probado en producción de Desarrollo) solo se aplicaba al envío de respuestas de IA (`maybeAutoReply`). Se encontraron 2 caminos adicionales que envían WhatsApp real de forma automática sin ningún delay:
+1. `notifyVendorByWhatsApp()` en `waManager.js` -- aviso directo al vendedor cuando se le asigna una conversación.
+2. 4 endpoints HTTP (`/send-message-basic`, `/send-message-custom`, `/send-message` (template), `/send-direct-message`) que expone este servicio y que `ninesys-api` usa para relayar mensajes -- incluyendo específicamente el relay de "Mensaje Interno" (`POST /ws/build-message/interno` en ninesys-api) que produce el segundo/tercer mensaje visto en la captura del usuario.
+
+## Tarea Realizada
+
+1. Se aplicó `simulateHumanTyping()` antes del envío en `notifyVendorByWhatsApp()`.
+2. Se exportó `simulateHumanTyping` desde `waManager.js` para poder usarla desde `controllers/whatsappController.js`.
+3. Se aplicó antes del envío en `sendMessage`, `sendMessageCustom`, `sendTemplateMessage` (siempre automáticos, nunca los usa un humano en vivo).
+4. En `sendDirectMessage` (compartido entre relays automáticos y el panel de un humano escribiendo en vivo) se aplicó el delay SOLO cuando el envío es automático (`!sent_by_user`), para no sumarle una espera artificial a un agente humano real que ya escribió el mensaje.
+
+## Archivos Modificados
+- `src/services/waManager.js`
+- `controllers/whatsappController.js`
+
+## Inconvenientes y Desafíos
+
+Distinguir con precisión cuáles de los 4 endpoints HTTP genéricos son siempre automáticos vs. cuáles también los usa un humano real -- requirió leer el código de `ninesys-api` que llama a cada uno (`communications.php`, `crm.php`) para confirmar que ninguno de los 3 primeros acepta nunca un `sent_by_user`.
+
+## Resultado
+
+Éxito. Desplegado en Desarrollo (`ws.nineteengreen.com`, pm2 `ntmsg-app`), reiniciado sin interrupción real del servicio (sesiones de WhatsApp se reconectan de forma perezosa por tenant).
+
+## Logro Conseguido
+
+Todos los envíos automáticos de WhatsApp del sistema (respuestas de IA a clientes + avisos de asignación a vendedores + relays desde ninesys-api) quedan protegidos por el mismo delay humano, sin afectar en absoluto los envíos manuales de un agente humano desde el panel.
+
+## Observaciones
+
+Este cambio, junto con el switch `notify_vendors_whatsapp` implementado inmediatamente después (ver bitácora siguiente), da al usuario dos capas de protección independientes contra un nuevo bloqueo de cuenta: ritmo humanizado de envío, y la posibilidad de apagar por completo los avisos automáticos si fuera necesario.
