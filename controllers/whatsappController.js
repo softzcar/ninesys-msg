@@ -216,7 +216,13 @@ async function sendMessage(req, res) {
     }
     try {
         const body = `Hola ${name || ''}, ${message}`.trim();
-        const sent = await waManager.sendText(companyId, toJid(phone), body);
+        const jid = toJid(phone);
+        // Endpoint de envío automático (llamado por ninesys-api, nunca por un
+        // humano escribiendo en vivo) -- mismo delay humano que las
+        // respuestas de IA, para no repetir el patrón de ráfaga instantánea
+        // que ya causó un bloqueo temporal de la cuenta.
+        await waManager.simulateHumanTyping(companyId, jid, body);
+        const sent = await waManager.sendText(companyId, jid, body);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -230,7 +236,9 @@ async function sendMessageCustom(req, res) {
         return res.status(400).json({ message: 'phone y message son requeridos' });
     }
     try {
-        const sent = await waManager.sendText(companyId, toJid(phone), message);
+        const jid = toJid(phone);
+        await waManager.simulateHumanTyping(companyId, jid, message);
+        const sent = await waManager.sendText(companyId, jid, message);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -249,7 +257,9 @@ async function sendTemplateMessage(req, res) {
     }
     try {
         const body = tpl({ ...vars, phone: phone_client });
-        const sent = await waManager.sendText(companyId, toJid(phone_client), body);
+        const jid = toJid(phone_client);
+        await waManager.simulateHumanTyping(companyId, jid, body);
+        const sent = await waManager.sendText(companyId, jid, body);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
@@ -280,6 +290,13 @@ async function sendDirectMessage(req, res) {
             ? { via: 'human', sentByUser: Number(sent_by_user) }
             : {};
         log.info({ tenantId: companyId, jid: targetJid, via: opts.via || 'api' }, 'sendDirectMessage');
+        // Delay humano solo para envíos automáticos (ej. el relay de
+        // "mensaje interno" desde ninesys-api) -- un humano real escribiendo
+        // en vivo desde el panel (via='human') ya tardó lo suyo en escribir,
+        // no hay que sumarle un delay artificial encima.
+        if (!sent_by_user) {
+            await waManager.simulateHumanTyping(companyId, targetJid, message);
+        }
         const sent = await waManager.sendText(companyId, targetJid, message, opts);
         res.status(200).json({ success: true, message: 'Mensaje enviado', data: sent });
     } catch (e) {

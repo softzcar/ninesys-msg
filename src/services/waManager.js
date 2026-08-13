@@ -691,6 +691,13 @@ async function notifyVendorByWhatsApp(idEmpresa, pool, { vendorId, clientJid, re
             + `${motivo}\n`
             + `Ingresa a *ninesys* para atender la conversación.`;
 
+        // Mismo delay humano (composing + espera) que ya se le aplica a las
+        // respuestas de IA -- sin esto, este aviso puede llegar pegado a
+        // otras notificaciones automáticas del mismo evento de asignación,
+        // reproduciendo el patrón de ráfaga instantánea que ya causó un
+        // bloqueo temporal de la cuenta (ver notifyVendorOfAssignment/
+        // sendDirectMessage, mismo motivo).
+        await simulateHumanTyping(idEmpresa, vendorJid, msg);
         await sendText(idEmpresa, vendorJid, msg, { via: 'api' });
         log.info({ tenantId: idEmpresa, vendorId, vendorJid }, 'notifyVendorByWhatsApp: mensaje enviado');
     } catch (e) {
@@ -1916,6 +1923,7 @@ module.exports = {
     destroy,
     sendText,
     sendMedia,
+    simulateHumanTyping,
     handoffToHuman,
     deleteWaChat,
     emit,
