@@ -21,6 +21,8 @@
  *   status        ← 'delivered' por defecto en upsert; updates llegan por messages.update
  */
 
+const lidMapping = require('./lidMapping');
+
 /**
  * Desanida envelopes de Baileys (ephemeralMessage, viewOnceMessage,
  * documentWithCaptionMessage, editedMessage, viewOnceMessageV2[Extension]).
@@ -106,7 +108,7 @@ const MEDIA_TYPES = new Set(['image', 'audio', 'video', 'document', 'sticker']);
  * @param {object} m  - mensaje Baileys (proto.IWebMessageInfo)
  */
 async function ingestMessage(pool, m, opts = {}) {
-    const jid = m.key?.remoteJid;
+    let jid = m.key?.remoteJid;
     if (!jid) return null;
 
     // Omitir grupos y difusiones de estados
@@ -114,9 +116,29 @@ async function ingestMessage(pool, m, opts = {}) {
         return null;
     }
 
+    // Identidad canónica: WhatsApp puede reportar el mismo contacto a veces
+    // como @lid (Linked Identifier, feature de privacidad) y a veces como
+    // @s.whatsapp.net. Si no resolvemos esto ANTES de persistir, un mismo
+    // contacto termina fragmentado en dos conversaciones separadas — cada
+    // una con su propio dueño/modo/IA independiente. Misma estrategia que ya
+    // usa customerLookup.resolveVendorForJid: preferir senderPn (Baileys
+    // 6.7.21+) y, si no viene, el mapeo ya persistido en wa_lid_phone_map.
+    // Si tampoco hay mapeo (contacto nuevo, aún sin contacts.upsert),
+    // seguimos con el @lid original — mismo comportamiento que hoy.
+    if (lidMapping.isLidJid(jid)) {
+        const senderPn = m.key?.senderPn || null;
+        if (lidMapping.isPhoneJid(senderPn)) {
+            lidMapping.upsertMapping(pool, { lid: jid, phoneJid: senderPn, pushname: m.pushName || null }).catch(() => {});
+            jid = senderPn;
+        } else {
+            const phoneJid = await lidMapping.resolvePhoneJid(pool, jid).catch(() => null);
+            if (phoneJid) jid = phoneJid;
+        }
+    }
+
     const wa_message_id = m.key.id;
     const from_me = m.key.fromMe ? 1 : 0;
-    const sender = m.key.participant || m.key.remoteJid;
+    const sender = m.key.participant || jid;
     const ts = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000);
     const type = extractType(m.message);
     const body = extractBody(m.message);
