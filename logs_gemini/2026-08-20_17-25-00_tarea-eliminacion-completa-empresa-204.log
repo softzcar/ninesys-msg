@@ -1,0 +1,42 @@
+# Bitácora de Trabajo - Desconexión WhatsApp 194/204 y eliminación completa de la empresa 204
+
+Fecha: 2026-08-20
+Hora: 17:25:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys) + ninesys-api + setup_company
+
+## Solicitud del Usuario
+
+"Vamos a eliminar la conexión de la empresa 194, vamos a hacer pruebas con la empresa 207" / "y la 204 también, solo vamos a dejar el número para probar con la empresa 207" / (tras verificar que 204 seguía existiendo en la base de datos pese a que el usuario creía haberla eliminado antes) "Eliminar la empresa 204 por completo... necesito que esta aplicación sea capaz de hacer esta tarea correctamente."
+
+## Tarea Realizada
+
+1. Desconectadas las sesiones de WhatsApp de las empresas 194 y 204 vía `DELETE /disconnect/:companyId` (JWT temporal de 5 minutos generado en el propio servidor para la llamada admin). Ambas llamadas devolvieron "No había sesión activa" (200) sin tocar la base de datos, porque `waManager.disconnect()` solo hace limpieza real cuando hay un objeto de sesión vivo en memoria -- ambas ya se habían caído previamente por agotamiento de reintentos de reconexión.
+2. Confirmado por el usuario el alcance real (eliminar 204 por completo, no solo desconectar WhatsApp) tras señalarle que la empresa SÍ seguía existiendo en `api_empresas.empresas` (`activo=1`), contradiciendo su suposición de que ya la había borrado desde `setup.nineteengreen.com`.
+3. Con `wa_session_auth`/`wa_session_state` ya sin sesión viva que limpiar automáticamente, se replicaron manualmente las mismas 2 operaciones que `disconnect()` habría hecho (`DELETE FROM wa_session_auth`; `UPDATE wa_session_state SET status='NOT_REGISTERED', last_error=NULL WHERE id=1`) -- verificado leyendo el código real de `disconnect()`/`clear()`/`persistState()` antes de replicar, para no desviarse de su alcance real (no se tocó `phone_number`/`pushname` ni conversaciones/mensajes).
+4. Ejecutado el borrado completo de la empresa 204 vía `DELETE /setup/user/{id}` de `ninesys-api` (curl directo, autenticado) -- exitoso: base de datos Postgres eliminada y filas centrales (`empresas`, `empresas_usuarios_empresas`, `empresas_usuarios_departamentos`) limpiadas.
+5. Investigado por qué el intento previo del usuario vía `setup.nineteengreen.com` había fallado en silencio (ver bitácora de `ninesys-api`, `9b1dc08`: condición de carrera entre `DROP DATABASE ... WITH (FORCE)` y el polling constante de `msg_ninesys` a todos los tenants).
+6. Token JWT temporal generado para las pruebas eliminado a pedido explícito del usuario ("borra ese token temporal que generaste") -- nota: el sistema de auth es puramente stateless (JWT sin registro/blacklist), así que "borrarlo" en la práctica significa no volver a usarlo hasta su expiración natural (5 minutos).
+
+## Archivos Modificados
+
+Ninguno en msg_ninesys en esta tarea -- solo operaciones sobre datos (SQL directo + llamadas a endpoints ya existentes). El fix de la condición de carrera se hizo en `ninesys-api` (ver su propia bitácora, commit `9b1dc08`).
+
+## Inconvenientes y Desafíos
+
+El usuario tenía una creencia incorrecta sobre el estado de la empresa 204 (creía que ya no existía) -- se le señaló la discrepancia con evidencia directa antes de proceder, en vez de asumir que el borrado ya se había completado.
+
+## Decisión Final y Justificación
+
+Replicar manualmente solo las 2 operaciones que `disconnect()` habría hecho (no más, no menos) para no arriesgar datos que esa función real no toca -- confirmado leyendo su código fuente real antes de actuar, no asumiendo su comportamiento.
+
+## Resultado
+
+Éxito. Empresa 204 eliminada por completo (BD + registros centrales), verificado sin huérfanos.
+
+## Verificación
+
+Verificado por SQL directo contra `api_empresas.empresas` que la empresa 204 ya no existe; verificado que no queda base de datos `api_emp_204` en el servidor Postgres.
+
+## Logro Conseguido
+
+Empresa de prueba 204 eliminada de forma limpia y completa, liberando el número de WhatsApp compartido para uso exclusivo de la empresa 207, y encontrado en el camino un riesgo sistémico real de arquitectura (condición de carrera en el borrado de cualquier empresa) que se corrigió de fondo en `ninesys-api`.

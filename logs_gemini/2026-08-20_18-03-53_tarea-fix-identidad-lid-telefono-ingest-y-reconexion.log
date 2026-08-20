@@ -1,0 +1,47 @@
+# Bitácora de Trabajo - Fix de identidad LID/teléfono en ingestMessage + reconexión de sesión de WhatsApp tras reinicio
+
+Fecha: 2026-08-20
+Hora: 18:03:53
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+"Entonces, ¿la próxima vez que asigne una conversación a la IA se mantendrá asignada o al recibir el mensaje pasará a modo humano nuevamente? Me parece que la corrección que hiciste fue manual." Seguido de: "Entiendo que el sistema está pensado para reasignar al último vendedor que atendió al cliente, pero si se requiere que una vez hecha esa asignación automática la IA lo siga atendiendo, ¡necesitamos poder hacer eso!"
+
+## Tarea Realizada
+
+1. Investigado el mecanismo real de "¿por qué volver a modo IA no se mantiene?": se confirmó que el sistema SÍ tiene una política de "ownership persistente" (`owner_id` en `wa_conversations`, fijado una sola vez por `claimOwnerIfEmpty`) diseñada exactamente para esto -- la auto-asignación a vendedor solo se dispara si TANTO `assigned_to` COMO `owner_id` están vacíos.
+2. Encontrada la causa raíz real: `ingestMessage()` en `conversationStore.js` usaba `m.key.remoteJid` tal cual como identidad de la conversación, sin resolver `@lid` (Linked Identifier, feature de privacidad de WhatsApp) a la identidad de teléfono -- a diferencia de `customerLookup.resolveVendorForJid`, que sí lo hacía correctamente. Un mismo contacto real, cuando WhatsApp alterna entre entregar sus mensajes por `@lid` y por `@telefono`, terminaba fragmentado en DOS conversaciones independientes en `wa_conversations`, cada una con su propio `owner_id`/modo/IA -- así que "volver a IA" en una no se reflejaba en la otra.
+3. Verificado el mapeo real ya existente para el caso concreto (`168255394209832@lid` <-> `584147307169@s.whatsapp.net` en `wa_lid_phone_map`, empresa 207) antes de diseñar el fix.
+4. Aplicado el fix en `conversationStore.js`, función `ingestMessage()`: si el jid entrante es `@lid`, se resuelve a la identidad de teléfono ANTES de persistir (prioridad a `m.key.senderPn` si viene válido; si no, consulta a `wa_lid_phone_map`), usando esa identidad canónica para todo lo que sigue (mensaje, conversación, eventos emitidos). Si no hay mapeo aún disponible, se mantiene el comportamiento actual (persistir bajo el `@lid` original) como respaldo seguro.
+5. Cambio acotado y aditivo: solo actúa cuando detecta un jid `@lid`, nunca modifica el comportamiento para jids de teléfono normales -- no requiere fusionar el historial de conversaciones ya fragmentadas, solo evita que se sigan generando divisiones nuevas hacia adelante.
+6. Commiteado y pusheado a `feat/baileys-7-upgrade` (rebase limpio sobre un commit de bitácora previo sin relación). `pm2 restart ntmsg-app` para aplicar el cambio.
+7. Encontrado y corregido un efecto colateral del propio reinicio: las sesiones de WhatsApp de este servicio se cargan de forma perezosa (bajo demanda) -- el reinicio dejó la sesión de la empresa 207 sin reconectar en memoria (confirmado con `GET /connected-clients` devolviendo `[]` pese a que `wa_session_state.status` en base de datos seguía mostrando `READY`, un valor obsoleto de antes del reinicio). Reconectada manualmente vía `GET /session-info/207`, sin necesidad de nuevo escaneo de QR (reutilizó credenciales guardadas).
+
+## Archivos Modificados
+
+- `src/services/conversationStore.js` (agrega `require('./lidMapping')` y resolución de identidad canónica al inicio de `ingestMessage()`)
+
+## Commits Relacionados
+
+- msg_ninesys: `79c68f1` (tras rebase sobre `e8f19c2`)
+
+## Inconvenientes y Desafíos
+
+Tras el primer mensaje de prueba post-fix, la IA dejó de responder por completo (no solo el síntoma original) -- diagnosticado en minutos como un problema distinto y no relacionado con el fix de código: el reinicio del proceso había dejado la sesión de WhatsApp sin reconectar (arquitectura de carga perezosa), así que el mensaje de prueba nunca llegó siquiera al servidor. Buen recordatorio operativo para cualquier reinicio futuro de este servicio: reconectar explícitamente las empresas activas después, no asumir que se reconectan solas.
+
+## Decisión Final y Justificación
+
+Fix acotado a `ingestMessage()` (resolver identidad ANTES de persistir) en vez de intentar fusionar conversaciones ya fragmentadas -- resuelve el problema hacia adelante para todas las empresas (no solo la 207) con el menor riesgo posible, reutilizando infraestructura (`wa_lid_phone_map`, `lidMapping.js`) que ya existía y estaba probada en otro punto del código.
+
+## Resultado
+
+Éxito, verificado extremo a extremo tras el hotfix de reconexión.
+
+## Verificación
+
+Verificado en logs reales que un mensaje entrante bajo `@lid` ya se procesa y persiste bajo la identidad de teléfono (`584147307169@s.whatsapp.net`) desde el primer log de negocio (`[autoAssign] evaluando condiciones`); confirmado que la auto-asignación a humano ya no se dispara (el fix de datos de la tarea anterior sigue vigente); confirmado en `wa_messages` que la respuesta de la IA se generó y se envió correctamente (`from_me=1`, `status=delivered`) bajo la identidad unificada.
+
+## Logro Conseguido
+
+Resuelto de fondo (no solo con un parche de datos) el problema de "la IA no se mantiene en modo IA" para CUALQUIER contacto de CUALQUIER empresa que WhatsApp identifique alguna vez por `@lid` -- no solo para el cliente de prueba de la empresa 207. Además, identificado y corregido en el camino un riesgo operativo real (sesiones de WhatsApp no reconectan solas tras un reinicio del proceso) que aplica a cualquier despliegue futuro de este servicio.

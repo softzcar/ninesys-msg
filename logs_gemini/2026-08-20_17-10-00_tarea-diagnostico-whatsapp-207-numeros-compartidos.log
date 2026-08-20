@@ -1,0 +1,39 @@
+# Bitácora de Trabajo - Diagnóstico IA de WhatsApp sin responder (empresa 207) + números compartidos entre empresas
+
+Fecha: 2026-08-20
+Hora: 17:10:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+"Vamos a revisar nuestro servicio de mensajería de WhatsApp en la empresa 207. He escaneado el QR y en la interfaz me muestra que estoy conectado al servicio, también he ido a la configuración de la IA y he activado el interruptor maestro para que los mensajes estén activos pero al escribir al número la IA no responde, también activé el Asistente de Ventas como agente por defecto... ¿Qué está ocurriendo?"
+
+## Tarea Realizada
+
+1. Se lanzó una investigación de fondo (logs y código de `waManager.js`, `aiService.js`, `wa_session_state`) para descartar causas de configuración obvias -- master switch, agente por defecto y sesión QR estaban correctamente activos para la 207.
+2. Hipótesis del usuario ("¿pudo ser que usé el mismo número de teléfono para probar en las empresas 204 y 205 también?") verificada directamente contra `wa_session_state` de todas las empresas de Desarrollo: confirmado que el número `584268730136` estaba efectivamente registrado en más de una empresa (194 y 207), causando comportamiento indefinido sobre cuál sesión realmente recibe los mensajes de WhatsApp para ese número físico.
+3. A pedido explícito del usuario ("revisa si hay más números repetidos entre empresas"), se hizo un barrido SQL directo cruzando `phone_number` de `wa_session_state` entre todas las empresas activas de Desarrollo, confirmando que 194 y 207 eran el único par de empresas realmente en conflicto en ese momento (204/205/206 se descartaron como hipótesis tras la verificación directa).
+
+## Archivos Modificados
+
+Ninguno en esta tarea -- fue puramente diagnóstico (lectura de código y consultas SQL directas).
+
+## Inconvenientes y Desafíos
+
+La causa real no era un bug de código sino un conflicto operativo: dos empresas de prueba compartiendo el mismo número físico de WhatsApp, cada una con su propia sesión Baileys intentando autenticarse como dueña de ese número.
+
+## Decisión Final y Justificación
+
+Se acordó con el usuario desconectar las sesiones de WhatsApp de las empresas 194 y 204 (ver bitácora siguiente) para dejar el número de prueba exclusivamente disponible para la empresa 207, en vez de intentar un fix de código para un conflicto que en producción real no debería ocurrir (cada empresa real tiene su propio número).
+
+## Resultado
+
+Diagnóstico correcto y confirmado por el usuario; acción de remediación en la siguiente tarea.
+
+## Verificación
+
+Verificado por SQL directo contra `wa_session_state` de las 6 empresas activas de Desarrollo (163, 194, 204, 205, 206, 207), confirmando el número exacto en conflicto y las empresas involucradas.
+
+## Logro Conseguido
+
+Se evitó un diagnóstico incorrecto (que hubiera llevado a revisar sin sentido el código de la IA o del master switch, ambos correctos) al verificar primero el estado real de las sesiones antes de asumir un bug de código.

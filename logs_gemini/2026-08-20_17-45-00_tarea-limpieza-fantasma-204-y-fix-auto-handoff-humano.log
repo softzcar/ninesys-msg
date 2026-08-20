@@ -1,0 +1,47 @@
+# Bitácora de Trabajo - Limpieza de referencia fantasma de la empresa 204 y fix de auto-asignación a humano en empresa 207
+
+Fecha: 2026-08-20
+Hora: 17:45:00
+Proyecto: Backend / Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+"En ws.nineteengreen.com todavía muestra la empresa 204... esta empresa ya no existe" (con captura de pantalla del dashboard anotada "TODAVÍA MUESTRA A LA EMPRESA 204"). Después: "ok ahora solo está la empresa 207. He enviado un mensaje al número registrado pero la IA no ha respondido, he pasado la conversación a la IA pero al momento de recibir el mensaje lo pasa a modo humano y la IA no responde."
+
+## Tarea Realizada
+
+### Limpieza de referencia fantasma
+
+1. Diagnosticado que el `Map` en memoria `sessions` de `waManager.js` nunca se limpió para el tenant 204, porque su base de datos fue eliminada directamente por `ninesys-api` (endpoint `/setup/user/{id}`), sin pasar por el flujo propio de `disconnect()`/`destroy()` de este servicio -- el proceso Node seguía corriendo con la entrada vieja en memoria.
+2. Llamado `DELETE /disconnect/204` con un nuevo JWT temporal (el anterior ya había expirado). La llamada retornó error 404 ("Empresa 204 no existe") porque un paso posterior de esa función intenta resolver credenciales de BD para la empresa ya eliminada -- pero `sessions.delete(id)` ocurre ANTES de ese paso que falla, así que la entrada en memoria sí se eliminó pese al error HTTP.
+3. Verificado con `GET /connected-clients` que solo queda la empresa 207.
+
+### Diagnóstico y fix de auto-asignación a humano
+
+4. Con solo la 207 activa, el usuario reportó que la IA seguía sin responder -- ahora porque cada mensaje nuevo disparaba la lógica intencional de "auto-asignación a vendedor histórico" (`customerLookup.findLastEligibleVendor`), que fuerza la conversación a modo humano si el cliente entrante ya tuvo una orden previa con un vendedor activo de departamento 5/6, sin importar que se hubiera puesto la conversación en modo IA manualmente justo antes.
+5. Identificada la fila exacta que calzaba con esa regla: `api_emp_207.ordenes _id=1` (cliente de prueba `id_wp=2`, "Ozcar Atencio"), con `responsable=687` (vendedor de prueba, activo). Se optó por la opción más quirúrgica de las evaluadas (NULL solo en `responsable` de esa orden puntual, en vez de borrar la orden o el cliente, o deshabilitar `allow_auto_assign` del vendedor de forma global) para no afectar el historial de pruebas ni el comportamiento real de auto-asignación para otros clientes/vendedores.
+6. `UPDATE ordenes SET responsable = NULL WHERE _id = 1` ejecutado en `api_emp_207`; verificado que ninguna otra orden de esa empresa tiene `responsable` asignado.
+
+## Archivos Modificados
+
+Ninguno -- ambas correcciones fueron operaciones directas de datos, no cambios de código (el fix de código de la causa raíz de fondo, identidad LID/teléfono, se hizo en la tarea siguiente).
+
+## Inconvenientes y Desafíos
+
+La auto-asignación a humano es un comportamiento intencional y documentado (no un bug) -- el reto fue distinguir entre "está funcionando como se diseñó, con datos de prueba que calzan sin querer" versus "hay un bug real", y explicarle claramente al usuario la diferencia antes de tocar nada.
+
+## Decisión Final y Justificación
+
+NULL puntual en la orden de prueba, no una solución de código -- porque el comportamiento de auto-asignación en sí es correcto y deseado para clientes reales; lo que había que corregir era el dato de prueba que accidentalmente activaba esa regla.
+
+## Resultado
+
+Éxito parcial en esta tarea -- el fix de datos resolvió el síntoma inmediato, pero el usuario preguntó a continuación si el modo IA se mantendría estable a futuro, lo cual llevó a encontrar la causa de fondo real (ver bitácora siguiente).
+
+## Verificación
+
+Verificado con `GET /connected-clients` que solo aparece la empresa 207; verificado por SQL que la orden de prueba ya no tiene `responsable` asignado.
+
+## Logro Conseguido
+
+Dashboard limpio (sin referencias a empresas ya eliminadas) y camino despejado para que la IA pudiera responder en las pruebas de la empresa 207, además de identificar con precisión el mecanismo real detrás de "la IA deja de responder sola" para poder explicárselo al usuario.
