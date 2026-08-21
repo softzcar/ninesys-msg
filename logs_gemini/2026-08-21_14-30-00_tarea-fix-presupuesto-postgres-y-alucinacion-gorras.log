@@ -1,0 +1,53 @@
+# Bitácora de Trabajo - Fix presupuesto vía WhatsApp roto en Postgres + alucinación de producto en galería
+
+Fecha: 2026-08-21
+Hora: 14:30:00
+Proyecto: Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+El usuario reportó, tras probar la IA en la empresa 207 (Desarrollo), dos problemas en la misma conversación real: la IA afirmó "sí, tenemos gorras" cuando ese producto no existe (ni en catálogo ni en galería) para esa empresa; y al final, tras confirmar un presupuesto real (12 franelas sublimadas) escribiendo "sí", el sistema no logró generar el presupuesto.
+
+## Tarea Realizada
+
+**1. Diagnóstico vía logs y base de datos real (sin reproducir a ciegas):**
+- Se leyeron los logs de PM2 del momento exacto del fallo: `presupuestoService: submit falló` con `column "id_wp_order" of relation "presupuestos" does not exist`.
+- Se confirmó contra el esquema real de Postgres (`api_emp_207` y `api_emp_194`) que esa columna JAMÁS existió — ni en la 207 ni en la empresa real 194. Se verificó también contra el esquema real de Producción (MariaDB, empresa 194 real): tampoco existe ahí. Es decir, la función de crear presupuestos desde WhatsApp ha estado rota desde que se escribió este INSERT, en ambos ambientes, para todas las empresas — no es un problema nuevo ni específico de esta prueba.
+- Segundo hallazgo, más grave por ser silencioso: el wrapper de Postgres (`tenantResolver.js`) obtiene el ID insertado leyendo `RETURNING ... AS id` del resultado — pero ninguno de los 2 INSERT del flujo (`customers`, `presupuestos`) tenía esa cláusula. En Postgres esto no lanza error: simplemente `insertId` queda `null` siempre, así que aunque el primer bug se corrigiera solo, el presupuesto se crearía con sus líneas de producto (`presupuestos_productos.id_orden`) huérfanas (sin vincular al presupuesto padre).
+- Para el caso de las "gorras": se confirmó que el propio bot fue quien introdujo el nombre por primera vez en la conversación, con un mensaje de respaldo hardcodeado (`waManager.js`) que sugiere ejemplos genéricos ("franelas, gorras, buzos, joggers") sin verificar el catálogo/galería real del tenant. Se confirmó contra el CDN real de la empresa 207 que sus únicas carpetas de galería son `franelas` y `chaquetas` — "gorras" nunca existió para esta empresa, ni como producto ni como imagen.
+
+**2. Corrección aplicada (`presupuestoService.js`):**
+- Se eliminó la columna inexistente `id_wp_order` (y su valor `0`) del INSERT de `presupuestos`.
+- Se agregó `RETURNING _id AS id` a los 2 INSERT (`customers` y `presupuestos`), mostrable solo en modo Postgres (`pool.driver === 'pgsql'`) para no afectar el camino MySQL/MariaDB que ya funciona sin esa cláusula (Producción sigue en MariaDB en su propia rama; ver más abajo).
+
+**3. Corrección aplicada (`waManager.js`):**
+- El mensaje de respaldo que se envía cuando Gemini intenta mostrar una imagen de galería con una URL inválida ya no sugiere una lista genérica fija de productos. Ahora consulta `galleryClient.listFolders(idEmpresa)` (función ya existente, usada en otro punto del código) y ofrece como ejemplo únicamente las carpetas reales de ese tenant.
+
+## Verificación
+
+- Se corrieron ambos INSERT corregidos directamente contra la base de datos real de la empresa 207 (script de prueba controlado, con limpieza inmediata de las filas de prueba): `customer insertId: 3`, `presupuesto insertId: 1` — ambos IDs reales devueltos correctamente por primera vez.
+- Se reinició `ntmsg-app` (PM2) para aplicar el cambio. Aplicando la lección de un incidente anterior de esta misma semana (el reinicio de PM2 no reconecta las sesiones de WhatsApp automáticamente), se disparó la reconexión real de la empresa 207 vía `/session-info/207` con un token de administrador — confirmado `status: READY, ws_ready: true` antes de dar por cerrada la tarea.
+- Se confirmó por `curl` contra el CDN real que las únicas carpetas de galería de la empresa 207 son `franelas` y `chaquetas`, validando que el fix del mensaje de respaldo ahora sugerirá únicamente productos reales para esta empresa.
+
+## Archivos Modificados
+- `src/services/presupuestoService.js`
+- `src/services/waManager.js`
+
+## Commits Relacionados
+- msg_ninesys: `f006d01` (rama `feat/baileys-7-upgrade`)
+
+## Inconvenientes y Desafíos
+
+El bug de `id_wp_order` no era un problema nuevo ni de esta prueba puntual: es un bug de fondo presente desde siempre en ambos ambientes (Desarrollo/Postgres y Producción/MariaDB), que hasta hoy nunca había sido detectado porque, aparentemente, nadie había completado antes un flujo de cotización completo por WhatsApp hasta el paso de confirmación. El hallazgo del `RETURNING` faltante fue más sutil: no daba ningún error, solo corrompía silenciosamente el vínculo entre el presupuesto y sus productos — de no haberse revisado el wrapper de Postgres a fondo, el primer fix (quitar la columna) habría parecido suficiente sin serlo.
+
+## Decisión Final y Justificación
+
+Se decidió NO tocar el archivo de Producción en esta tarea: el bug de `id_wp_order` también existe ahí, pero Producción corre MariaDB (rama `main`, muy divergente de esta), donde el mismo `INSERT` con columna inexistente causaría el mismo error real — así que sigue rota igual que antes, sin empeorar nada. Se deja pendiente de decisión explícita del usuario si quiere que también se corrija en Producción.
+
+## Resultado
+
+Éxito. Ambos bugs corregidos y verificados con datos reales en Desarrollo, sin afectar Producción.
+
+## Logro Conseguido
+
+La generación automática de presupuestos por WhatsApp, que nunca había funcionado realmente en ningún ambiente para ninguna empresa, ahora crea el registro correctamente en Postgres (Desarrollo) con sus líneas de producto correctamente vinculadas. Además, se eliminó la fuente real que originó una alucinación de producto inexistente, reemplazando un mensaje de ejemplo genérico por uno que refleja el catálogo/galería real de cada empresa.
