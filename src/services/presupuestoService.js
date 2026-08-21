@@ -75,6 +75,57 @@ async function resolveItemIds(idEmpresa, items) {
 }
 
 /**
+ * Corrige el recargo por talla XL cuando la IA olvidó aplicarlo.
+ *
+ * La IA calcula el recargo (+$1 por cada X adicional a la XL) siguiendo una
+ * instrucción del prompt, sin ninguna verificación de código -- a diferencia
+ * del frontend (app_multi), que lo calcula de forma determinística. Aquí se
+ * detecta el caso concreto en que la IA olvidó el recargo: si el precio que
+ * envía coincide EXACTO con una tarifa base del catálogo (sin ningún
+ * recargo), se asume que faltó sumarlo y se corrige. Si el precio no
+ * coincide con ninguna tarifa base conocida, se asume que la IA ya hizo
+ * algún ajuste (el recargo u otro) y no se toca, para no duplicar el
+ * recargo sobre un precio ya correcto.
+ */
+async function corregirRecargoXL(pool, idEmpresa, items) {
+    return Promise.all(
+        items.map(async (item) => {
+            const nombreTalla = String(item.talla || '').toUpperCase();
+            if (!nombreTalla.includes('XL')) return item;
+
+            const numeroTalla = nombreTalla.replace('XL', '');
+            const xlEsperado = numeroTalla === '' ? 1 : parseInt(numeroTalla) || 0;
+            if (xlEsperado <= 0 || !item.cod) return item;
+
+            let priceRows;
+            try {
+                [priceRows] = await pool.query(
+                    'SELECT price FROM products_prices WHERE id_product = ?',
+                    [item.cod]
+                );
+            } catch (err) {
+                log.warn({ idEmpresa, cod: item.cod, err: err.message }, 'corregirRecargoXL: no se pudo consultar products_prices');
+                return item;
+            }
+
+            const precioActual = parseFloat(item.precio) || 0;
+            const coincideConBase = (priceRows || []).some(
+                (r) => Math.abs(parseFloat(r.price) - precioActual) < 0.01
+            );
+
+            if (!coincideConBase) return item;
+
+            const precioCorregido = precioActual + xlEsperado;
+            log.warn(
+                { idEmpresa, cod: item.cod, talla: item.talla, precioOriginal: precioActual, xlEsperado, precioCorregido },
+                'corregirRecargoXL: la IA no aplicó el recargo por talla XL -- corregido antes de guardar'
+            );
+            return { ...item, precio: precioCorregido };
+        })
+    );
+}
+
+/**
  * Resuelve o crea el cliente para el presupuesto.
  * Devuelve { customerId, vendorId|null }.
  *
@@ -224,7 +275,11 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', existingCu
 
         // 1. Resolver IDs
         _step = 'resolveItemIds';
-        const resolvedItems = await resolveItemIds(idEmpresa, data.items || []);
+        let resolvedItems = await resolveItemIds(idEmpresa, data.items || []);
+
+        // 1b. Corregir el recargo por talla XL si la IA lo olvidó
+        _step = 'corregirRecargoXL';
+        resolvedItems = await corregirRecargoXL(pool, idEmpresa, resolvedItems);
 
         // 2. Cliente
         _step = 'resolveCustomer';
