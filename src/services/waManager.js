@@ -42,6 +42,7 @@ const internalMessenger = require('./internalMessenger');
 const customerLookup = require('./customerLookup');
 const lidMapping = require('./lidMapping');
 const presupuestoService = require('./presupuestoService');
+const galleryClient = require('../lib/galleryClient');
 const { classifyHandoffIntent } = require('../lib/intentClassifier');
 const { _urlToGalleryTerm, clearShownProducts } = require('../lib/contextEnricher');
 const log = require('../lib/logger').createLogger('waManager');
@@ -488,7 +489,13 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // RED DE SEGURIDAD: Si Gemini llamó a send_gallery_image pero la URL fue inválida
         // y no tenemos ningún texto para enviar, forzar una respuesta para no dejar colgado el chat.
         if (!textToSend && fcGallery?.args?.url && imgUrls.length === 0) {
-            textToSend = '¿De qué producto te gustaría ver diseños? Por ejemplo, puedes pedir franelas, gorras, buzos, joggers, etc. 😊';
+            // Ejemplos reales de este tenant (no una lista genérica) para no sugerir
+            // productos que la empresa no vende — causó una alucinación real: el bot
+            // sugirió "gorras" para una empresa sin ese producto ni esa carpeta de galería.
+            const realFolders = await galleryClient.listFolders(idEmpresa).catch(() => []);
+            textToSend = realFolders.length
+                ? `¿De qué producto te gustaría ver diseños? Por ejemplo, puedes pedir ${realFolders.slice(0, 4).join(', ')}, etc. 😊`
+                : '¿De qué producto te gustaría ver diseños?';
             _pendingGalleryClarification.set(jid, true);
             log.warn({ jid, invalidUrl: fcGallery.args.url }, 'maybeAutoReply: URL de galería inválida y texto vacío — enviando pregunta de aclaración como fallback');
         }

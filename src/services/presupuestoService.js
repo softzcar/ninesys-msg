@@ -118,9 +118,10 @@ async function resolveCustomer(pool, jid, clienteData, clientPhone = '', existin
 
     const emailFinal = email || `${(nombre[0] || 'x').toLowerCase()}${Math.random().toString(36).substring(2, 10)}@email.com`;
 
+    const returningClause = pool.driver === 'pgsql' ? ' RETURNING _id AS id' : '';
     const [result] = await pool.query(
         `INSERT INTO customers (first_name, last_name, cedula, phone, email, address)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?)${returningClause}`,
         [nombre, apellido, cedula, telefono, emailFinal, direccion]
     );
 
@@ -139,12 +140,13 @@ async function createPresupuesto(pool, { cliente, customerId, items, obs, total 
     const clienteNombre = [cliente.nombre, cliente.apellido].filter(Boolean).join(' ').trim();
     const fechaEntregaFinal = todayStr;
 
+    const returningClause = pool.driver === 'pgsql' ? ' RETURNING _id AS id' : '';
     const [presResult] = await pool.query(
         `INSERT INTO presupuestos
-           (id_wp_order, responsable, moment, pago_descuento, pago_abono, id_wp,
+           (responsable, moment, pago_descuento, pago_abono, id_wp,
             cliente_cedula, observaciones, pago_total, cliente_nombre,
             fecha_inicio, fecha_entrega, fecha_creacion, status)
-         VALUES (0, NULL, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'En espera')`,
+         VALUES (NULL, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'En espera')${returningClause}`,
         [
             now,
             customerId || null,
