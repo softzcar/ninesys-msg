@@ -1,0 +1,41 @@
+# Bitácora de Trabajo - Corrección de presupuesto histórico + recargo XL determinístico en la IA de WhatsApp
+
+Fecha: 2026-08-21
+Hora: 21:25:00
+Proyecto: Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+Tras encontrar y corregir hoy el bug de recargo por talla XL en el frontend (app_multi), el usuario pidió: (1) corregir directamente en la base de datos el presupuesto viejo que quedó con el precio de la talla 2XL sin el recargo, y (2) verificar si el endpoint que la IA de WhatsApp usa para generar presupuestos también aplica el recargo correctamente ahora.
+
+## Tarea Realizada
+
+**1. Corrección de datos históricos (empresa 207)**: se identificó el presupuesto `_id=2` (cliente Ozcar Atencio, cédula 11912520) con el ítem de talla 2XL (`presupuestos_productos._id=2`) guardado en $20.00 en vez de $22.00. Corregido directamente por SQL: `precio_unitario` a 22.00 y `pago_total` del presupuesto de 120.00 a 126.00. Verificado antes que el presupuesto seguía en estado "En espera" (no convertido aún en orden ni con pagos asociados), por lo que la corrección no afecta ningún registro downstream.
+
+**2. Verificación del endpoint de la IA**: se confirmó que `presupuestoService.js` (que procesa los `submit_presupuesto` que la IA genera) no tenía NINGÚN cálculo de recargo por talla XL -- a diferencia del frontend, dependía 100% de que Gemini calculara bien la aritmética a partir de la instrucción del prompt, sin ninguna verificación de código.
+
+**3. Corrección agregada**: nueva función `corregirRecargoXL(pool, idEmpresa, items)`, llamada en `submit()` justo después de `resolveItemIds()`. Para cada ítem con talla XL/2XL/3XL..., calcula el recargo esperado de forma determinística (mismo criterio que el frontend) y compara el precio recibido de la IA contra las tarifas base reales del catálogo (`products_prices`). Si el precio coincide EXACTO con una tarifa base (sin ningún recargo), se asume que la IA lo olvidó y se corrige antes de guardar. Si el precio no coincide con ninguna base conocida, se asume que la IA ya aplicó algún ajuste y no se toca -- evita duplicar el recargo sobre un precio ya correcto.
+
+## Archivos Modificados
+- `src/services/presupuestoService.js`
+
+## Commits Relacionados
+- msg_ninesys: `e912b4f` (rama `feat/baileys-7-upgrade`)
+
+## Decisión Final y Justificación
+
+Se descartó intentar recalcular el precio completo desde cero en el servidor (base + recargo + margen), por ser una reimplementación más riesgosa de la lógica de selección de tramo de precio que ya maneja el prompt/contexto de la IA -- podría introducir discrepancias nuevas si la lógica de tramos no coincide exactamente. En su lugar, se optó por una corrección puntual y conservadora: solo actúa quando el precio recibido coincide EXACTO con una tarifa base conocida (indicio claro de que el recargo se omitió), dejando cualquier otro caso intacto.
+
+## Resultado
+
+Éxito.
+
+## Verificación
+
+1. Presupuesto histórico corregido, verificado por SQL directo (talla 2XL ahora en $22.00, total del presupuesto en $126.00).
+2. Función `corregirRecargoXL` probada de forma aislada contra datos reales de la empresa 207 en 3 escenarios: IA olvida el recargo (precio $20 exacto a la base → corregido a $22, con log de advertencia), IA ya aplicó el recargo ($22, no coincide con ninguna base → sin cambios), talla normal S ($20, sin XL en el nombre → sin cambios, sin siquiera consultar la base de datos).
+3. Servicio reiniciado y sesión de WhatsApp de la empresa 207 reconectada y confirmada `READY` tras el reinicio.
+
+## Logro Conseguido
+
+El cálculo del recargo por talla XL para presupuestos generados por la IA de WhatsApp ya no depende únicamente de que el modelo de lenguaje haga bien la aritmética -- ahora hay una verificación determinística de respaldo que corrige el caso concreto de omisión antes de guardar cualquier presupuesto, con el mismo criterio ya validado en el frontend.
