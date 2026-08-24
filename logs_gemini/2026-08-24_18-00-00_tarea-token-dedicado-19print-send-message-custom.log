@@ -1,0 +1,84 @@
+# Bitácora de Trabajo - Token dedicado para 19print en send-message-custom
+
+Fecha: 2026-08-24
+Hora: 18:00:00
+Proyecto: Microservicio WhatsApp (msg_ninesys)
+
+## Solicitud del Usuario
+
+En el marco de la integración de la app externa 19print_app
+(dtf.nineteencustom.com) con Ninesys, el usuario pidió resolver cómo esa app
+podía loguearse/autenticarse contra msg_ninesys para mandar WhatsApp,
+pidiendo explícitamente NO depender del hueco de seguridad existente
+(`send-message-custom` sin auth) y, de ser necesario, hacer cambios en
+msg_ninesys para conectar la app "de manera relativamente segura, que
+identifique su URL".
+
+## Tarea Realizada
+
+**1. Investigación del mecanismo de auth existente**: se confirmó que
+`POST /login` valida contra una única credencial hardcodeada en el código
+fuente (`admin`/`Ninesys@2024`, `controllers/authController.js`), sin tabla
+de usuarios ni forma de crear cuentas de servicio — el JWT resultante es
+todo-o-nada (mismo poder para mandar un mensaje que para
+`POST /restart-server` o `DELETE /conversations/:companyId/purge-all`).
+Además, `POST /send-message-custom/:companyId` (`routes/index.js:406`) no
+tenía NINGÚN middleware de autenticación.
+
+**2. Verificación de que app_multi no se rompería**: se confirmó en
+`app_multi/plugins/whatsapp.js` (`$wsApi`) que TODA llamada de `app_multi` a
+msg_ninesys, incluida `send-message-custom`, ya lleva
+`Authorization: Bearer <jwt>` puesto automáticamente por un interceptor —
+aunque la ruta nunca lo exigiera. Esto permitió blindar la ruta sin tocar
+`app_multi` en absoluto.
+
+**3. Implementación**: nuevo middleware `middleware/authenticateSendCustom.js`
+que acepta la request si viene con header `X-19print-Token` que coincide
+(comparación constant-time, `crypto.timingSafeEqual`) con la variable de
+entorno nueva `DTF_APP_TOKEN`, o si no, cae al mismo chequeo JWT de siempre
+(`authenticateToken`). Wireado solo en `routes/index.js:406`
+(`send-message-custom`) — ninguna otra ruta tocada.
+
+## Archivos Modificados
+- `middleware/authenticateSendCustom.js` (nuevo)
+- `routes/index.js`
+- `.env.example`
+
+## Commits Relacionados
+- msg_ninesys: `7a82bca` (rebaseado sobre 6 commits que ya estaban en
+  remoto de otra sesión, sin conflictos), pusheado como `25b360c` en
+  `feat/baileys-7-upgrade`
+
+## Decisión Final y Justificación
+
+Se descartó usar el login admin existente para la nueva integración (le
+daría a una app externa pública poder de administración total sobre
+msg_ninesys solo para mandar un mensaje) y se descartó depender del hueco
+de seguridad actual (dejar la ruta sin auth) porque el usuario pidió
+explícitamente no hacerlo. Se optó por un token dedicado, exclusivo para
+19print, aditivo y de blast radius mínimo: 1 archivo nuevo + 1 línea de
+wiring + 1 variable de entorno, sin tocar la lógica de negocio ni el resto
+de rutas.
+
+## Resultado
+
+Éxito.
+
+## Verificación
+
+Desplegado a Dev (`ws.nineteengreen.com`, pm2 `ntmsg-app`) y probado en
+vivo con curl: sin token → 401, token inválido → 401, token correcto (nuevo)
+→ pasa el chequeo (siguiente error es de negocio, no de auth), JWT normal
+(obtenido vía `/login` con la cuenta admin de siempre) → también pasa el
+chequeo, confirmando que `app_multi` sigue funcionando exactamente igual
+que antes. Probado también con el código real de 19print
+(`enviarWhatsapp()`): auth pasa correctamente; el único error que da hoy es
+operativo, no de código — la sesión de WhatsApp de la empresa 208 en Dev no
+está conectada (`estado=NONE`), pendiente de escanear el QR.
+
+## Logro Conseguido
+
+19print_app puede mandar WhatsApp real vía msg_ninesys con una identidad
+propia y acotada, sin usar el login admin de uso general y sin dejar
+`send-message-custom` sin ningún control de acceso — sin romper nada de lo
+que ya consume esa misma ruta hoy (`app_multi`).
