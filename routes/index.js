@@ -76,6 +76,7 @@ const {
 } = require("../controllers/whatsappController");
 const authController = require("../controllers/authController");
 const authenticateToken = require("../middleware/authenticateToken");
+const authenticateSendCustom = require("../middleware/authenticateSendCustom");
 
 // Ruta principal
 router.get("/", (req, res) => {
@@ -403,7 +404,7 @@ router.post("/send-message-basic/:companyId", sendMessage); // sendMessage ya ma
 /**
  * Enviar mensaje personalizado, sin usar templates
  */
-router.post("/send-message-custom/:companyId", sendMessageCustom); // sendMessage ya maneja req, res
+router.post("/send-message-custom/:companyId", authenticateSendCustom, sendMessageCustom); // sendMessage ya maneja req, res
 
 /**
  * Enviar mensaje usando plantilla (POST)
