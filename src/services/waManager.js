@@ -713,6 +713,37 @@ async function notifyVendorByWhatsApp(idEmpresa, pool, { vendorId, clientJid, re
 }
 
 /**
+ * Resuelve si el cliente detrás de un JID sigue optando por recibir
+ * notificaciones automáticas (customers.recibir_notificaciones). Devuelve
+ * true (dejar pasar) si no se encuentra el cliente o el teléfono no se
+ * puede resolver -- fail-open, mismo criterio que el resto de estos checks.
+ *
+ * Agregado en el fix urgente 2026-08-25: antes solo ninesys-api (PHP)
+ * respetaba este opt-out para notificaciones de estado de orden; el aviso
+ * de asignación de conversación a un vendedor (este archivo) nunca lo
+ * consultaba, así que un cliente que escribía "BAJA"/"NO" seguía
+ * disparando avisos por WhatsApp a vendedores/administradores.
+ */
+async function customerOptedInToNotifications(pool, jid) {
+    let phoneJid = jid;
+    if (lidMapping.isLidJid(jid)) {
+        phoneJid = (await lidMapping.resolvePhoneJid(pool, jid)) || null;
+    }
+    if (!phoneJid) return true;
+    const phone = (phoneJid.split('@')[0] || '').replace(/\D/g, '');
+    if (!phone) return true;
+    const phoneSuffix = phone.slice(-9);
+    if (!phoneSuffix) return true;
+
+    const [[row]] = await pool.query(
+        `SELECT recibir_notificaciones FROM customers WHERE phone LIKE ? LIMIT 1`,
+        ['%' + phoneSuffix]
+    ).catch(() => [[]]);
+    if (!row || row.recibir_notificaciones == null) return true;
+    return Number(row.recibir_notificaciones) === 1;
+}
+
+/**
  * Escala una conversación a un humano automáticamente (handoff).
  * Usa la política de asignación para elegir al mejor vendedor disponible.
  * Si no hay nadie, la deja en cola (assigned_to = null).
@@ -808,7 +839,16 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
         //    arriba y no se ve afectado.
         if (vendorId) {
             const settings = await aiService.loadSettings(pool).catch(() => null);
-            const notifyEnabled = settings ? settings.notifyVendorsWhatsapp : true;
+            // Fix URGENTE 2026-08-25: este gate antes solo miraba
+            // notify_vendors_whatsapp -- el interruptor maestro "Asistente IA"
+            // (settings.enabled) y el opt-out del cliente (BAJA/NO,
+            // customers.recibir_notificaciones) no se estaban respetando aca,
+            // asi que apagar cualquiera de los dos no detenia los avisos
+            // automaticos a vendedores/administradores.
+            const aiGloballyEnabled = settings ? settings.enabled : true;
+            const vendorsWhatsappEnabled = settings ? settings.notifyVendorsWhatsapp : true;
+            const customerOptedIn = await customerOptedInToNotifications(pool, jid).catch(() => true);
+            const notifyEnabled = aiGloballyEnabled && vendorsWhatsappEnabled && customerOptedIn;
 
             if (notifyEnabled) {
                 internalMessenger.notifyVendorOfAssignment(idEmpresa, pool, {
@@ -824,8 +864,8 @@ async function handoffToHuman(idEmpresa, pool, jid, reason = 'unknown', opts = {
                 }).catch(() => {});
             } else {
                 log.info(
-                    { tenantId: idEmpresa, jid, vendorId },
-                    'Aviso de asignación por WhatsApp omitido: notify_vendors_whatsapp desactivado'
+                    { tenantId: idEmpresa, jid, vendorId, aiGloballyEnabled, vendorsWhatsappEnabled, customerOptedIn },
+                    'Aviso de asignación por WhatsApp omitido (IA desactivada, notify_vendors_whatsapp desactivado, o cliente dado de baja)'
                 );
             }
         }
