@@ -20,7 +20,7 @@ async function login(event) {
 
     try {
         const response = await fetch(
-            "https://api.nineteengreen.com/verify-credentials",
+            "https://api.ninesys19.com/verify-credentials",
             {
                 method: "POST",
                 headers: {

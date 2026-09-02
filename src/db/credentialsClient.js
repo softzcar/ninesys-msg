@@ -12,7 +12,7 @@ const axios = require('axios');
 const log = require('../lib/logger').createLogger('credentialsClient');
 
 function getHttpClient() {
-    const baseURL = process.env.API_URL || 'https://api.nineteengreen.com';
+    const baseURL = process.env.API_URL || 'https://api.ninesys19.com';
     const token = process.env.MSG_SERVICE_INTERNAL_TOKEN || '';
 
     if (!process.env.API_URL) {

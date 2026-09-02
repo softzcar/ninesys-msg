@@ -1,7 +1,7 @@
 const axios = require('axios');
 const log = require('./logger').createLogger('galleryClient');
 
-const CDN_URL = process.env.CDN_URL || 'https://cdn.nineteengreen.com';
+const CDN_URL = process.env.CDN_URL || 'https://cdn.ninesys19.com';
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FOLDERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -63,4 +63,4 @@ async function listFolders(idEmpresa) {
     }
 }
 
-module.exports = { listImages, listFolders, _state: { cache, foldersCache } };
+module.exports = { listImages, listFolders, CDN_URL, _state: { cache, foldersCache } };

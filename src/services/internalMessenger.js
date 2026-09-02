@@ -17,7 +17,7 @@ const log = require('../lib/logger').createLogger('internalMessenger');
 const lidMapping = require('./lidMapping');
 
 const INTERNAL_MSG_URL = process.env.INTERNAL_MSG_URL
-    || 'https://api.nineteengreen.com/ws/build-message/interno';
+    || 'https://api.ninesys19.com/ws/build-message/interno';
 const BOT_SENDER_ID = Number(process.env.INTERNAL_MSG_BOT_SENDER_ID) || 0;
 const BOT_SENDER_NAME = process.env.INTERNAL_MSG_BOT_SENDER_NAME || 'NineSys WhatsApp';
 

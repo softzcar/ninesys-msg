@@ -17,7 +17,7 @@ const log = require('./logger').createLogger('catalogClient');
 const CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos
 
 function getHttpClient() {
-    const baseURL = process.env.API_URL || 'https://api.nineteengreen.com';
+    const baseURL = process.env.API_URL || 'https://api.ninesys19.com';
     return axios.create({
         baseURL,
         timeout: 5000,

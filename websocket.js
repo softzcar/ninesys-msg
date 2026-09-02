@@ -4,15 +4,20 @@ const log = require('./src/lib/logger').createLogger('websocket');
 let io;
 
 const initWebSocket = (httpServer) => {
-    // Lista de dominios permitidos para conectar
-    const allowedOrigins = [
-        "https://app.nineteencustom.com",
-        "http://app.nineteencustom.com",
+    // Lista de dominios permitidos para conectar. Configurable vía
+    // ALLOWED_ORIGINS (separados por coma) para no tener que tocar código
+    // cada vez que se suma o retira un dominio -- como pasó con la migración
+    // a ninesys19.com.
+    const defaultOrigins = [
+        "https://app.ninesys19.com",
         "https://app.nineteengreen.com",
-        "http://app.nineteengreen.com",
+        "https://app.nineteencustom.com",
         "http://localhost:3000",
         "http://localhost:3001"
     ];
+    const allowedOrigins = process.env.ALLOWED_ORIGINS
+        ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(Boolean)
+        : defaultOrigins;
 
     io = new Server(httpServer, {
         cors: {

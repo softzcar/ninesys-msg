@@ -180,11 +180,10 @@ Reinicia el proceso PM2 (`manager.html`).
 
 ## Eventos WebSocket (Socket.IO)
 
-**CORS allowlist** actual (`websocket.js`):
-- `https://app.nineteencustom.com`
-- `http://app.nineteencustom.com`
+**CORS allowlist** actual (`websocket.js`, configurable vía `ALLOWED_ORIGINS`):
+- `https://app.ninesys19.com`
 - `https://app.nineteengreen.com`
-- `http://app.nineteengreen.com`
+- `https://app.nineteencustom.com`
 - `http://localhost:3000`
 - `http://localhost:3001`
 

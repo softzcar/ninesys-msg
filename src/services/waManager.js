@@ -347,8 +347,8 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // Recuperar imágenes de galería previamente enviadas desde la base de datos para persistencia ante reinicios
         const [galleryRows] = await pool.query(
             `SELECT body FROM wa_messages
-             WHERE jid = ? AND type = 'image' AND body LIKE 'https://cdn.nineteengreen.com/%'`,
-            [jid]
+             WHERE jid = ? AND type = 'image' AND body LIKE ?`,
+            [jid, `${galleryClient.CDN_URL}/%`]
         ).catch(() => [[]]);
         const dbSentUrls = galleryRows.map((r) => r.body);
         const memSentUrls = _sentGalleryUrls.get(jid) || new Set();
@@ -425,7 +425,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         const fcGallery = (reply.functionCalls || []).find((fc) => fc.name === 'send_gallery_image');
         if (fcGallery?.args?.url) {
             const fcUrl = String(fcGallery.args.url).trim();
-            if (fcUrl.startsWith('https://cdn.nineteengreen.com/')) {
+            if (fcUrl.startsWith(`${galleryClient.CDN_URL}/`)) {
                 imgUrls = [fcUrl];
                 log.info({ jid, url: fcUrl }, 'maybeAutoReply: send_gallery_image function call');
             } else {
@@ -437,7 +437,7 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             if (imgMatch) {
                 imgUrls = imgMatch[1].split('|')
                     .map((u) => u.trim())
-                    .filter((u) => u.startsWith('https://cdn.nineteengreen.com/'))
+                    .filter((u) => u.startsWith(`${galleryClient.CDN_URL}/`))
                     .slice(0, 4);
                 textToSend = textToSend.replace(imgMatch[0], '').trim();
                 log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado (fallback)');
