@@ -1074,7 +1074,13 @@ async function _doInit(idEmpresa) {
                             flags = await conversationStore.getConversationFlags(pool, result.jid);
                         } catch (_) {}
 
-                        const isUnassignedNewChat = flags && flags.assignedTo === null && flags.ownerId === null;
+                        // mode === 'hybrid' es el estado que deja releaseConversation()
+                        // (whatsappController.js) al "asignar a la IA" -- pone assignedTo=null
+                        // pero no toca ownerId, así que si ownerId ya era null (nunca hubo
+                        // claim explícito), esta condición se confundía con "chat nunca
+                        // asignado" y devolvía la conversación al vendedor histórico en el
+                        // siguiente mensaje del cliente, deshaciendo la liberación a la IA.
+                        const isUnassignedNewChat = flags && flags.assignedTo === null && flags.ownerId === null && flags.mode !== 'hybrid';
                         const shouldAutoAssign = (result.conversationCreated || result.restored || isUnassignedNewChat) && !result.isGroup;
 
                         log.info({
