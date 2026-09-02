@@ -210,7 +210,17 @@ async function ingestMessage(pool, m, opts = {}) {
     // 3) Upsert conversación + bump last_*.
     const lastPreview = (body || `[${type}]`).slice(0, 500);
     let upsertRes;
+    let conversationCreated;
     if (pool.driver === 'pgsql') {
+        // OJO: en Postgres, INSERT ... ON CONFLICT DO UPDATE siempre reporta
+        // rowCount=1 tanto si insertó como si actualizó (a diferencia de
+        // MySQL, que da 2 en el caso de UPDATE) -- affectedRows === 1 NUNCA
+        // distingue nada aquí, así que conversationCreated daba true en
+        // TODOS los mensajes entrantes, disparando el auto-asignado al
+        // vendedor histórico en cada mensaje sin importar el modo de la
+        // conversación. Se usa el truco estándar de Postgres (xmax = 0 sólo
+        // es cierto para una fila recién insertada en esta misma sentencia)
+        // para distinguir insert de update de verdad.
         [upsertRes] = await pool.query(
             `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
              VALUES (?, ?, ?, ?, ?, ?)
@@ -219,9 +229,11 @@ async function ingestMessage(pool, m, opts = {}) {
                 last_message = EXCLUDED.last_message,
                 last_ts      = EXCLUDED.last_ts,
                 unread_count = wa_conversations.unread_count + EXCLUDED.unread_count,
-                updated_at   = CURRENT_TIMESTAMP`,
+                updated_at   = CURRENT_TIMESTAMP
+             RETURNING (xmax = 0) AS inserted`,
             [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
         );
+        conversationCreated = upsertRes[0]?.inserted === true;
     } else {
         [upsertRes] = await pool.query(
             `INSERT INTO wa_conversations (jid, name, is_group, last_message, last_ts, unread_count)
@@ -234,8 +246,8 @@ async function ingestMessage(pool, m, opts = {}) {
                 updated_at   = CURRENT_TIMESTAMP`,
             [jid, isGroup ? null : pushname, isGroup, lastPreview, ts, from_me ? 0 : 1]
         );
+        conversationCreated = upsertRes.affectedRows === 1;
     }
-    const conversationCreated = upsertRes.affectedRows === 1;
 
     return {
         jid,

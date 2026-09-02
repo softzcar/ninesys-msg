@@ -31,16 +31,23 @@ async function upsertMapping(pool, { lid, phoneJid, pushname } = {}) {
     if (!isLidJid(lid) || !isPhoneJid(phoneJid)) return false;
     try {
         let r;
+        let isNew;
         if (pool.driver === 'pgsql') {
+            // En Postgres, ON CONFLICT DO UPDATE siempre da rowCount=1 tanto
+            // para insert como update -- se usa RETURNING xmax=0 para saber
+            // de verdad si fue una fila nueva (ver conversationStore.js para
+            // el mismo patrón, ahí sí con impacto funcional real).
             [r] = await pool.query(
                 `INSERT INTO wa_lid_phone_map (lid_jid, phone_jid, pushname)
                  VALUES (?, ?, ?)
                  ON CONFLICT (lid_jid) DO UPDATE SET
                     phone_jid    = EXCLUDED.phone_jid,
                     pushname     = COALESCE(EXCLUDED.pushname, wa_lid_phone_map.pushname),
-                    last_seen_at = CURRENT_TIMESTAMP`,
+                    last_seen_at = CURRENT_TIMESTAMP
+                 RETURNING (xmax = 0) AS inserted`,
                 [lid, phoneJid, pushname || null]
             );
+            isNew = r[0]?.inserted === true;
         } else {
             [r] = await pool.query(
                 `INSERT INTO wa_lid_phone_map (lid_jid, phone_jid, pushname)
@@ -51,8 +58,9 @@ async function upsertMapping(pool, { lid, phoneJid, pushname } = {}) {
                     last_seen_at = CURRENT_TIMESTAMP`,
                 [lid, phoneJid, pushname || null]
             );
+            isNew = r.affectedRows === 1;
         }
-        if (r.affectedRows === 1) {
+        if (isNew) {
             log.info({ lid, phoneJid, pushname }, '[lidMapping] nuevo mapeo persistido');
         }
         return true;
