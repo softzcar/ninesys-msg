@@ -48,7 +48,25 @@ exports.verifyCredentials = async (req, res) => {
 exports.loginManager = (req, res) => {
     const { username, password } = req.body;
 
-    if (username === 'admin' && password === 'Ninesys@2024') {
+    // Antes comparaba contra 'admin'/'Ninesys@2024' hardcodeado en el código
+    // -- la misma cadena terminó publicada en el bundle JS público de
+    // app_multi (nuxt.config.js) porque el frontend necesitaba conocerla
+    // para pedir su propio token (auditoría de seguridad 2026-09-09). Ahora
+    // se compara contra variables de entorno, con comparación de tiempo
+    // constante (mismo criterio que hash_equals en el lado PHP).
+    const { timingSafeEqual } = require('crypto');
+    const safeCompare = (a, b) => {
+        const bufA = Buffer.from(String(a));
+        const bufB = Buffer.from(String(b));
+        return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+    };
+    const expectedUser = process.env.WS_MANAGER_USERNAME || '';
+    const expectedPass = process.env.WS_MANAGER_PASSWORD || '';
+    const credencialesValidas = expectedUser !== '' && expectedPass !== ''
+        && safeCompare(username || '', expectedUser)
+        && safeCompare(password || '', expectedPass);
+
+    if (credencialesValidas) {
         try {
             if (!process.env.JWT_SECRET) {
                 throw new Error('JWT_SECRET no está definido en las variables de entorno');

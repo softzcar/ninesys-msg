@@ -399,7 +399,11 @@ router.get("/qr/:companyId", authenticateToken, showQRCode); // showQRCode ya ma
 /**
  * Enviar mensaje básico (POST)
  */
-router.post("/send-message-basic/:companyId", sendMessage); // sendMessage ya maneja req, res
+// Sin authenticateToken, cualquiera en Internet podía mandar WhatsApp en
+// nombre de cualquier empresa suplantando a Ninesys -- auditoría de
+// seguridad 2026-09-09. ninesys-api ya manda un JWT válido en cada llamada
+// (WhatsAppAPIClient::makeRequest), así que esto no debería romper nada.
+router.post("/send-message-basic/:companyId", authenticateToken, sendMessage); // sendMessage ya maneja req, res
 
 /**
  * Enviar mensaje personalizado, sin usar templates
@@ -409,7 +413,7 @@ router.post("/send-message-custom/:companyId", authenticateSendCustom, sendMessa
 /**
  * Enviar mensaje usando plantilla (POST)
  */
-router.post("/send-message/:companyId", sendTemplateMessage); // sendTemplateMessage ya maneja req, res
+router.post("/send-message/:companyId", authenticateToken, sendTemplateMessage); // sendTemplateMessage ya maneja req, res
 
 // --- NUEVA RUTA PARA ENVIAR MENSAJE DIRECTO ---
 /**
@@ -424,7 +428,7 @@ router.post("/send-message/:companyId", sendTemplateMessage); // sendTemplateMes
  * @returns {object} 503 - Cliente de WhatsApp no listo.
  * @returns {object} 500 - Error interno del servidor.
  */
-router.post("/send-direct-message/:companyId", sendDirectMessage);
+router.post("/send-direct-message/:companyId", authenticateToken, sendDirectMessage);
 
 
 // Ruta de prueba simple
