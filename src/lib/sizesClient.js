@@ -6,7 +6,10 @@
  * del payload de presupuesto.
  *
  * Endpoint: GET {API_URL}/sizes
- * Header:   Authorization: {id_empresa}
+ * Headers:  Authorization: {id_empresa}
+ *           X-Internal-Token: {MSG_SERVICE_INTERNAL_TOKEN} (auditoría de
+ *           seguridad 2026-09-10 -- IdEmpresaMiddleware ahora exige este
+ *           token para confiar en el id_empresa crudo del Authorization).
  * Cache TTL: 24 horas (tallas casi nunca cambian)
  */
 
@@ -23,7 +26,10 @@ function normalizeSize(s) {
 const http = axios.create({
     baseURL: API_URL,
     timeout: 5000,
-    headers: { Accept: 'application/json' },
+    headers: {
+        Accept: 'application/json',
+        'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+    },
 });
 
 // Map<idEmpresa, { map: Map<name, id>, fetchedAt }>

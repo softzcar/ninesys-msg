@@ -5,7 +5,9 @@
  * horario laboral de una empresa (Fase D.3).
  *
  * Endpoint: GET {API_URL}/internal/business-hours
- * Header:   Authorization: {id_empresa}    ← convención del resto de la app
+ * Headers:  Authorization: {id_empresa}    ← convención del resto de la app
+ *           X-Internal-Token: {MSG_SERVICE_INTERNAL_TOKEN} (auditoría de
+ *           seguridad 2026-09-10 -- este endpoint ahora lo exige).
  *
  * Cache en memoria con TTL: los horarios casi no cambian y evitamos golpear
  * ninesys-api desde el loop de timeout cada minuto por cada tenant activo.
@@ -36,7 +38,10 @@ if (!API_URL) {
 const http = axios.create({
     baseURL: API_URL,
     timeout: 5000,
-    headers: { Accept: 'application/json' },
+    headers: {
+        Accept: 'application/json',
+        'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+    },
 });
 
 // { [idEmpresa]: { value, fetchedAt } }

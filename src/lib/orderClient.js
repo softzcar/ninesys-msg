@@ -5,7 +5,9 @@
  * órdenes activas de un cliente identificado por número de teléfono.
  *
  * Endpoint: GET {API_URL}/internal/ordenes/{id_empresa}/by-phone?phone={phone}
- * Header:   Authorization: {id_empresa}
+ * Headers:  Authorization: {id_empresa}
+ *           X-Internal-Token: {MSG_SERVICE_INTERNAL_TOKEN} (auditoría de
+ *           seguridad 2026-09-10 -- este endpoint ahora lo exige).
  *
  * Cache de 3 minutos: los saldos cambian con frecuencia pero consultar por
  * cada mensaje sería excesivo — 3 min equilibra frescura y carga.
@@ -29,7 +31,10 @@ if (!API_URL) {
 const http = axios.create({
     baseURL: API_URL,
     timeout: 5000,
-    headers: { Accept: 'application/json' },
+    headers: {
+        Accept: 'application/json',
+        'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+    },
 });
 
 // clave: `${id_empresa}:${phone}` → { value, fetchedAt }

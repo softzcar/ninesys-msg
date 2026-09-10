@@ -5,7 +5,10 @@
  * catálogo de productos de una empresa (para enriquecimiento de contexto IA).
  *
  * Endpoint: GET {API_URL}/internal/catalog/{id_empresa}?search=término
- * Header:   Authorization: {id_empresa}
+ * Headers:  Authorization: {id_empresa}
+ *           X-Internal-Token: {MSG_SERVICE_INTERNAL_TOKEN} (auditoría de
+ *           seguridad 2026-09-10 -- antes Authorization viajaba crudo sin
+ *           ninguna autenticación real).
  *
  * Cache en memoria con TTL corto (2 minutos) para evitar entregar datos
  * obsoletos si la base de datos o el catálogo sufren modificaciones.
@@ -21,7 +24,10 @@ function getHttpClient() {
     return axios.create({
         baseURL,
         timeout: 5000,
-        headers: { Accept: 'application/json' },
+        headers: {
+            Accept: 'application/json',
+            'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+        },
     });
 }
 

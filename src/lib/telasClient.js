@@ -5,7 +5,10 @@
  * para resolución rápida durante la construcción del payload de presupuesto.
  *
  * Endpoint: GET {API_URL}/telas
- * Header:   Authorization: {id_empresa}
+ * Headers:  Authorization: {id_empresa}
+ *           X-Internal-Token: {MSG_SERVICE_INTERNAL_TOKEN} (auditoría de
+ *           seguridad 2026-09-10 -- IdEmpresaMiddleware ahora exige este
+ *           token para confiar en el id_empresa crudo del Authorization).
  * Cache TTL: 24 horas (telas casi nunca cambian)
  *
  * Matching: para tolerar variaciones ("atlética" vs "ATLÉTICA 1.60") se
@@ -26,7 +29,10 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const http = axios.create({
     baseURL: API_URL,
     timeout: 5000,
-    headers: { Accept: 'application/json' },
+    headers: {
+        Accept: 'application/json',
+        'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+    },
 });
 
 // Map<idEmpresa, { map: Map<key, id>, fetchedAt }>
