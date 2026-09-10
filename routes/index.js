@@ -14,13 +14,27 @@ const uploadMedia = multer({
 
 const router = express.Router();
 
-// Configuración más segura para permitir solo peticiones desde tu frontend (ajusta 'origin' según tu necesidad)
+// Antes '*' -- cualquier sitio en Internet podía hacer fetch() cross-origin
+// contra este servicio desde el navegador de un visitante (auditoría de
+// seguridad 2026-09-09/10). Lista real de orígenes que llaman desde el
+// navegador (app_multi Prod/Dev + localhost de pruebas) -- confirmado por
+// auditoría de código, ninguna otra app llama directo desde su frontend.
+const ALLOWED_ORIGINS = [
+    'https://app.ninesys19.com',
+    'https://app.nineteengreen.com',
+    'http://localhost:3000',
+];
 const corsOptions = {
-    origin: '*', //< --Comodín para permitir cualquier origen
+    origin: function (origin, callback) {
+        // Sin Origin (curl, servidor-a-servidor) -- no es una petición de
+        // navegador, no aplica CORS, se deja pasar.
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(null, false);
+        }
+    },
 };
-/* const corsOptions = {
-    origin: 'http://localhost:3005', // Reemplaza con el origen de tu frontend en producción
-}; */
 router.use(cors(corsOptions));
 
 // Importamos solo las funciones necesarias del controlador
