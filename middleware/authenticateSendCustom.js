@@ -10,13 +10,14 @@ function tokensMatch(provided, expected) {
     return crypto.timingSafeEqual(bufProvided, bufExpected);
 }
 
-// Autoriza POST /send-message-custom/:companyId con UNA de dos credenciales:
+// Autoriza POST /send-message-custom/:companyId con UNA de tres credenciales:
 //   1) header X-19print-Token == DTF_APP_TOKEN -- integración dedicada de
 //      19print_app (dtf.nineteencustom.com), sin login/JWT de por medio.
-//   2) el mismo JWT de siempre (authenticateToken) -- app_multi ya manda
-//      este header en TODAS sus llamadas via $wsApi (ver
-//      app_multi/plugins/whatsapp.js), aunque esta ruta nunca lo exigió;
-//      esto deja su comportamiento intacto.
+//   2) el JWT de sesión de ninesys-api (app_multi, navegador) -- ver
+//      authenticateToken.js para el detalle del secreto compartido
+//      (auditoría de seguridad 2026-09-10, [[project_fase_seguridad_pendiente]]).
+//   3) el JWT de servicio propio de msg_ninesys (WhatsAppAPIClient,
+//      ninesys-api server-a-servidor, mismo caso que authenticateToken.js).
 // Antes de este middleware la ruta no tenía NINGÚN chequeo de auth.
 module.exports = function authenticateSendCustom(req, res, next) {
     const dtfToken = req.headers['x-19print-token'];
@@ -31,13 +32,21 @@ module.exports = function authenticateSendCustom(req, res, next) {
         return res.status(401).json({ message: "Token no proporcionado" });
     }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) {
-            log.warn({ err }, 'Token NO válido');
-            return res.status(403).json({ message: "Token no válido" });
+    jwt.verify(token, process.env.NINESYS_API_JWT_SECRET, (err, sessionUser) => {
+        if (!err) {
+            log.debug('Token de sesión válido');
+            req.user = sessionUser;
+            return next();
         }
-        log.debug('Token válido');
-        req.user = user;
-        next();
+
+        jwt.verify(token, process.env.JWT_SECRET, (err2, legacyUser) => {
+            if (err2) {
+                log.warn({ err: err2 }, 'Token NO válido (ni sesión ni servicio)');
+                return res.status(403).json({ message: "Token no válido" });
+            }
+            log.debug('Token de servicio válido');
+            req.user = legacyUser;
+            next();
+        });
     });
 };
