@@ -978,6 +978,18 @@ async function purgeOldMessages(pool, retentionDays) {
 }
 
 async function clearAllConversationsAndMessages(pool) {
+    // Bug real -- auditoría de seguridad 2026-09-15: `SET FOREIGN_KEY_CHECKS`
+    // es sintaxis exclusiva de MySQL. En Postgres (el driver real de
+    // prácticamente todo el parque hoy, ver memoria del proyecto) esto
+    // tiraba error en la primera línea, atrapado en un catch silencioso del
+    // único caller (waManager.js::disconnect()) -- la limpieza de chats/
+    // mensajes al desvincular un dispositivo WhatsApp nunca llegaba a
+    // ejecutarse en tenants Postgres, sin que nadie se enterara.
+    if (pool.driver === 'pgsql') {
+        await pool.query(`DELETE FROM wa_messages`);
+        await pool.query(`DELETE FROM wa_conversations`);
+        return true;
+    }
     await pool.query(`SET FOREIGN_KEY_CHECKS=0`);
     try {
         await pool.query(`DELETE FROM wa_messages`);

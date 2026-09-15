@@ -657,7 +657,11 @@ async function getMedia(req, res) {
         res.setHeader('Cache-Control', 'private, max-age=3600');
         // Para documentos, forzar descarga con el nombre original (body)
         if (row.type === 'document' && row.body) {
-            const safeName = String(row.body).replace(/"/g, '');
+            // Auditoría de seguridad 2026-09-15: solo quitaba comillas
+            // dobles (blacklist débil) -- row.body puede originarse en un
+            // nombre de archivo mandado por un contacto de WhatsApp. Ahora
+            // whitelist de caracteres seguros para un header HTTP.
+            const safeName = String(row.body).replace(/[^\w.\- ]/g, '_');
             res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
         }
         fs.createReadStream(abs).pipe(res);

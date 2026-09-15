@@ -2,6 +2,20 @@
 let autoRefreshInterval;
 let isAutoRefreshPaused = false;
 
+// XSS almacenado -- auditoría de seguridad 2026-09-15: pushname/nombre de
+// chat/contenido de mensaje vienen de WhatsApp (cualquier contacto externo
+// puede setearlos) y se interpolaban sin escapar en innerHTML. Escapa las
+// 5 entidades HTML antes de insertar cualquier valor no confiable.
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // --- Authentication Check ---
     const token = localStorage.getItem('jwt_token');
@@ -123,17 +137,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 const row = clientsTableBody.insertRow();
                 const statusClass = getStatusClass(client.status_detail);
                 row.innerHTML = `
-                    <td>${client.company_id}</td>
-                    <td>${client.phoneNumber || 'N/A'}</td>
-                    <td>${client.pushname || 'N/A'}</td>
-                    <td class="${statusClass}">${client.status_detail}</td>
-                    <td>${client.error_message || 'N/A'}</td>
+                    <td>${escapeHtml(client.company_id)}</td>
+                    <td>${escapeHtml(client.phoneNumber) || 'N/A'}</td>
+                    <td>${escapeHtml(client.pushname) || 'N/A'}</td>
+                    <td class="${statusClass}">${escapeHtml(client.status_detail)}</td>
+                    <td>${escapeHtml(client.error_message) || 'N/A'}</td>
                     <td>
-                        <button data-action="view" data-company-id="${client.company_id}">Ver / QR</button>
-                        <button data-action="chats" data-company-id="${client.company_id}" style="background-color: #2196F3;">Ver Chats</button>
-                        <button data-action="restart" data-company-id="${client.company_id}">Reiniciar</button>
-                        <button data-action="disconnect" data-company-id="${client.company_id}">Desconectar</button>
-                        <button data-action="delete" data-company-id="${client.company_id}" style="background-color: #f44336; color: white;">Eliminar</button>
+                        <button data-action="view" data-company-id="${escapeHtml(client.company_id)}">Ver / QR</button>
+                        <button data-action="chats" data-company-id="${escapeHtml(client.company_id)}" style="background-color: #2196F3;">Ver Chats</button>
+                        <button data-action="restart" data-company-id="${escapeHtml(client.company_id)}">Reiniciar</button>
+                        <button data-action="disconnect" data-company-id="${escapeHtml(client.company_id)}">Desconectar</button>
+                        <button data-action="delete" data-company-id="${escapeHtml(client.company_id)}" style="background-color: #f44336; color: white;">Eliminar</button>
                     </td>
                 `;
 
@@ -314,10 +328,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
             let html = '<ul style="list-style: none; padding: 0;">';
             chats.forEach(chat => {
+                const nombreSeguro = escapeHtml(chat.name || chat.id);
+                const mensajeSeguro = chat.lastMessage
+                    ? escapeHtml(chat.lastMessage.substring(0, 80)) + '...'
+                    : 'Sin mensajes';
                 html += `
                     <li style="margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #555;">
-                        <strong>${chat.name || chat.id}</strong> <span style="color: #4CAF50; font-weight: bold;">${chat.unreadCount > 0 ? `(${chat.unreadCount})` : ''}</span><br>
-                        <small style="color: #ccc;"><em>${chat.lastMessage ? chat.lastMessage.substring(0, 80) + '...' : 'Sin mensajes'}</em></small>
+                        <strong>${nombreSeguro}</strong> <span style="color: #4CAF50; font-weight: bold;">${chat.unreadCount > 0 ? `(${chat.unreadCount})` : ''}</span><br>
+                        <small style="color: #ccc;"><em>${mensajeSeguro}</em></small>
                     </li>
                 `;
             });

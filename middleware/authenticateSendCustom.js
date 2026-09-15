@@ -34,6 +34,14 @@ module.exports = function authenticateSendCustom(req, res, next) {
 
     jwt.verify(token, process.env.NINESYS_API_JWT_SECRET, (err, sessionUser) => {
         if (!err) {
+            // Auditoría de seguridad 2026-09-15: faltaba el mismo chequeo de
+            // scope que ya tiene authenticateToken.js -- sin esto, un JWT de
+            // sesión válido de CUALQUIER empresa podía operar
+            // /send-message-custom/:companyId de OTRA empresa.
+            if (req.params.companyId && String(sessionUser.id_empresa) !== String(req.params.companyId)) {
+                log.warn({ tokenEmpresa: sessionUser.id_empresa, companyId: req.params.companyId }, 'Token de sesión válido pero de otra empresa');
+                return res.status(403).json({ message: "No tiene permiso para operar esta empresa." });
+            }
             log.debug('Token de sesión válido');
             req.user = sessionUser;
             return next();

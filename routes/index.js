@@ -445,17 +445,13 @@ router.post("/send-message/:companyId", authenticateToken, sendTemplateMessage);
 router.post("/send-direct-message/:companyId", authenticateToken, sendDirectMessage);
 
 
-// Ruta de prueba simple
-router.post("/test-recibir", (req, res) => {
-    log.debug({ body: req.body }, 'Received test data');
-    res.status(200).json({ received: req.body, status: "ok" });
-});
-
-
 /**
- * Endpoint simple para verificar estado sin autenticación (solo para icono del frontend)
+ * Endpoint simple para verificar estado -- auditoría de seguridad
+ * 2026-09-15: exigía "sin autenticación" a propósito, pero el único caller
+ * real (components/checkConnection.vue, app_multi) ya manda el JWT de
+ * sesión en cada request de $wsApi -- gateado sin romper nada.
  */
-router.get("/ws-info/:companyId", async (req, res) => {
+router.get("/ws-info/:companyId", authenticateToken, async (req, res) => {
     const { companyId } = req.params;
     try {
         const { getClientStatus } = require("../controllers/whatsappController");
@@ -477,7 +473,13 @@ router.get("/ws-info/:companyId", async (req, res) => {
  * Útil cuando se cambia el horario en la BD y necesitamos verlo reflejado
  * inmediatamente sin esperar a que expire el TTL (15 min).
  */
-router.post("/cache/invalidate-business-hours/:companyId", (req, res) => {
+// Auditoría de seguridad 2026-09-15: sin ningún caller real encontrado en
+// todo el ecosistema (ni app_multi ni ninesys-api la invocan hoy) y sin
+// ninguna autenticación -- cualquiera podía forzar la invalidación del
+// caché de horario de cualquier empresa. Gateada por las dudas en vez de
+// eliminarla (el propio comentario del endpoint documenta un caso de uso
+// real pendiente de conectar).
+router.post("/cache/invalidate-business-hours/:companyId", authenticateToken, (req, res) => {
     const { companyId } = req.params;
     const businessHoursClient = require("../src/lib/businessHoursClient");
     businessHoursClient.invalidate(companyId);

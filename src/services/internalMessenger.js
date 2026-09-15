@@ -29,15 +29,21 @@ const BOT_SENDER_NAME = process.env.INTERNAL_MSG_BOT_SENDER_NAME || 'NineSys Wha
  * Consulta la BD central (api_empresas) — el pool del tenant tiene permisos
  * de lectura ahí porque el endpoint /empleados ya hace el mismo JOIN.
  */
-async function resolveDepartmentForEmployee(pool, employeeId) {
+async function resolveDepartmentForEmployee(pool, employeeId, idEmpresa) {
     try {
+        // Auditoría de seguridad 2026-09-15: faltaba filtrar por id_empresa
+        // en esta tabla central multi-tenant -- un empleado que pertenece a
+        // más de una empresa (caso real ya documentado, ver memoria del
+        // proyecto) podía recibir el departamento de OTRA empresa en el
+        // aviso. Bajo impacto (no era fuga de datos, solo enrutamiento del
+        // mensaje), corregido igual.
         const [rows] = await pool.query(
             `SELECT id_departamento
              FROM api_empresas.empresas_usuarios_departamentos
-             WHERE id_empleado = ? AND id_departamento IN (5, 6)
+             WHERE id_empleado = ? AND id_empresa = ? AND id_departamento IN (5, 6)
              ORDER BY CASE WHEN id_departamento = 6 THEN 1 WHEN id_departamento = 5 THEN 2 ELSE 3 END
              LIMIT 1`,
-            [employeeId]
+            [employeeId, idEmpresa]
         );
         return rows[0]?.id_departamento || 6;
     } catch (e) {
@@ -135,7 +141,7 @@ async function notifyVendorOfAssignment(idEmpresa, pool, { vendorId, jid, reason
             ? (phone ? `${contactName} (+${phone})` : contactName)
             : (phone ? `+${phone}` : 'Cliente sin identificar');
 
-        const idDepartamento = await resolveDepartmentForEmployee(pool, vendorId);
+        const idDepartamento = await resolveDepartmentForEmployee(pool, vendorId, idEmpresa);
         const humanReason = reasonToHuman(reason);
 
         const message =
