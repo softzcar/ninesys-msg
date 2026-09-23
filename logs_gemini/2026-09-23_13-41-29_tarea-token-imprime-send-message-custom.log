@@ -1,0 +1,18 @@
+- **Solicitud del Usuario:** Parte del plan de retiro de DTF: darle a "imprime" (reemplazo de DTF) su propio secreto para notificar clientes por WhatsApp (`POST /send-message-custom/:companyId`), distinto al `X-19print-Token` de DTF.
+- **Fecha y Hora:** 2026-09-23 13:41:29
+- **Proyecto(s):** WhatsApp (msg_ninesys)
+- **Archivos Involucrados:**
+  - `msg_ninesys/middleware/authenticateSendCustom.js`
+- **Commits Relacionados:**
+  - WhatsApp: `526947b`
+- **Acción Realizada:** Agregada una cuarta credencial válida (header `X-Imprime-Token` comparado en tiempo constante contra `IMPRIME_APP_TOKEN`), junto a las tres que ya existían (`X-19print-Token`/`DTF_APP_TOKEN`, JWT de sesión de app_multi, JWT de servicio propio de msg_ninesys). Dado de alta el secreto nuevo en el `.env` de Desarrollo y reiniciado el proceso PM2 con `--update-env`.
+- **Inconvenientes y Desafíos:** Ninguno -- mismo patrón que ya usaba el chequeo de DTF (`tokensMatch` con `crypto.timingSafeEqual`), solo se agregó una rama más.
+- **Decisión Final y Justificación:** Secreto propio para "imprime", nunca el mismo que `DTF_APP_TOKEN`, mismo criterio que el token de servicio agregado en `ninesys-api` el mismo día.
+- **Herramienta(s) Utilizada(s):** `Edit`, `node --check`, `git commit`, `git push`, `ninesys-hub/bin/deploy_whatsapp_dev.sh`, `pm2 restart --update-env`.
+- **Resultado:** Éxito.
+- **Verificación:** `node --check` sin errores; desplegado a Desarrollo (`ws.nineteengreen.com`, HEAD remoto confirmado `526947b`); proceso PM2 reiniciado y activo.
+- **Logro Conseguido:** Base habilitada para que "imprime" notifique clientes por WhatsApp (recuperación de clave) con credenciales propias, verificado en producción de Desarrollo con un envío real (PIN de recuperación de clave recibido correctamente por el usuario).
+- **Referencias de Sesión (Contexto):**
+  - Sesión Claude Code: https://claude.ai/code/session_01DGUJFb8c9NYbAFUZLRQfLE
+- **Observaciones de Gemini:** Cambio cross-repo, parte de la Fase 0/1 del plan de retiro de DTF. Único cambio en `msg_ninesys` hoy.
+- **Respuesta de Gemini:** Cambio desplegado y verificado con un envío real de WhatsApp durante las pruebas del usuario más tarde en el día.
