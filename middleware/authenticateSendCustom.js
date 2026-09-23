@@ -10,19 +10,28 @@ function tokensMatch(provided, expected) {
     return crypto.timingSafeEqual(bufProvided, bufExpected);
 }
 
-// Autoriza POST /send-message-custom/:companyId con UNA de tres credenciales:
+// Autoriza POST /send-message-custom/:companyId con UNA de cuatro credenciales:
 //   1) header X-19print-Token == DTF_APP_TOKEN -- integración dedicada de
-//      19print_app (dtf.nineteencustom.com), sin login/JWT de por medio.
-//   2) el JWT de sesión de ninesys-api (app_multi, navegador) -- ver
+//      19print_app (dtf.nineteencustom.com, en retiro), sin login/JWT de por medio.
+//   2) header X-Imprime-Token == IMPRIME_APP_TOKEN -- integración dedicada
+//      de "imprime" (ex-sublima, reemplazo de DTF), secreto propio, nunca
+//      el mismo que DTF_APP_TOKEN.
+//   3) el JWT de sesión de ninesys-api (app_multi, navegador) -- ver
 //      authenticateToken.js para el detalle del secreto compartido
 //      (auditoría de seguridad 2026-09-10, [[project_fase_seguridad_pendiente]]).
-//   3) el JWT de servicio propio de msg_ninesys (WhatsAppAPIClient,
+//   4) el JWT de servicio propio de msg_ninesys (WhatsAppAPIClient,
 //      ninesys-api server-a-servidor, mismo caso que authenticateToken.js).
 // Antes de este middleware la ruta no tenía NINGÚN chequeo de auth.
 module.exports = function authenticateSendCustom(req, res, next) {
     const dtfToken = req.headers['x-19print-token'];
     if (tokensMatch(dtfToken, process.env.DTF_APP_TOKEN)) {
         req.caller = '19print';
+        return next();
+    }
+
+    const imprimeToken = req.headers['x-imprime-token'];
+    if (tokensMatch(imprimeToken, process.env.IMPRIME_APP_TOKEN)) {
+        req.caller = 'imprime';
         return next();
     }
 
