@@ -34,6 +34,17 @@ const corsOptions = {
             callback(null, false);
         }
     },
+    // Bug real: "CORS Error" al llamar /disconnect/:id desde app_multi --
+    // Node siempre respondió bien (204/200 + headers correctos, confirmado
+    // pegándole directo al puerto 3000); la causa real terminó siendo que
+    // OpenLiteSpeed, como proxy delante de este servicio (ver vhost.conf de
+    // ws.nineteengreen.com), descarta los headers Access-Control-* de
+    // CUALQUIER respuesta proxied -- no solo del preflight OPTIONS -- así
+    // que el arreglo real está del lado de OLS (extraHeaders en el context
+    // del vhost), no acá. Este optionsSuccessStatus:200 se deja de todos
+    // modos por ser la recomendación estándar del paquete `cors` para
+    // proxies/clientes que no manejan bien un 204 sin cuerpo.
+    optionsSuccessStatus: 200,
 };
 router.use(cors(corsOptions));
 

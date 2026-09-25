@@ -1,0 +1,25 @@
+- **Solicitud del Usuario:** "ok han funcionado, vamos a arreglar un Bug en desarrollo en la comunicación entre app_muti y el servicio de whatsapp. Cuando ninesys llama al servivicio por ejemplo `https://ws.nineteengreen.com/disconnect/194` responde con `CORS Error`" -- luego: "revisa si producción tiene el mismo problema".
+- **Fecha y Hora:** 2026-09-25
+- **Proyecto(s):** Backend (msg_ninesys) + infraestructura (OpenLiteSpeed en vps-contabo-dev, fuera de cualquier repo)
+- **Archivos Involucrados:**
+  - `routes/index.js` (msg_ninesys) -- `corsOptions`
+  - `/usr/local/lsws/conf/vhosts/ws.nineteengreen.com/vhost.conf` en `vps-contabo-dev` (NO versionado, cambio de infraestructura)
+- **Commits Relacionados:**
+  - Backend (msg_ninesys): (pendiente de commit en el momento de este log, ver commit inmediatamente posterior)
+- **Acción Realizada:**
+  1. Se probó el endpoint directo contra `127.0.0.1:3000` (bypaseando el proxy) y respondió correctamente con 204/200 y todos los headers `Access-Control-*` -- descartando que el bug estuviera en el código Node.
+  2. Se probó la MISMA petición vía la ruta pública HTTPS (a través de OpenLiteSpeed) y volvió sin ningún header CORS y con `Allow: DELETE` -- confirmando que OpenLiteSpeed, actuando como proxy reverso delante de este servicio, descarta silenciosamente los headers `Access-Control-*` de las respuestas proxied.
+  3. Fix real aplicado en `vhost.conf` de `ws.nineteengreen.com` (backup previo `vhost.conf.bak-antes-de-cors-fix-<fecha>`): bloque `extraHeaders` en el `context /` con `Access-Control-Allow-Origin`, `-Methods`, `-Headers`, `-Credentials` y `Vary: Origin`. Aplicado con `lswsctrl restart` (reload, SIGUSR1).
+  4. En `routes/index.js` se agregó `optionsSuccessStatus: 200` a `corsOptions` -- no es la causa raíz, pero es la práctica recomendada del propio paquete `cors`; se documentó en un comentario que el fix real está en OLS, no aquí, para no inducir a error en el futuro.
+  5. Verificado con `curl` tras el fix: preflight OPTIONS, `GET /health`, y `GET /server-status` (caso 401) todos devuelven los headers CORS correctos vía la ruta pública.
+  6. Verificado que Producción (`ninesys19.com`, detrás de Cloudflare) NO tiene este problema -- comportamiento correcto de fábrica, no requirió ningún cambio ahí.
+- **Inconvenientes y Desafíos:** El síntoma (headers CORS ausentes) apuntaba naturalmente al código de la aplicación (`corsOptions`), pero el código ya estaba bien -- el diagnóstico correcto requirió comparar la respuesta directa al puerto de Node contra la respuesta a través del dominio público para aislar la capa de proxy como responsable.
+- **Decisión Final y Justificación:** Arreglar en la capa de infraestructura (OLS) en vez de intentar forzar los headers desde el código Node -- es la causa raíz real y evita depender de que la aplicación "adivine" que un proxy intermedio le va a romper los headers.
+- **Herramienta(s) Utilizada(s):** `curl` (diagnóstico y verificación), `ssh`, edición directa del `vhost.conf` remoto, `lswsctrl restart`, `Edit` (routes/index.js), PM2 (`pm2 restart ntmsg-app-dev`).
+- **Resultado:** Éxito.
+- **Verificación:** `curl` contra la ruta pública mostrando los headers `Access-Control-Allow-*` presentes tanto en el preflight OPTIONS como en respuestas reales (200 y 401), antes ausentes.
+- **Logro Conseguido:** Restaurada la comunicación entre `app_multi` y el servicio de WhatsApp en Desarrollo (ej. desconectar sesión de una empresa), sin necesidad de cambios de arquitectura ni de mover el servicio detrás de otro proxy.
+- **Referencias de Sesión (Contexto):**
+  - Sesión Claude Code: https://claude.ai/code/session_01DGUJFb8c9NYbAFUZLRQfLE
+- **Observaciones de Gemini:** El usuario planeaba reintentar el envío de un presupuesto por WhatsApp que había fallado el día anterior, una vez arreglada esta comunicación -- resultado de esa prueba aún pendiente de reportar.
+- **Respuesta de Gemini:** Corregido el bug de CORS en Desarrollo (causa real: OpenLiteSpeed descartando headers de proxy, no el código de la aplicación); confirmado que Producción no tiene el mismo problema.
