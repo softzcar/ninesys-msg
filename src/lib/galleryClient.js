@@ -5,7 +5,15 @@ const CDN_URL = process.env.CDN_URL || 'https://cdn.ninesys19.com';
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const FOLDERS_CACHE_TTL_MS = 10 * 60 * 1000;
 
-const http = axios.create({ baseURL: CDN_URL, timeout: 8000, headers: { Accept: 'application/json' } });
+const http = axios.create({
+    baseURL: CDN_URL,
+    timeout: 8000,
+    headers: {
+        Accept: 'application/json',
+        'X-Internal-Token': process.env.MSG_SERVICE_INTERNAL_TOKEN || '',
+    },
+});
+
 
 // Cache de imágenes: `${idEmpresa}:${productTerm}` → { value: string[], fetchedAt }
 const cache = new Map();
