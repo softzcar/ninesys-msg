@@ -12,11 +12,15 @@
  *   5. Disparar handoff a humano (asigna conversación + notifica vendedor)
  */
 
+const axios = require('axios');
 const sizesClient = require('../lib/sizesClient');
 const telasClient = require('../lib/telasClient');
 const customerLookup = require('./customerLookup');
 const assignmentPolicy = require('./assignmentPolicy');
 const log = require('../lib/logger').createLogger('presupuestoService');
+
+const API_URL = process.env.API_URL || 'https://api.nineteengreen.com';
+const INTERNAL_TOKEN = process.env.MSG_SERVICE_INTERNAL_TOKEN || '';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -273,7 +277,47 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', existingCu
             return { ok: false, id_presupuesto: null, vendorId: null, reason: 'invalid_catalog' };
         }
 
-        // 1. Resolver IDs
+        // Intento primario: Crear vía endpoint interno centralizado en ninesys-api
+        if (API_URL && INTERNAL_TOKEN) {
+            try {
+                const apiRes = await axios.post(
+                    `${API_URL}/internal/presupuestos/${idEmpresa}/crear`,
+                    {
+                        cliente: {
+                            ...(data.cliente || {}),
+                            telefono: clientPhone || data.cliente?.telefono || '',
+                        },
+                        items: data.items,
+                        observaciones: data.obs || '',
+                        origen: 'whatsapp',
+                    },
+                    {
+                        headers: {
+                            Authorization: String(idEmpresa),
+                            'X-Internal-Token': INTERNAL_TOKEN,
+                            'Content-Type': 'application/json',
+                        },
+                        timeout: 10000,
+                    }
+                );
+
+                if (apiRes.data && apiRes.data.success && apiRes.data.id_presupuesto) {
+                    const presId = apiRes.data.id_presupuesto;
+                    const assignedVendor = apiRes.data.responsable?.id_usuario || null;
+                    log.info({ idEmpresa, jid, presId, assignedVendor }, 'presupuestoService: creado exitosamente vía ninesys-api');
+
+                    await handoffFn(idEmpresa, pool, jid, 'presupuesto_generado', {
+                        forcedVendorId: assignedVendor,
+                    });
+
+                    return { ok: true, id_presupuesto: presId, vendorId: assignedVendor };
+                }
+            } catch (apiErr) {
+                log.warn({ err: apiErr.message, idEmpresa, jid }, 'presupuestoService: intento vía API falló, ejecutando fallback local');
+            }
+        }
+
+        // 1. Resolver IDs (Fallback local)
         _step = 'resolveItemIds';
         let resolvedItems = await resolveItemIds(idEmpresa, data.items || []);
 
