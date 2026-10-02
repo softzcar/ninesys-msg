@@ -121,6 +121,19 @@ test('resumen "¿Confirmas este presupuesto?" sin marker → espera retry', asyn
     assert.equal(plan.presupuesto, null);
 });
 
+test('referencias internas [cod:][idCat:] nunca llegan al cliente', async () => {
+    const plan = await run({
+        text: 'Tenemos Franela Sublimada [cod:3][idCat:1] a partir de *$20.00*.\n👕 *Chemise:* [cod:7] [idCat:2]\n• Gorra [idCat:4]',
+        functionCalls: [],
+    });
+    assert.equal(plan.textToSend, 'Tenemos Franela Sublimada a partir de *$20.00*.\n👕 *Chemise:*\n• Gorra');
+});
+
+test('texto sin referencias de catálogo no se altera', async () => {
+    const plan = await run({ text: 'Precio [especial] por 12 unidades', functionCalls: [] });
+    assert.equal(plan.textToSend, 'Precio [especial] por 12 unidades');
+});
+
 test('[HANDOFF_IA] se quita del texto y escala sin texto de transición', async () => {
     const plan = await run({ text: 'Te paso con un asesor [HANDOFF_IA]', functionCalls: [] });
     assert.equal(plan.textToSend, 'Te paso con un asesor');

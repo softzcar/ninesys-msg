@@ -82,7 +82,10 @@ async function classifyHandoffIntent(message, recentClientMessages = []) {
             const res = await client.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: [{ role: 'user', parts: [{ text: buildPrompt(message, recentClientMessages) }] }],
-                config: { temperature: 0, maxOutputTokens: 16 },
+                // Sin thinking: gemini-2.5-flash razona por defecto y esos tokens
+                // salen del mismo maxOutputTokens -- con 16 la respuesta llegaba
+                // cortada ("human") y TODO caía en 'none' (verificado 2026-10-02).
+                config: { temperature: 0, maxOutputTokens: 16, thinkingConfig: { thinkingBudget: 0 } },
             });
             const raw = (res?.text || '').trim().toLowerCase().split(/\s/)[0];
             if (!VALID_RESULTS.has(raw)) {

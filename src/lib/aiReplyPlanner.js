@@ -28,6 +28,11 @@ const HANDOFF_IA_MARKER_RE      = /\[HANDOFF_IA\]/gi;
 const HANDOFF_CLIENTE_MARKER_RE = /\[HANDOFF_CLIENTE\]/gi;
 const HANDOFF_IA_DETECT_RE      = /\[HANDOFF_IA\]/i;
 
+// Referencias internas del catálogo ([cod:X][idCat:X]) que el contexto le da a
+// la IA para submit_presupuesto. El modelo a veces las copia al cliente aunque
+// el contexto lo prohíbe; se quitan siempre del texto saliente.
+const CATALOG_REF_RE = /[ \t]*\[(?:cod|idCat):[^\]\n]*\]/gi;
+
 // Marker de galería de imágenes: [IMG:url1|url2|...]
 const IMG_MARKER_RE = /\[IMG:(https?:\/\/[^\]|]+(?:\|https?:\/\/[^\]|]+)*)\]/i;
 
@@ -244,6 +249,13 @@ async function planAiReply({ reply, intentResult, cdnUrl, urlToGalleryTerm = nul
             : '¿De qué producto te gustaría ver diseños?';
         plan.stateOps.push({ op: 'set_gallery_clarification' });
         note('warn', 'maybeAutoReply: URL de galería inválida y texto vacío — enviando pregunta de aclaración como fallback', { invalidUrl: fcGallery.args.url });
+    }
+
+    // Quitar referencias internas del catálogo antes de enviar.
+    const sinRefs = textToSend.replace(CATALOG_REF_RE, '');
+    if (sinRefs !== textToSend) {
+        textToSend = sinRefs.trim();
+        note('warn', 'maybeAutoReply: la IA incluyó [cod:][idCat:] en el texto — removidos');
     }
 
     plan.textToSend = textToSend;
