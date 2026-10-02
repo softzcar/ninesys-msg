@@ -4,7 +4,8 @@
     "description": "",
     "main": "app.js",
     "scripts": {
-        "test": "node --test test/integration/flow.test.js",
+        "test": "node --test test/unit test/integration/flow.test.js",
+        "test:unit": "node --test test/unit",
         "start": "node app.js",
         "dev": "nodemon app.js",
         "stop": "pm2 stop ntmsg-app",

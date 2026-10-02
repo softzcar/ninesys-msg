@@ -72,20 +72,17 @@ const _pendingConfirmacionSinMarker = new Map();
 // el resultado.
 const _pendingGalleryClarification = new Map();
 
-// Apertura flexible: la IA a veces abrevia el tag (ej: [PRESUPUEDATA], [PRESUPUESTO_DATA]).
-// Captura cualquier [PRESUP...] y su cierre correspondiente [/PRESUP...].
-const PRESUPUESTO_MARKER_RE = /\[PRESUP[A-Z_]*\]([\s\S]*?)\[\/PRESUP[A-Z_]*\]/i;
-const PRESUPUESTO_CONFIRM_RE = /^(s[ií]|yes|confirmo|correcto|ok|dale|listo|de acuerdo)$/i;
-// Detecta si el texto visible es un resumen listo para confirmar (la IA lo envió sin marker)
-const PRESUPUESTO_RESUMEN_RE = /confirmas\s+este\s+presupuesto/i;
-
-// Markers de escalada que la IA incluye en su respuesta para solicitar handoff.
-// Se extraen antes de enviar el texto al cliente (el cliente nunca los ve).
-const HANDOFF_IA_MARKER_RE      = /\[HANDOFF_IA\]/gi;
-const HANDOFF_CLIENTE_MARKER_RE = /\[HANDOFF_CLIENTE\]/gi;
-
-// Marker de galería de imágenes: [IMG:url1|url2|...]
-const IMG_MARKER_RE = /\[IMG:(https?:\/\/[^\]|]+(?:\|https?:\/\/[^\]|]+)*)\]/i;
+// Markers, regex de confirmación y textos automáticos viven en aiReplyPlanner
+// (compartidos con el simulador del bot).
+const {
+    PRESUPUESTO_CONFIRM_RE,
+    RETRY_CONFIRM_INSTRUCTION,
+    TEXTS: AI_TEXTS,
+    OPT_OUT_COMMANDS,
+    OPT_IN_COMMANDS,
+    buildClienteRegistradoCtx,
+    planAiReply,
+} = require('../lib/aiReplyPlanner');
 
 // Mensajes automáticos al cliente cuando una nota de voz no puede transcribirse.
 // El umbral de duración vive en wa_tenant_config.stt_long_audio_seconds (default 120s)
@@ -294,27 +291,10 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
             }
             const clienteRegistrado = await customerLookup.findCustomerByJid(pool, resolvedJid);
             if (clienteRegistrado) {
-                const nombre = [clienteRegistrado.first_name, clienteRegistrado.last_name]
-                    .filter(Boolean).join(' ').trim();
-                const fn      = clienteRegistrado.first_name || '';
-                const ln      = clienteRegistrado.last_name  || '';
-                const phone   = clienteRegistrado.phone      || '';
-                const cedula  = clienteRegistrado.cedula     || '';
-                const address = clienteRegistrado.address    || '';
-                const email   = clienteRegistrado.email      || '';
-                registeredPhone = phone || null;
-                clienteRegistradoCtx =
-                    `\n=== CLIENTE REGISTRADO EN EL SISTEMA ===` +
-                    `\nNombre: ${nombre}` +
-                    `\nTeléfono: ${phone}` +
-                    (cedula  ? `\nCédula: ${cedula}`    : '') +
-                    (address ? `\nDirección: ${address}` : '') +
-                    (email   ? `\nEmail: ${email}`       : '') +
-                    `\nINSTRUCCIÓN CRÍTICA:` +
-                    `\n1. NO le preguntes nombre, apellido, cédula, teléfono, dirección ni ningún dato personal — ya los tienes arriba.` +
-                    `\n2. Pasa DIRECTAMENTE a preguntar por el pedido (producto, cantidad, talla, tela).` +
-                    `\n3. Al generar el JSON de presupuesto usa estos datos en "cliente": nombre="${fn}", apellido="${ln}", cedula="${cedula}", telefono="${phone}", email="${email}", direccion="${address}"` +
-                    `\n=== FIN DATOS CLIENTE ===\n`;
+                const built = buildClienteRegistradoCtx(clienteRegistrado);
+                const nombre = built.nombre;
+                registeredPhone = built.registeredPhone;
+                clienteRegistradoCtx = built.ctx;
                 // Guardar el customerId para usarlo en presupuestoService sin búsqueda por teléfono.
                 _pendingPresupuestoCustomerIds.set(jid, clienteRegistrado._id);
                 log.info({ jid, customerId: clienteRegistrado._id, nombre },
@@ -376,129 +356,34 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
 
         log.debug({ jid, intentResult }, 'maybeAutoReply: clasificador completado');
 
-        // ── Escenario 3: cliente quiere hablar con un humano ──────────────────
-        // El clasificador detectó human_request → bypassar la respuesta de la IA,
-        // enviar confirmación al cliente y escalar. La respuesta de Gemini se descarta.
-        if (intentResult === 'human_request') {
-            log.info({ jid }, 'maybeAutoReply: cliente solicita asesor humano');
-            sendText(idEmpresa, jid,
-                'Por supuesto, enseguida te comunico con uno de nuestros asesores. 😊',
-                { via: 'ai' }
-            ).catch(() => {});
-            handoffToHuman(idEmpresa, pool, jid, 'cliente_solicita').catch(() => {});
+        // Interpretación pura de la respuesta (compartida con el simulador del bot).
+        const plan = await planAiReply({
+            reply,
+            intentResult,
+            cdnUrl: galleryClient.CDN_URL,
+            urlToGalleryTerm: _urlToGalleryTerm,
+            listFolders: () => galleryClient.listFolders(idEmpresa),
+        });
+        for (const n of plan.notes) log[n.level]({ jid, ...n.data }, n.msg);
+
+        // ── human_request / respuesta nula / fallo de Gemini: texto fijo y salir ──
+        if (plan.kind !== 'reply') {
+            sendText(idEmpresa, jid, plan.textToSend, { via: 'ai' }).catch(() => {});
+            if (plan.handoff) {
+                handoffToHuman(idEmpresa, pool, jid, plan.handoff.reason).catch(() => {});
+            }
             return;
         }
 
-        // ── Validar respuesta de la IA ────────────────────────────────────────
-        if (!reply) {
-            log.warn({ jid }, 'maybeAutoReply: Gemini devolvió null — enviando fallback genérico');
-            sendText(idEmpresa, jid,
-                'Disculpa, tuve un inconveniente al procesar tu mensaje. ¿Puedes repetirlo? 🙏',
-                { via: 'ai' }
-            ).catch(() => {});
-            return;
+        // Estado de la conversación (antes de enviar, igual que antes del refactor).
+        for (const op of plan.stateOps) {
+            if (op.op === 'set_pending_presupuesto') _pendingPresupuestos.set(jid, op.data);
+            else if (op.op === 'clear_confirm_sin_marker') _pendingConfirmacionSinMarker.delete(jid);
+            else if (op.op === 'set_confirm_sin_marker') _pendingConfirmacionSinMarker.set(jid, true);
+            else if (op.op === 'set_gallery_clarification') _pendingGalleryClarification.set(jid, true);
         }
 
-        if (reply.error === 'gemini_failed') {
-            log.warn({ jid }, 'maybeAutoReply: enviando mensaje de fallback por fallo de Gemini');
-            sendText(idEmpresa, jid,
-                'Lo siento, tuve un problema técnico momentáneo. Por favor repite tu último mensaje. 🙏',
-                { via: 'ai' }
-            ).catch(() => {});
-            return;
-        }
-
-        // Detectar marker de escalada que la IA pudo haber incluido (red de seguridad).
-        const hasHandoffIa = HANDOFF_IA_MARKER_RE.test(reply.text);
-        log.info({ jid, replyText: (reply.text || '').slice(0, 300), fcs: (reply.functionCalls || []).map((f) => f.name) }, 'maybeAutoReply: respuesta cruda Gemini');
-
-        // Limpiar markers y extraer datos de presupuesto si los hay.
-        let textToSend = (reply.text || '')
-            .replace(HANDOFF_IA_MARKER_RE, '')
-            .replace(HANDOFF_CLIENTE_MARKER_RE, '')
-            .trim();
-
-        // ── Galería: función nativa primero, marcador de texto como fallback ──
-        // Gemini debería llamar a send_gallery_image() en lugar de [IMG:url].
-        // Mantenemos el regex como red de seguridad por si el modelo eligió texto.
-        let imgUrls = [];
-        const fcGallery = (reply.functionCalls || []).find((fc) => fc.name === 'send_gallery_image');
-        if (fcGallery?.args?.url) {
-            const fcUrl = String(fcGallery.args.url).trim();
-            if (fcUrl.startsWith(`${galleryClient.CDN_URL}/`)) {
-                imgUrls = [fcUrl];
-                log.info({ jid, url: fcUrl }, 'maybeAutoReply: send_gallery_image function call');
-            } else {
-                log.warn({ jid, url: fcUrl }, 'maybeAutoReply: send_gallery_image URL inválida — ignorada');
-            }
-        } else {
-            // Fallback: buscar marcador de texto [IMG:url]
-            const imgMatch = IMG_MARKER_RE.exec(textToSend);
-            if (imgMatch) {
-                imgUrls = imgMatch[1].split('|')
-                    .map((u) => u.trim())
-                    .filter((u) => u.startsWith(`${galleryClient.CDN_URL}/`))
-                    .slice(0, 4);
-                textToSend = textToSend.replace(imgMatch[0], '').trim();
-                log.info({ jid, urlCount: imgUrls.length }, 'maybeAutoReply: IMG marker detectado (fallback)');
-            }
-        }
-
-        // ── Presupuesto: función nativa primero, marcador de texto como fallback ──
-        const fcPresupuesto = (reply.functionCalls || []).find((fc) => fc.name === 'submit_presupuesto');
-        if (fcPresupuesto?.args) {
-            _pendingPresupuestos.set(jid, fcPresupuesto.args);
-            log.info({ jid }, 'maybeAutoReply: submit_presupuesto function call — presupuesto pendiente');
-            if (!textToSend) {
-                textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
-                log.warn({ jid }, 'maybeAutoReply: submit_presupuesto sin texto — usando confirmación de respaldo');
-            }
-            _pendingConfirmacionSinMarker.delete(jid);
-        } else {
-            // Fallback: buscar marcador de texto [PRESUPUESTO_DATA]
-            const markerMatch = PRESUPUESTO_MARKER_RE.exec(textToSend);
-            if (markerMatch) {
-                textToSend = textToSend.replace(markerMatch[0], '').trim();
-                try {
-                    const presupuestoData = JSON.parse(markerMatch[1]);
-                    _pendingPresupuestos.set(jid, presupuestoData);
-                    log.info({ jid }, 'maybeAutoReply: presupuesto pendiente registrado (fallback marker)');
-                } catch (parseErr) {
-                    log.warn({ jid, err: parseErr.message }, 'maybeAutoReply: falló parseo de PRESUPUESTO_DATA');
-                }
-                if (!textToSend) {
-                    textToSend = '¿Confirmas este presupuesto? Responde *SÍ* para que lo registremos y un asesor te contacte.';
-                    log.warn({ jid }, 'maybeAutoReply: textToSend vacío tras extraer marker — usando confirmación de respaldo');
-                }
-                _pendingConfirmacionSinMarker.delete(jid);
-            } else if (PRESUPUESTO_RESUMEN_RE.test(textToSend)) {
-                _pendingConfirmacionSinMarker.set(jid, true);
-                log.warn({ jid }, 'maybeAutoReply: resumen enviado sin función ni marker — esperando "sí" para regenerar');
-            }
-        }
-
-        // Garantizar texto mínimo cuando hay imagen pero Gemini no generó texto.
-        if (!textToSend && imgUrls.length > 0) {
-            const galleryTerm = _urlToGalleryTerm.get(imgUrls[0]);
-            textToSend = galleryTerm
-                ? `¡Aquí te muestro un modelo de ${galleryTerm}! ¿Te gusta el estilo? Si quieres ver otro modelo, dímelo. 😊`
-                : '¡Aquí te muestro!';
-            log.warn({ jid, galleryTerm: galleryTerm || null }, 'maybeAutoReply: texto vacío con imagen — usando texto de respaldo contextual');
-        }
-
-        // RED DE SEGURIDAD: Si Gemini llamó a send_gallery_image pero la URL fue inválida
-        // y no tenemos ningún texto para enviar, forzar una respuesta para no dejar colgado el chat.
-        if (!textToSend && fcGallery?.args?.url && imgUrls.length === 0) {
-            // Ejemplos reales de este tenant (no una lista genérica) para no sugerir
-            // productos que la empresa no vende — causó una alucinación real: el bot
-            // sugirió "gorras" para una empresa sin ese producto ni esa carpeta de galería.
-            const realFolders = await galleryClient.listFolders(idEmpresa).catch(() => []);
-            textToSend = realFolders.length
-                ? `¿De qué producto te gustaría ver diseños? Por ejemplo, puedes pedir ${realFolders.slice(0, 4).join(', ')}, etc. 😊`
-                : '¿De qué producto te gustaría ver diseños?';
-            _pendingGalleryClarification.set(jid, true);
-            log.warn({ jid, invalidUrl: fcGallery.args.url }, 'maybeAutoReply: URL de galería inválida y texto vacío — enviando pregunta de aclaración como fallback');
-        }
+        const { textToSend, imgUrls } = plan;
 
         if (textToSend) {
             await simulateHumanTyping(idEmpresa, jid, textToSend);
@@ -551,27 +436,17 @@ async function maybeAutoReply(idEmpresa, pool, ingestResult, { extraSystemContex
         // dejar al cliente esperando una foto que nunca llega — avisar.
         if (imgUrls.length > 0 && !anyImageSent) {
             log.warn({ jid, imgUrls }, 'maybeAutoReply: ninguna imagen de galería pudo enviarse — notificando al cliente');
-            sendText(idEmpresa, jid,
-                'Disculpa, tuve un problema técnico al enviarte esa foto. ¿Puedes decirme de nuevo qué producto quieres ver, o prefieres que te ayude con otra cosa? 🙏',
-                { via: 'ai' }
-            ).catch(() => {});
+            sendText(idEmpresa, jid, AI_TEXTS.PHOTO_FAILED, { via: 'ai' }).catch(() => {});
         }
 
         // ── Escenario 1: IA no puede resolver / cliente frustrado ─────────────
-        // Prioridad: clasificador > marker de la IA (ambos disparan el mismo handoff).
-        // En ambos casos se envía un mensaje de transición para que el cliente sepa
-        // que será atendido por una persona y no sienta que lo ignoraron.
-        if (intentResult === 'frustrated') {
-            log.info({ jid }, 'maybeAutoReply: cliente frustrado (classifier) — escalando tras enviar respuesta');
-            sendText(idEmpresa, jid,
-                'Quiero asegurarme de que recibas la mejor atención posible. He notificado a uno de nuestros asesores para que continúe contigo personalmente. 🙏',
-                { via: 'ai' }
-            ).catch(() => {});
-            handoffToHuman(idEmpresa, pool, jid, 'ia_no_puede').catch(() => {});
-        } else if (hasHandoffIa) {
-            // La IA ya redactó el mensaje de transición antes del marker, no se duplica.
-            log.info({ jid }, 'maybeAutoReply: IA incluyó [HANDOFF_IA] — escalando');
-            handoffToHuman(idEmpresa, pool, jid, 'ia_no_puede').catch(() => {});
+        // Si el clasificador lo detectó se envía un mensaje de transición; si fue
+        // el marker [HANDOFF_IA], la IA ya redactó la transición y no se duplica.
+        if (plan.handoff) {
+            if (plan.handoff.transitionText) {
+                sendText(idEmpresa, jid, plan.handoff.transitionText, { via: 'ai' }).catch(() => {});
+            }
+            handoffToHuman(idEmpresa, pool, jid, plan.handoff.reason).catch(() => {});
         }
     } catch (e) {
         log.error({ err: e, tenantId: idEmpresa }, 'maybeAutoReply falló');
@@ -1013,10 +888,8 @@ async function _doInit(idEmpresa) {
                         // Procesamiento de comandos Opt-out / Opt-in
                         if (!result.isGroup && result.message?.body) {
                             const cleanText = result.message.body.trim().toUpperCase();
-                            const optOutCommands = ['BAJA', 'NO', 'STOP', 'SALIR'];
-                            const optInCommands = ['ALTA', 'ACTIVAR', 'START'];
-                            const isOptOut = optOutCommands.includes(cleanText);
-                            const isOptIn = optInCommands.includes(cleanText);
+                            const isOptOut = OPT_OUT_COMMANDS.includes(cleanText);
+                            const isOptIn = OPT_IN_COMMANDS.includes(cleanText);
 
                             if (isOptOut || isOptIn) {
                                 log.info({ tenantId: id, jid: result.jid, command: cleanText }, 'Comando de suscripción detectado');
@@ -1051,9 +924,7 @@ async function _doInit(idEmpresa) {
                                     }
                                 }
                                 
-                                const replyMsg = isOptOut
-                                    ? "Has sido dado de baja de los mensajes automáticos del sistema. Seguirás recibiendo atención personalizada. Si deseas reactivarlos, escribe ALTA en cualquier momento."
-                                    : "Mensajes automáticos reactivados. Seguirás recibiendo las actualizaciones de tus órdenes y notificaciones de forma habitual.";
+                                const replyMsg = isOptOut ? AI_TEXTS.OPT_OUT : AI_TEXTS.OPT_IN;
                                 
                                 await sendText(id, result.jid, replyMsg, { via: 'api' }).catch((sendErr) => {
                                     log.error({ err: sendErr, tenantId: id, jid: result.jid }, 'Error al enviar confirmación de suscripción');
@@ -1151,13 +1022,13 @@ async function _doInit(idEmpresa) {
                                     }).then(({ ok, id_presupuesto, reason }) => {
                                         let msg;
                                         if (ok) {
-                                            msg = `Tu presupuesto #${id_presupuesto} ha sido generado. Un asesor revisará tu pedido y te contactará en breve.`;
+                                            msg = AI_TEXTS.PRESUPUESTO_OK(id_presupuesto);
                                             // Carrito cerrado: limpiar memoria de productos cotizados de esta conversación.
                                             clearShownProducts(result.jid);
                                         } else if (reason === 'invalid_catalog') {
-                                            msg = 'No pude generar el presupuesto porque uno o más productos no están en nuestro catálogo. Un asesor te contactará para ayudarte directamente.';
+                                            msg = AI_TEXTS.PRESUPUESTO_INVALID_CATALOG;
                                         } else {
-                                            msg = 'Hubo un problema al generar tu presupuesto. Te atenderemos personalmente.';
+                                            msg = AI_TEXTS.PRESUPUESTO_ERROR;
                                         }
                                         sendText(id, result.jid, msg, { via: 'api' }).catch(() => {});
                                         if (!ok) {
@@ -1185,7 +1056,7 @@ async function _doInit(idEmpresa) {
                                     const isRetryConfirm = _pendingConfirmacionSinMarker.get(result.jid)
                                         && PRESUPUESTO_CONFIRM_RE.test(msgNorm);
                                     extraCtx = isRetryConfirm
-                                        ? '⚠️ INSTRUCCIÓN OBLIGATORIA: El cliente acaba de confirmar el presupuesto. Debes responder con el mensaje de confirmación Y llamar OBLIGATORIAMENTE a la función submit_presupuesto con todos los datos del pedido. Sin esa llamada el sistema no puede registrar el pedido.'
+                                        ? RETRY_CONFIRM_INSTRUCTION
                                         : '';
                                     if (isRetryConfirm) {
                                         log.info({ jid: result.jid }, 'maybeAutoReply: retry con extraSystemContext para forzar marker');
@@ -1644,7 +1515,7 @@ async function sendText(idEmpresa, jid, body, opts = {}) {
 
     let finalBody = body;
     if (via === 'api') {
-        finalBody = body + '\n\n_Si deseas dejar de recibir notificaciones automáticas, responde "BAJA" o "NO"_*';
+        finalBody = body + AI_TEXTS.API_FOOTER;
     }
 
     const s = sessions.get(id);
