@@ -1,0 +1,22 @@
+- **Solicitud del Usuario:** "sí, revisemos esos tres casos con el simulador" (códigos [cod:][idCat:] visibles, saludo "[19 print ]", "quiero hablar con una persona" no detectado).
+- **Fecha y Hora:** 2026-10-02
+- **Proyecto(s):** Backend (msg_ninesys) + Backend (ninesys-api, plantilla de empresa nueva) + datos Dev empresa 208
+- **Archivos Involucrados:**
+  - `src/lib/intentClassifier.js` -- thinkingBudget 0
+  - `src/lib/aiReplyPlanner.js` -- filtro de [cod:X][idCat:X] en el texto saliente (+ 2 tests)
+  - `ninesys-api/public/model/create_new_company_api_emp_N.sql` y `..._postgres.sql` -- agente Ventas
+  - Dev, `api_emp_208.wa_ai_agents` id=2 (respaldo previo: `/root/backup_wa_ai_208_20261002.json` en vps-contabo-dev)
+- **Commits Relacionados:**
+  - msg_ninesys: `e68dc7d` fix(ia) clasificador + códigos
+  - ninesys-api: `40a05b7` fix(plantilla) agente Ventas
+- **Acción Realizada:**
+  1. Caso 3 (el más grave): el clasificador de handoff devolvía `none` para TODO. gemini-2.5-flash razona por defecto y gastaba 11 de los 16 tokens de salida; la respuesta llegaba cortada ("human", finishReason MAX_TOKENS) y el código la descartaba. Nunca se detectaban pedidos de humano ni frustración en ninguna empresa. Fix: `thinkingConfig: { thinkingBudget: 0 }`.
+  2. Caso 2: la IA copiaba "[cod:3][idCat:1]" al cliente pese a la instrucción del contexto. Fix determinístico en aiReplyPlanner (como los demás markers).
+  3. Caso 1: el prompt/KB de la 208 venían de la plantilla de empresa nueva con marcadores "[NOMBRE DE TU EMPRESA]" etc. (alguien escribió el nombre dentro de los corchetes). La plantilla además guardaba los saltos de línea como texto "\n", tenía la frase corrupta "NO crees el presupuestoes desconocido" (original recuperada de scripts/update_sp_ventas_*.sql: "- Si un campo es desconocido...") y una nota de KB que contradecía dar precios del catálogo. Corregidos plantilla (genérica, sin corchetes) y agente de la 208 en Dev (nombre "19 print" de api_empresas).
+- **Inconvenientes y Desafíos:** la plantilla MySQL escapa comillas (\") y la de Postgres no; Postgres necesitó E'' para que \n sea salto real. La empresa se crea sin nombre (registro), por eso la plantilla se dejó genérica en vez de sustituir el nombre al crearla.
+- **Herramienta(s) Utilizada(s):** simulador (sandboxService en el servidor), Edit, python, psql (transacción + ROLLBACK), deploy_whatsapp_dev.sh, deploy_backend_dev.sh.
+- **Resultado:** Éxito (Dev).
+- **Verificación:** clasificador en Dev: "quiero hablar con una persona"/"pásame con un asesor" → human_request; "esto no sirve" → frustrated; "hola buenas"/"cuanto cuesta una franela?" → none. Simulador 208: saludo "Bienvenido a 19 print", precio sin códigos, pedido de humano → would_handoff cliente_solicita (classifier). Sin filas nuevas en wa_messages/wa_send_log/presupuestos. Plantilla Postgres: 187 saltos reales, 0 "\n" literales. 39 tests unitarios OK.
+- **Logro Conseguido:** el bot vuelve a escalar a un asesor cuando el cliente lo pide o se frustra, deja de mostrar referencias internas y de saludar con marcadores.
+- **Observaciones de Gemini:** PRODUCCIÓN sigue con los 3 problemas (mismo código de msg_ninesys; prompt de la 208 en Prod sin revisar) -- requiere orden explícita del usuario. El usuario debe completar desde el simulador los datos reales que se quitaron por ser marcadores vacíos (teléfono, email, Instagram, dirección, ubicación).
+- **Respuesta de Gemini:** Los tres casos diagnosticados con el simulador y corregidos en Desarrollo.
