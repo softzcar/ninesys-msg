@@ -1,0 +1,36 @@
+- **Solicitud del Usuario:** "crear una especie de plataforma de pruebas para el servicio de whatsApp ... dos ventanas de chats, una al lado de la otra ... ir interactuando con ella para ver sus respuestas e ir modificando los prompts ... así como la base de conocimiento" + revisar si la integración MCP dejó obsoletos prompts/KB.
+- **Fecha y Hora:** 2026-10-02
+- **Proyecto(s):** Backend (msg_ninesys) + Frontend (app_multi)
+- **Archivos Involucrados:**
+  - `src/lib/aiReplyPlanner.js` (nuevo) -- interpretación pura de la respuesta IA
+  - `src/services/waManager.js` -- maybeAutoReply delega en el planner (mismo orden de efectos)
+  - `src/services/aiService.js` -- params opcionales history/overrides/ignoreEnabled/isolated/usageProvider/trace
+  - `src/lib/contextEnricher.js` -- traza opcional de la clasificación
+  - `src/services/presupuestoService.js` -- `preview()` solo lectura
+  - `src/services/geminiPricing.js` -- `KNOWN_MODELS`
+  - `src/services/sandboxService.js`, `controllers/aiSandboxController.js`, `middleware/requireModulo.js` (nuevos)
+  - `routes/index.js` -- `/ai/sandbox/:companyId/{message,reset,customers,meta}`
+  - `app.js` -- bodyParser.json 1mb
+  - `test/unit/*` (nuevos, 37 tests)
+- **Commits Relacionados:**
+  - Backend (msg_ninesys, rama feat/baileys-7-upgrade): `a9e5455` refactor(ia) aiReplyPlanner; `dbf4eed` feat(ia) simulador
+  - Frontend (app_multi, rama refactor/modular-routes): `31eeffb` feat(whatsapp) simulador
+- **Acción Realizada:**
+  1. Auditoría: msg_ninesys NO consume el MCP; prompts/KB (wa_ai_settings, wa_ai_agents) + contextEnricher siguen siendo el camino activo. No están obsoletos.
+  2. Se extrajo la interpretación de la respuesta IA (markers, galería, presupuesto, handoff, fallbacks) a un módulo puro compartido por producción y simulador. Test del ejecutor verificado contra el waManager ANTERIOR y el NUEVO (mismo resultado).
+  3. Simulador: turno con el pipeline real, efectos devueltos como acciones ("se escalaría", "se crearía presupuesto"), sin envío ni escritura de conversaciones. Gemini sin circuit breaker global (un fallo del simulador no deja en fallback al bot real). Costo aparte como `gemini_sandbox`.
+  4. Permiso: `requireModulo(1)`, port de `perteneceAModulo()` de ninesys-api.
+  5. Frontend `/whatsapp/simulador`: chat estilo WhatsApp (anónimo / cliente registrado / teléfono), inspector del turno y editor de borrador con diff y guardado en agente o global.
+- **Inconvenientes y Desafíos:**
+  - Un jid sintético con dígitos haría match con un cliente real (`last10DigitsFromJid`): el simulador nunca usa findCustomerByJid con su jid.
+  - El test de integración viejo (`test/integration/flow.test.js`) está atado a MySQL (`mysql2` fijo) y no corre con el Postgres actual; la verificación del ejecutor se hizo con pool falso en test/unit.
+  - La extensión de Chrome no completó la navegación; la prueba visual quedó para el usuario.
+- **Decisión Final y Justificación:** historial/estado de la simulación viajan desde el navegador (servidor sin estado) para no tener que filtrar un jid de prueba en las 29 consultas que leen wa_messages/wa_conversations.
+- **Herramienta(s) Utilizada(s):** Edit/Write, `node --test`, `nuxt build`, ssh, scripts `deploy_whatsapp_dev.sh` y `deploy_frontend_dev.sh` (sin cambio de versión).
+- **Resultado:** Éxito (Dev).
+- **Verificación:**
+  - 37 tests unitarios OK; rutas en local: 401 sin token, 403 vendedor/servicio/otra empresa, 200 admin, 400 validación.
+  - En Dev (ws.nineteengreen.com, PM2 ntmsg-app-dev online, HEAD dbf4eed): 3 turnos reales con la empresa 208 (agente "Ventas", gemini-2.5-flash, ~1.5 s y ~$0.0009 por turno). Conteo ANTES/DESPUÉS idéntico en wa_messages (2702), wa_conversations (158), wa_send_log (249), presupuestos (12), customers (63); única fila nueva: wa_usage_monthly `gemini_sandbox` (3 llamadas).
+- **Logro Conseguido:** Entorno de pruebas del bot sin celular, con la misma lógica que producción y sin riesgo de enviar ni escribir datos reales.
+- **Observaciones de Gemini:** La primera prueba ya mostró problemas reales del bot de la 208 (sin corregir; refinamiento reactivo): (1) muestra al cliente códigos internos "[cod:3][idCat:1]"; (2) saluda con "[19 print ]" entre corchetes; (3) ante "quiero hablar con una persona" el clasificador de handoff devolvió `none` y el escalamiento ocurrió solo por el marker de la IA.
+- **Respuesta de Gemini:** Simulador desplegado en Desarrollo y verificado sin escritura de datos; pendiente la prueba visual en el navegador por parte del usuario.
