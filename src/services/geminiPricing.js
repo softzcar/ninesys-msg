@@ -62,4 +62,7 @@ function costUsd(modelId, usage) {
     ) / 1_000_000;
 }
 
-module.exports = { costUsd };
+// Modelos con precio conocido (el simulador del bot sólo acepta éstos en el borrador).
+const KNOWN_MODELS = Object.keys(PRICE_PER_MILLION);
+
+module.exports = { costUsd, KNOWN_MODELS };

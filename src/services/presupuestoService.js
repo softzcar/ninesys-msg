@@ -376,4 +376,50 @@ async function submit({ idEmpresa, pool, jid, data, clientPhone = '', existingCu
     }
 }
 
-module.exports = { submit };
+/**
+ * Vista previa SIN escritura del presupuesto (simulador del bot): aplica el
+ * mismo guard de catálogo, la resolución de talla/tela y la corrección del
+ * recargo XL del camino local, y calcula el total. No crea cliente ni
+ * presupuesto ni llama al endpoint central (que en producción es el camino
+ * primario y puede recalcular), por eso es una estimación.
+ *
+ * @returns {Promise<{ok:boolean, reason:string|null, items:Array, total:number, correccionesXL:Array}>}
+ */
+async function preview({ idEmpresa, pool, data }) {
+    const invalidItems = (data?.items || []).filter(
+        (item) => !item.idCategory || Number(item.idCategory) === 0
+    );
+    if (invalidItems.length > 0) {
+        return {
+            ok: false,
+            reason: 'invalid_catalog',
+            items: data.items || [],
+            invalidItems: invalidItems.map((i) => i.productoNombre),
+            total: 0,
+            correccionesXL: [],
+        };
+    }
+    try {
+        const resolved = await resolveItemIds(idEmpresa, data?.items || []);
+        const corrected = await corregirRecargoXL(pool, idEmpresa, resolved);
+        const correccionesXL = corrected
+            .map((item, i) => ({ item, before: resolved[i] }))
+            .filter(({ item, before }) => Number(item.precio) !== Number(before.precio))
+            .map(({ item, before }) => ({
+                productoNombre: item.productoNombre,
+                talla: item.talla,
+                precioOriginal: Number(before.precio),
+                precioCorregido: Number(item.precio),
+            }));
+        const total = corrected.reduce(
+            (sum, item) => sum + (Number(item.precio) || 0) * (Number(item.cantidad) || 0),
+            0
+        );
+        return { ok: true, reason: null, items: corrected, total, correccionesXL };
+    } catch (err) {
+        log.warn({ idEmpresa, err: err.message }, 'presupuestoService.preview falló');
+        return { ok: false, reason: 'error', error: err.message, items: data?.items || [], total: 0, correccionesXL: [] };
+    }
+}
+
+module.exports = { submit, preview };

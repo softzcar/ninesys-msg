@@ -1000,7 +1000,7 @@ async function fetchProducts(idEmpresa, searchTerm, jid = null) {
  * @param {string}  [lastUserMessage]  - último mensaje del cliente (para búsqueda de productos)
  * @returns {Promise<string>}          - texto a añadir al prompt (puede ser '')
  */
-async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [], registeredPhone = null, forceGallery = false } = {}) {
+async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUrls = [], jid = null, recentUserTexts = [], registeredPhone = null, forceGallery = false, trace = null } = {}) {
     const startTime = Date.now();
     const sections = [];
 
@@ -1044,6 +1044,9 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
             () => log.warn({ idEmpresa }, 'enrichContext: timeout esperando telas')
         ),
     ]);
+
+    // Traza opcional para el simulador del bot (no afecta el resultado).
+    if (trace) trace.classification = classification;
 
     const isCompraDirecta = classification.isCompraDirecta;
     const isGalleryRequest = classification.wantsGallery || (excludeGalleryUrls.length > 0 && !lastUserMessage);
@@ -1196,6 +1199,7 @@ async function enrichContext(idEmpresa, lastUserMessage = '', { excludeGalleryUr
     }
 
     log.info({ idEmpresa, sections: sections.length, elapsed }, 'enrichContext: COMPLETADO');
+    if (trace) trace.sectionsCount = sections.length;
 
     if (!sections.length) {
         log.warn({ idEmpresa, elapsed }, 'enrichContext: retornando contexto vacío');

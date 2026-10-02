@@ -102,6 +102,8 @@ const {
 const authController = require("../controllers/authController");
 const authenticateToken = require("../middleware/authenticateToken");
 const authenticateSendCustom = require("../middleware/authenticateSendCustom");
+const requireModulo = require("../middleware/requireModulo");
+const aiSandbox = require("../controllers/aiSandboxController");
 
 // Ruta principal
 router.get("/", (req, res) => {
@@ -301,6 +303,16 @@ router.post("/ai/agents/:companyId", authenticateToken, createAiAgent);
 router.put("/ai/agents/:companyId/:agentId", authenticateToken, updateAiAgent);
 router.delete("/ai/agents/:companyId/:agentId", authenticateToken, deleteAiAgent);
 router.post("/conversations/:companyId/:jid/agent", authenticateToken, assignAgentToConversation);
+
+/**
+ * Simulador del bot (sandbox): pipeline real de la IA sin enviar nada por
+ * WhatsApp ni escribir conversaciones. Solo módulo Administración (1).
+ */
+const sandboxAuth = [authenticateToken, requireModulo(1)];
+router.post("/ai/sandbox/:companyId/message", ...sandboxAuth, aiSandbox.sandboxMessage);
+router.post("/ai/sandbox/:companyId/reset", ...sandboxAuth, aiSandbox.sandboxReset);
+router.get("/ai/sandbox/:companyId/customers", ...sandboxAuth, aiSandbox.sandboxCustomers);
+router.get("/ai/sandbox/:companyId/meta", ...sandboxAuth, aiSandbox.sandboxMeta);
 
 /**
  * STT — Configuración y consumo de transcripciones (migración 009)

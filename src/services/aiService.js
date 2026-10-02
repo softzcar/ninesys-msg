@@ -138,9 +138,13 @@ function withTimeout(promise, ms) {
 /**
  * Llama a Gemini con timeout + reintentos + circuit breaker.
  * Lanza el último error si todos los intentos fallan.
+ *
+ * `useBreaker: false` (simulador del bot) conserva timeout y reintentos pero
+ * no lee ni altera el breaker global: los errores de una prueba no deben
+ * dejar en fallback al bot real de todas las empresas.
  */
-async function callGeminiWithResilience(client, request) {
-    if (!breakerCanPass()) {
+async function callGeminiWithResilience(client, request, { useBreaker = true } = {}) {
+    if (useBreaker && !breakerCanPass()) {
         const e = new Error('circuit breaker abierto');
         e.code = 'CIRCUIT_OPEN';
         throw e;
@@ -154,7 +158,7 @@ async function callGeminiWithResilience(client, request) {
                 client.models.generateContent(request),
                 GEMINI_TIMEOUT_MS
             );
-            breakerOnSuccess();
+            if (useBreaker) breakerOnSuccess();
             return res;
         } catch (e) {
             lastErr = e;
@@ -170,7 +174,7 @@ async function callGeminiWithResilience(client, request) {
             await sleep(base + jitter);
         }
     }
-    breakerOnFailure();
+    if (useBreaker) breakerOnFailure();
     throw lastErr;
 }
 
@@ -570,17 +574,31 @@ function buildSystemInstruction(settings, dynamicContext = '', extraSystemContex
  *                                              y config del agente en lugar de wa_ai_settings.
  * @param {string}  [params.extraSystemContext] - texto extra que se añade al final del
  *                                              system prompt (útil para instrucciones de retry)
+ *
+ * Parámetros del simulador del bot (opcionales; sin ellos el comportamiento es el de siempre):
+ * @param {Array}   [params.history]       filas {from_me, body, type} — reemplaza loadHistory
+ * @param {object}  [params.overrides]     borrador {systemPrompt, knowledgeBase, model,
+ *                                         temperature, maxTokens}; null/undefined = no override
+ * @param {boolean} [params.ignoreEnabled] responder aunque la IA del tenant esté apagada
+ * @param {boolean} [params.isolated]      llamar a Gemini sin tocar el circuit breaker global
+ * @param {string}  [params.usageProvider] etiqueta de costo en wa_usage_monthly (default 'gemini')
+ * @param {object}  [params.trace]         objeto que se rellena con el detalle de la llamada
  * @returns {Promise<{text:string, model:string, agentId:number|null}|null>}
  *          null si IA está deshabilitada en el tenant o si el modelo no
  *          devolvió texto.
  */
-async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa, extraSystemContext = '', excludeGalleryUrls = [], registeredPhone = null, forceGallery = false }) {
+async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimit = DEFAULT_HISTORY_LIMIT, agentId, idEmpresa, extraSystemContext = '', excludeGalleryUrls = [], registeredPhone = null, forceGallery = false, history: historyOverride = null, overrides = null, ignoreEnabled = false, isolated = false, usageProvider = 'gemini', trace = null }) {
     const settings = await loadSettings(pool);
-    if (!settings || !settings.enabled) return null;
+    if (!settings) {
+        if (trace) trace.error = 'settings_missing';
+        return null;
+    }
+    if (!settings.enabled && !ignoreEnabled) return null;
 
     // Sólo Gemini está cableado en Fase 8. Otros providers → no-op silencioso.
     if (settings.provider !== 'gemini') {
         log.warn({ provider: settings.provider }, 'provider no cableado, omitiendo respuesta');
+        if (trace) trace.error = 'provider_not_supported';
         return null;
     }
 
@@ -595,18 +613,47 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
         // Tabla wa_ai_agents puede no existir en tenants sin migrar → fallback silencioso
     }
 
-    const effectiveModel = agent?.model || settings.model;
-    const effectiveTemp = agent ? agent.temperature : settings.temperature;
-    const effectiveMaxTokens = agent ? agent.maxTokens : settings.maxTokens;
+    let effectiveModel = agent?.model || settings.model;
+    let effectiveTemp = agent ? agent.temperature : settings.temperature;
+    let effectiveMaxTokens = agent ? agent.maxTokens : settings.maxTokens;
     // Fallback campo a campo: si el agente tiene el campo NULL, usa wa_ai_settings
-    const effectiveSettings = agent
+    let effectiveSettings = agent
         ? {
             systemPrompt: agent.systemPrompt || settings.systemPrompt,
             knowledgeBase: agent.knowledgeBase || settings.knowledgeBase,
         }
         : settings;
 
-    const history = await loadHistory(pool, jid, historyLimit);
+    // Borrador del simulador: se aplica DESPUÉS del fallback agente→settings.
+    // null/undefined = sin override; '' = vacío explícito.
+    if (overrides) {
+        effectiveSettings = {
+            systemPrompt: overrides.systemPrompt != null ? overrides.systemPrompt : effectiveSettings.systemPrompt,
+            knowledgeBase: overrides.knowledgeBase != null ? overrides.knowledgeBase : effectiveSettings.knowledgeBase,
+        };
+        if (overrides.model != null) effectiveModel = overrides.model;
+        if (overrides.temperature != null) effectiveTemp = Number(overrides.temperature);
+        if (overrides.maxTokens != null) effectiveMaxTokens = Number(overrides.maxTokens);
+    }
+
+    if (trace) {
+        trace.agent = agent ? { id: agent.id, name: agent.name } : null;
+        trace.settingsSource = overrides ? 'override' : (agent ? 'agent' : 'settings');
+        trace.aiEnabled = settings.enabled;
+        trace.effective = {
+            model: effectiveModel,
+            temperature: effectiveTemp,
+            maxTokens: effectiveMaxTokens,
+            fieldSources: {
+                systemPrompt: overrides?.systemPrompt != null ? 'override'
+                    : (agent?.systemPrompt ? 'agent' : 'settings'),
+                knowledgeBase: overrides?.knowledgeBase != null ? 'override'
+                    : (agent?.knowledgeBase ? 'agent' : 'settings'),
+            },
+        };
+    }
+
+    const history = historyOverride || await loadHistory(pool, jid, historyLimit);
     if (!history.length && !incomingText) return null;
 
     // Contexto dinámico (horario, y en fases futuras: precios, pedidos, saldo).
@@ -621,7 +668,9 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
             .filter((m) => !m.from_me && m.body)
             .slice(-4)
             .map((m) => m.body);
-        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid, recentUserTexts, registeredPhone, forceGallery })
+        const enrichStartedAt = Date.now();
+        const enrichTrace = trace ? {} : null;
+        dynamicContext = await contextEnricher.enrichContext(idEmpresa, incomingText, { excludeGalleryUrls, jid: resolvedJid || jid, recentUserTexts, registeredPhone, forceGallery, trace: enrichTrace })
             .catch((err) => {
                 log.warn({ err, jid }, 'contextEnricher falló (no crítico)');
                 return '';
@@ -629,10 +678,28 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
         if (dynamicContext) {
             log.debug({ jid, idEmpresa, contextLength: dynamicContext.length }, 'aiService: contexto dinámico inyectado');
         }
+        if (trace) {
+            trace.enrichMs = Date.now() - enrichStartedAt;
+            trace.enrich = enrichTrace;
+        }
     }
 
     const contents = buildContents(history);
     const systemInstruction = buildSystemInstruction(effectiveSettings, dynamicContext, extraSystemContext);
+
+    if (trace) {
+        trace.historyCount = history.length;
+        trace.contents = contents;
+        trace.dynamicContext = dynamicContext;
+        trace.extraSystemContext = extraSystemContext;
+        trace.systemInstruction = systemInstruction;
+        trace.systemParts = {
+            prompt: effectiveSettings.systemPrompt || '',
+            knowledgeBase: effectiveSettings.knowledgeBase || null,
+            dynamic: dynamicContext,
+            extra: extraSystemContext,
+        };
+    }
 
     let response;
     const startedAt = Date.now();
@@ -651,15 +718,21 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
                 // del presupuesto de maxOutputTokens, dejando 0 tokens para la respuesta.
                 thinkingConfig: { thinkingBudget: 0 },
             },
-        });
+        }, { useBreaker: !isolated });
         log.info(
             { jid, model: effectiveModel, agentId: agent?.id || null, durMs: Date.now() - startedAt },
             'Gemini ok'
         );
         const geminiCost = geminiPricing.costUsd(effectiveModel, response?.usageMetadata);
-        usageStore.addUsage(pool, 'gemini', geminiCost, 1).catch((err) =>
+        usageStore.addUsage(pool, usageProvider, geminiCost, 1).catch((err) =>
             log.warn({ err }, 'usageStore.addUsage gemini falló (no crítico)')
         );
+        if (trace) {
+            trace.geminiMs = Date.now() - startedAt;
+            trace.usageMetadata = response?.usageMetadata || null;
+            trace.costUsd = geminiCost;
+            trace.finishReason = response?.candidates?.[0]?.finishReason ?? null;
+        }
         log.debug(
             { jid, model: effectiveModel, usage: response?.usageMetadata, cost_usd: geminiCost },
             'Gemini usage contabilizado'
@@ -669,11 +742,19 @@ async function generateReply({ pool, jid, resolvedJid, incomingText, historyLimi
             { err: e, jid, durMs: Date.now() - startedAt, code: e.code || null },
             'Gemini falló (tras retries/breaker)'
         );
+        if (trace) {
+            trace.geminiMs = Date.now() - startedAt;
+            trace.error = `gemini_failed: ${e.message}`;
+        }
         return { text: null, error: 'gemini_failed', model: effectiveModel, agentId: agent?.id || null };
     }
 
     const text = (response?.text || '').trim();
     const functionCalls = response?.functionCalls || [];
+    if (trace) {
+        trace.rawText = text;
+        trace.functionCalls = functionCalls.map((fc) => ({ name: fc.name, args: fc.args }));
+    }
 
     // Si Gemini no devolvió texto ni llamadas a función → nada útil que enviar.
     if (!text && !functionCalls.length) {

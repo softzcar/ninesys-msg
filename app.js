@@ -23,7 +23,9 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Middleware para parsear el cuerpo de las peticiones
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+// 1mb: el simulador del bot envía historial + borrador de prompt/KB, que
+// supera el default de 100kb en sesiones largas.
+app.use(bodyParser.json({ limit: '1mb' }));
 
 // Request ID + child logger por request (Fase 9.1).
 // IMPORTANTE: debe ir DESPUÉS de bodyParser para que ya tengamos req.body
